@@ -209,7 +209,7 @@ async fn execute_shindan(
                 tab.set_content(&html).await?;
 
                 // Check chart.js logic
-                if html.contains("chart.js") || html.contains("chartType") {
+                if html.contains("canvas_block") {
                     time::sleep(Duration::from_secs(2)).await;
                 }
 
