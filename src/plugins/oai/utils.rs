@@ -12,14 +12,11 @@ pub static RE_API: OnceLock<Regex> = OnceLock::new();
 pub static RE_IDX: OnceLock<Regex> = OnceLock::new();
 
 pub const MODEL_KEYWORDS: &[&str] = &[
-    "gpt-5.2",
-    "claude-haiku-4-5",
-    "claude-sonnet-4-5",
-    "claude-opus-4-5",
-    "gemini-3",
-    "grok-4",
-    "banana",
-    "sora-2",
+    "gpt-5.5",
+    "gpt-image",
+    "claude-opus-4",
+    "gemini-3.1",
+    "deepseek-v4",
 ];
 
 pub fn normalize(s: &str) -> String {
