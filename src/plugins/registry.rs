@@ -34,4 +34,5 @@ register_plugins!(
     oai {
         on_init: Some(oai::init)
     },
+    help,
 );
