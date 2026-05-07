@@ -32,6 +32,8 @@ pub struct BotStatus {
 /// 注意：event 字段直接持有 EventType，支持在插件链中移交所有权从而实现修改。
 /// Context 实现了 Clone（因为 EventType 包含的 simd_json::OwnedValue 实现了 Clone），
 /// 但在插件流水线中通常通过 Move 传递，避免了 Deep Copy。
+///
+/// 优化：`config_path` 与 `bot` 改为 Arc 共享，避免每事件克隆字符串与 BotStatus 内部多个 String。
 #[derive(Clone)]
 pub struct Context {
     pub event: EventType, // 直接持有，不再使用 Arc
@@ -40,8 +42,8 @@ pub struct Context {
     pub db: DatabaseConnection,
     pub scheduler: Arc<Scheduler>,
     pub matcher: Arc<Matcher>,
-    pub config_path: String,
-    pub bot: BotStatus,
+    pub config_path: Arc<str>,
+    pub bot: Arc<BotStatus>,
 }
 
 impl Context {

@@ -43,7 +43,7 @@ pub fn entry(
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
-    config_path: String,
+    config_path: Arc<str>,
 ) -> BoxFuture<'static, ()> {
     Box::pin(async move {
         run_bot_loop(
@@ -58,19 +58,21 @@ pub fn entry(
     })
 }
 
-/// OneBot 协议的主循环逻辑
+/// OneBot 协议的主循环逻辑（重连退避：3s 起，指数翻倍，封顶 60s；连接成功重置）
 pub async fn run_bot_loop(
     bot_config: BotConfig,
     global_config: Arc<RwLock<AppConfig>>,
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
-    config_path: String,
+    config_path: Arc<str>,
 ) {
     let bot_url = bot_config
         .url
         .clone()
         .unwrap_or_else(|| "Unknown".to_string());
+    let mut backoff = Duration::from_secs(3);
+    let max_backoff = Duration::from_secs(60);
     loop {
         match connect_and_listen(
             &bot_config,
@@ -82,12 +84,15 @@ pub async fn run_bot_loop(
         )
         .await
         {
-            Ok(()) => warn!(target: "Bot", "Bot [{}] 连接断开，3秒后重连...", bot_url),
+            Ok(()) => {
+                warn!(target: "Bot", "Bot [{}] 连接断开，{:?} 后重连...", bot_url, backoff);
+            }
             Err(e) => {
-                error!(target: "Bot", "Bot [{}] 连接失败: {}。3秒后重试...", bot_url, e)
+                error!(target: "Bot", "Bot [{}] 连接失败: {}。{:?} 后重试...", bot_url, e, backoff);
             }
         }
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(max_backoff);
     }
 }
 
@@ -97,7 +102,7 @@ async fn connect_and_listen(
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
-    config_path: String,
+    config_path: Arc<str>,
 ) -> Result<(), BotError> {
     let url = config
         .url
@@ -123,15 +128,17 @@ async fn connect_and_listen(
     let writer: LockedWriter = Arc::new(AsyncMutex::new(Box::new(write_half)));
     let matcher = Arc::new(Matcher::new());
 
-    // 初始化 Bot 状态容器
-    let bot_status = Arc::new(RwLock::new(BotStatus {
+    // 初始化 Bot 状态容器：外层 RwLock 保护 Arc<BotStatus>，
+    // 仅在登录后做一次原子指针替换；之后所有事件分发都只 clone Arc，无需深拷贝 BotStatus。
+    let initial_status = Arc::new(BotStatus {
         adapter: "onebot".to_string(),
-        platform: "qq".to_string(), // 默认为 QQ，后续可根据协议细分
+        platform: "qq".to_string(),
         login_user: LoginUser {
             id: "0".to_string(),
             ..Default::default()
         },
-    }));
+    });
+    let bot_status: Arc<RwLock<Arc<BotStatus>>> = Arc::new(RwLock::new(initial_status));
 
     // 启动后台任务获取登录信息
     {
@@ -149,6 +156,7 @@ async fn connect_and_listen(
             tokio::time::sleep(Duration::from_secs(1)).await;
 
             // 构建临时上下文用于调用 API
+            let initial_bot = status_ref.read().unwrap().clone();
             let ctx = Context {
                 event: EventType::Init,
                 config: config_ref,
@@ -157,30 +165,40 @@ async fn connect_and_listen(
                 scheduler: scheduler_ref,
                 matcher: matcher_ref,
                 config_path: config_path_ref,
-                bot: status_ref.read().unwrap().clone(),
+                bot: initial_bot,
             };
 
             match api::get_login_info(&ctx, writer_ref.clone()).await {
                 Ok(info) => {
-                    // 更新状态时使用代码块限制锁的生命周期
-                    // 确保 guard 在 await 之前被 drop
-                    let updated_bot_status = {
-                        let mut guard = status_ref.write().unwrap();
-                        guard.login_user.id = info.user_id.to_string();
-                        guard.login_user.name = Some(info.nickname.clone());
-                        guard.login_user.nick = Some(info.nickname);
-                        guard.login_user.avatar = Some(format!(
-                            "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
-                            info.user_id
-                        ));
-                        info!(target: "Bot", "已获取登录信息: {} ({})", guard.login_user.name.as_deref().unwrap_or("Unknown"), guard.login_user.id);
+                    let new_bot = Arc::new(BotStatus {
+                        adapter: "onebot".to_string(),
+                        platform: "qq".to_string(),
+                        login_user: LoginUser {
+                            id: info.user_id.to_string(),
+                            name: Some(info.nickname.clone()),
+                            nick: Some(info.nickname),
+                            avatar: Some(format!(
+                                "https://q1.qlogo.cn/g?b=qq&nk={}&s=640",
+                                info.user_id
+                            )),
+                        },
+                    });
 
-                        guard.clone()
-                    }; // 锁在这里释放
+                    info!(
+                        target: "Bot",
+                        "已获取登录信息: {} ({})",
+                        new_bot.login_user.name.as_deref().unwrap_or("Unknown"),
+                        new_bot.login_user.id
+                    );
+
+                    {
+                        let mut guard = status_ref.write().unwrap();
+                        *guard = new_bot.clone();
+                    }
 
                     // 构造新的 Context 包含更新后的 Bot 信息
                     let mut new_ctx = ctx;
-                    new_ctx.bot = updated_bot_status;
+                    new_ctx.bot = new_bot;
 
                     // 触发插件系统的 Connected 钩子
                     if let Err(e) = plugins::do_connected(new_ctx, writer_ref).await {
@@ -206,12 +224,10 @@ async fn connect_and_listen(
                 let save_lock = save_lock.clone();
                 let config_path = config_path.clone();
                 let matcher = matcher.clone();
-                let bot_status_ref = bot_status.clone();
+                // 仅克隆 Arc 指针，不深拷贝 BotStatus
+                let current_status = bot_status.read().unwrap().clone();
 
                 tokio::spawn(async move {
-                    // 获取当前的 bot 状态快照
-                    let current_status = bot_status_ref.read().unwrap().clone();
-
                     if let Err(e) = process_frame(
                         &mut data,
                         writer,
@@ -245,9 +261,9 @@ pub async fn process_frame(
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
-    config_path: String,
+    config_path: Arc<str>,
     matcher: Arc<Matcher>,
-    bot: BotStatus,
+    bot: Arc<BotStatus>,
 ) -> Result<(), BotError> {
     let event: Event = match simd_json::to_owned_value(data) {
         Ok(v) => v,
@@ -326,10 +342,9 @@ where
         message,
     };
 
-    let json_str = simd_json::to_string(&params)?;
-    let mut json_bytes = json_str.into_bytes();
+    // 直接将 Serialize 转为 OwnedValue，避免先序列化为 JSON 字符串再反序列化的双重往返
     let params_val =
-        simd_json::to_owned_value(&mut json_bytes).map_err(|e| Box::new(e) as BotError)?;
+        simd_json::serde::to_owned_value(params).map_err(|e| Box::new(e) as BotError)?;
 
     // 捕获原始事件以便在 BeforeSend 中传递
     let original_event = match &ctx.event {

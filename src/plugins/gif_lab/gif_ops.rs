@@ -248,7 +248,7 @@ fn encode_frames_to_b64(frames: Vec<Frame>) -> Result<String> {
     {
         let mut encoder = GifEncoder::new(&mut buffer);
         encoder.set_repeat(Repeat::Infinite)?;
-        encoder.encode_frames(frames.into_iter())?;
+        encoder.encode_frames(frames)?;
     }
     Ok(general_purpose::STANDARD.encode(buffer.get_ref()))
 }

@@ -51,7 +51,7 @@ pub fn entry(
     db: DatabaseConnection,
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
-    config_path: String,
+    config_path: Arc<str>,
 ) -> BoxFuture<'static, ()> {
     Box::pin(async move {
         info!(target: "Console", "已启动控制台模式。请输入指令 (例如: /echo hello)");
@@ -64,8 +64,8 @@ pub fn entry(
         let writer: LockedWriter = Arc::new(AsyncMutex::new(Box::new(ConsoleSink)));
         let matcher = Arc::new(Matcher::new());
 
-        // 定义模拟 Bot 信息
-        let bot_status = BotStatus {
+        // 定义模拟 Bot 信息（一次构造，多事件共享）
+        let bot_status = Arc::new(BotStatus {
             adapter: "console".to_string(),
             platform: "console".to_string(),
             login_user: LoginUser {
@@ -74,7 +74,7 @@ pub fn entry(
                 nick: Some("ConsoleBot".to_string()),
                 avatar: None,
             },
-        };
+        });
 
         // 循环读取标准输入
         while let Ok(Some(line)) = reader.next_line().await {

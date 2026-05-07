@@ -131,6 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let save_lock = Arc::new(AsyncMutex::new(()));
 
     // === 触发插件初始化钩子 (生命周期: init) ===
+    let shared_config_path: Arc<str> = Arc::from(config_path);
+    let system_bot: Arc<BotStatus> = Arc::new(BotStatus {
+        adapter: "system".to_string(),
+        platform: "internal".to_string(),
+        login_user: Default::default(),
+    });
     let init_ctx = Context {
         event: EventType::Init,
         config: shared_config.clone(),
@@ -138,12 +144,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         db: db.clone(),
         scheduler: scheduler.clone(),
         matcher: Arc::new(Matcher::new()),
-        config_path: config_path.to_string(),
-        bot: BotStatus {
-            adapter: "system".to_string(),
-            platform: "internal".to_string(),
-            login_user: Default::default(),
-        },
+        config_path: shared_config_path.clone(),
+        bot: system_bot.clone(),
     };
     plugins::do_init(init_ctx).await?;
     // ==========================================
@@ -190,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let bot_shared_cfg = shared_config.clone();
         let bot_scheduler = scheduler.clone();
         let bot_save_lock = save_lock.clone();
-        let bot_config_path = config_path.to_string();
+        let bot_config_path = shared_config_path.clone();
         let bot_db = db.clone();
         let handler = adapter.handler;
         let protocol_name = bot_conf.protocol.clone();

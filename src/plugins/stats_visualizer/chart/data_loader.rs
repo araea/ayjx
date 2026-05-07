@@ -90,7 +90,7 @@ pub async fn fetch_line_data(
         }
 
         // 按总消息量降序排序，并取前10名
-        raw_series.sort_by(|a, b| b.1.cmp(&a.1));
+        raw_series.sort_by_key(|b| std::cmp::Reverse(b.1));
         if raw_series.len() > 10 {
             raw_series.truncate(10);
         }
@@ -267,7 +267,7 @@ pub async fn fetch_bar_data(
             })
             .collect();
 
-        bar_data.sort_by(|a, b| b.value.cmp(&a.value));
+        bar_data.sort_by_key(|b| std::cmp::Reverse(b.value));
 
         return Ok(bar_data);
     }

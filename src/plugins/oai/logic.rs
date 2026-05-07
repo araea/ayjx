@@ -762,7 +762,7 @@ pub async fn execute(
             }
             let mut html_parts = Vec::new();
             for (model, mut agents) in groups {
-                agents.sort_by(|a, b| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()));
+                agents.sort_by_key(|a| a.1.name.to_lowercase());
                 html_parts.push(format!(r#"<div class="model-group"><div class="model-header"><span>📦 {}</span><span class="model-count">{}</span></div><div class="agent-grid">"#, model, agents.len()));
                 for (real_idx, a) in agents {
                     let desc_display = if !a.description.is_empty() {

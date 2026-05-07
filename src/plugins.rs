@@ -99,35 +99,30 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
         plugins.len()
     );
 
-    for plugin in plugins {
-        let is_enabled = {
-            let guard = ctx.config.read().unwrap();
-            guard
-                .plugins
-                .get(plugin.name)
-                .and_then(|v| v.get("enabled"))
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false)
-        };
+    // 一次性快照所有插件的 enabled 标记，避免每个插件单独锁
+    let enabled_set = collect_enabled_set(&ctx);
 
-        if !is_enabled {
+    let system_bot: Arc<BotStatus> = Arc::new(BotStatus {
+        adapter: "system".to_string(),
+        platform: "internal".to_string(),
+        login_user: Default::default(),
+    });
+
+    for plugin in plugins {
+        if !enabled_set[plugin.name] {
             continue;
         }
 
         if let Some(init_fn) = plugin.on_init {
             let init_ctx = Context {
-                event: EventType::Init, // 移除 Arc
+                event: EventType::Init,
                 config: ctx.config.clone(),
                 config_save_lock: ctx.config_save_lock.clone(),
                 db: ctx.db.clone(),
                 scheduler: ctx.scheduler.clone(),
                 matcher: Arc::new(Matcher::new()),
                 config_path: ctx.config_path.clone(),
-                bot: BotStatus {
-                    adapter: "system".to_string(),
-                    platform: "internal".to_string(),
-                    login_user: Default::default(),
-                },
+                bot: system_bot.clone(),
             };
 
             // 执行初始化
@@ -146,22 +141,60 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
     Ok(())
 }
 
+/// 在单次读锁下采集所有插件的 enabled 标记，避免每事件多次加锁
+fn collect_enabled_set(ctx: &Context) -> EnabledSet {
+    let plugins = get_plugins();
+    let guard = ctx.config.read().unwrap();
+    let mut set = EnabledSet::with_capacity(plugins.len());
+    for p in plugins {
+        let enabled = guard
+            .plugins
+            .get(p.name)
+            .and_then(|v| v.get("enabled"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        set.insert(p.name, enabled);
+    }
+    set
+}
+
+/// 轻量级 enabled 标记表：保持插件名指针稳定，按 &str 索引
+struct EnabledSet {
+    entries: Vec<(&'static str, bool)>,
+}
+
+impl EnabledSet {
+    fn with_capacity(cap: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(cap),
+        }
+    }
+    fn insert(&mut self, name: &'static str, enabled: bool) {
+        self.entries.push((name, enabled));
+    }
+}
+
+impl std::ops::Index<&str> for EnabledSet {
+    type Output = bool;
+    fn index(&self, name: &str) -> &bool {
+        for (n, v) in &self.entries {
+            if *n == name {
+                return v;
+            }
+        }
+        &false
+    }
+}
+
 /// 当 Bot 连接建立后触发（用于注册定时任务或主动操作）
 pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
-    for plugin in plugins {
-        let is_enabled = {
-            let guard = ctx.config.read().unwrap();
-            guard
-                .plugins
-                .get(plugin.name)
-                .and_then(|v| v.get("enabled"))
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false)
-        };
+    // 一次性快照启用集合
+    let enabled_set = collect_enabled_set(&ctx);
 
-        if !is_enabled {
+    for plugin in plugins {
+        if !enabled_set[plugin.name] {
             continue;
         }
 
@@ -177,22 +210,16 @@ pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), Plug
 }
 
 /// 运行插件流水线
+///
+/// 优化点：单次拿读锁完成所有插件 enabled 检查，避免 N 次锁竞争。
 pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
     let plugins = get_plugins();
 
-    for plugin in plugins {
-        // 直接在循环内获取读锁进行轻量检查，避免为每个事件创建 HashSet
-        let is_enabled = {
-            let config_guard = ctx.config.read().unwrap();
-            config_guard
-                .plugins
-                .get(plugin.name)
-                .and_then(|v| v.get("enabled"))
-                .and_then(|x| x.as_bool())
-                .unwrap_or(false)
-        };
+    // 一次性快照所有插件的 enabled 标记，避免每个插件单独锁
+    let enabled_set = collect_enabled_set(&ctx);
 
-        if !is_enabled {
+    for plugin in plugins {
+        if !enabled_set[plugin.name] {
             continue;
         }
 

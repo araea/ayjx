@@ -15,7 +15,7 @@ pub type AdapterHandler = fn(
     DatabaseConnection,
     Arc<Scheduler>,
     Arc<AsyncMutex<()>>,
-    String,
+    Arc<str>,
 ) -> BoxFuture<'static, ()>;
 
 /// 适配器定义

@@ -141,6 +141,8 @@ pub fn handle(
 
 /// 将 OneBot 消息链转换为人类可读的字符串
 fn format_message(msg_val: Option<&OwnedValue>) -> String {
+    use std::fmt::Write as _;
+
     let val = match msg_val {
         Some(v) => v,
         None => return String::new(),
@@ -153,7 +155,8 @@ fn format_message(msg_val: Option<&OwnedValue>) -> String {
 
     // 2. 消息段数组情况
     if let Some(arr) = val.as_array() {
-        let mut result = String::new();
+        // 预分配避免增长再分配；多数消息长度有限
+        let mut result = String::with_capacity(64);
         for seg in arr {
             let type_ = seg.get_str("type").unwrap_or("unknown");
             let data = seg.get("data");
@@ -165,15 +168,21 @@ fn format_message(msg_val: Option<&OwnedValue>) -> String {
                     }
                 }
                 "at" => {
-                    let qq = data
-                        .and_then(|d| {
-                            d.get_str("qq")
-                                .map(|s| s.to_string())
-                                .or_else(|| d.get_i64("qq").map(|i| i.to_string()))
-                                .or_else(|| d.get_u64("qq").map(|i| i.to_string()))
-                        })
-                        .unwrap_or_else(|| "Unknown".to_string());
-                    result.push_str(&format!(" [@{}] ", qq));
+                    result.push_str(" [@");
+                    if let Some(d) = data {
+                        if let Some(s) = d.get_str("qq") {
+                            result.push_str(s);
+                        } else if let Some(i) = d.get_i64("qq") {
+                            let _ = write!(result, "{}", i);
+                        } else if let Some(i) = d.get_u64("qq") {
+                            let _ = write!(result, "{}", i);
+                        } else {
+                            result.push_str("Unknown");
+                        }
+                    } else {
+                        result.push_str("Unknown");
+                    }
+                    result.push_str("] ");
                 }
                 "face" => result.push_str(" [表情] "),
                 "image" => {
@@ -207,7 +216,11 @@ fn format_message(msg_val: Option<&OwnedValue>) -> String {
                 "file" => result.push_str(" [文件] "),
                 "share" => result.push_str(" [分享] "),
                 "location" => result.push_str(" [位置] "),
-                other => result.push_str(&format!(" [{}] ", other)),
+                other => {
+                    result.push_str(" [");
+                    result.push_str(other);
+                    result.push_str("] ");
+                }
             }
         }
         return result;

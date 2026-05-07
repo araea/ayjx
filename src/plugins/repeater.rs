@@ -40,12 +40,33 @@ struct ChannelState {
     repeated: bool,
     times: usize,
     last_user_id: String,
+    last_active: u64,
 }
 
 static STATES: OnceLock<Mutex<HashMap<String, ChannelState>>> = OnceLock::new();
 
 fn get_state_lock() -> &'static Mutex<HashMap<String, ChannelState>> {
     STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// 长期运行的 Bot 中频道数量可能膨胀。定期清理旧条目以防内存泄漏：
+// - 触发条件：HashMap 大小超过 MAX_CHANNELS
+// - 策略：移除空闲时长超过 IDLE_TIMEOUT_SECS 的频道
+const MAX_CHANNELS: usize = 4096;
+const IDLE_TIMEOUT_SECS: u64 = 60 * 60; // 1 小时
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn maybe_evict(map: &mut HashMap<String, ChannelState>, now: u64) {
+    if map.len() <= MAX_CHANNELS {
+        return;
+    }
+    map.retain(|_, st| now.saturating_sub(st.last_active) < IDLE_TIMEOUT_SECS);
 }
 
 // ================= 逻辑实现 =================
@@ -94,7 +115,10 @@ pub fn handle(
 
             let should_repeat = {
                 let mut states = get_state_lock().lock().unwrap();
+                let now = now_secs();
+                maybe_evict(&mut states, now);
                 let state = states.entry(channel_id.clone()).or_default();
+                state.last_active = now;
 
                 if state.content == content {
                     // 只有不同人发送相同内容才计数
@@ -144,9 +168,12 @@ pub fn handle(
             let bot_marker = "<BOT_SELF>".to_string();
 
             let mut states = get_state_lock().lock().unwrap();
+            let now = now_secs();
+            maybe_evict(&mut states, now);
             let state = states.entry(channel_id).or_default();
 
             state.repeated = true;
+            state.last_active = now;
 
             if state.content == content {
                 if state.last_user_id != bot_marker {
