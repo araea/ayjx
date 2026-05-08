@@ -2,11 +2,13 @@ use crate::plugins::stats_visualizer::StatsConfig;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use plotters::prelude::*;
+use plotters::style::{FontStyle, register_font};
 use std::sync::OnceLock;
 
-// ================= 字体查找 =================
+// ================= 字体加载与注册 =================
 
 static FONT_DB: OnceLock<fontdb::Database> = OnceLock::new();
+static REGISTERED_FAMILY: OnceLock<String> = OnceLock::new();
 
 fn get_font_db() -> &'static fontdb::Database {
     FONT_DB.get_or_init(|| {
@@ -14,15 +16,6 @@ fn get_font_db() -> &'static fontdb::Database {
         db.load_system_fonts();
         db
     })
-}
-
-fn is_font_available(family: &str) -> bool {
-    let db = get_font_db();
-    let query = fontdb::Query {
-        families: &[fontdb::Family::Name(family)],
-        ..Default::default()
-    };
-    db.query(&query).is_some()
 }
 
 const CJK_FALLBACK_FAMILIES: &[&str] = &[
@@ -36,6 +29,71 @@ const CJK_FALLBACK_FAMILIES: &[&str] = &[
     "SimHei",
     "Microsoft YaHei",
 ];
+
+/// Locate the best available CJK font via fontdb, load its bytes, and
+/// register it with plotters so rendering uses the exact same font that
+/// fontdb discovered.  Returns the family name that was registered.
+fn preload_font(config: &StatsConfig) -> &str {
+    REGISTERED_FAMILY.get_or_init(|| {
+        let db = get_font_db();
+
+        let families: Vec<&str> = std::iter::once(config.font_family.as_str())
+            .chain(CJK_FALLBACK_FAMILIES.iter().copied())
+            .filter(|f| !f.is_empty())
+            .collect();
+
+        for &family in &families {
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(family)],
+                ..Default::default()
+            };
+
+            let id = match db.query(&query) {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let font_bytes: Option<Vec<u8>> =
+                db.with_face_data(id, |data, _face_index| data.to_vec());
+
+            let font_bytes = match font_bytes {
+                Some(b) => b,
+                None => continue,
+            };
+
+            // The ab_glyph backend requires 'static font data.
+            let static_bytes: &'static [u8] = font_bytes.leak();
+            match register_font(family, FontStyle::Normal, static_bytes) {
+                Ok(()) => {
+                    if family != config.font_family.as_str() {
+                        warn!(
+                            target: "Plugin/Stats",
+                            "Font '{}' not found, using fallback '{}'",
+                            config.font_family, family
+                        );
+                    }
+                    return family.to_string();
+                }
+                Err(_) => {
+                    warn!(
+                        target: "Plugin/Stats",
+                        "Failed to register font '{}' with plotters", family
+                    );
+                }
+            }
+        }
+
+        warn!(
+            target: "Plugin/Stats",
+            "No CJK font found; chart text may not render."
+        );
+        "sans-serif".to_string()
+    })
+}
+
+pub fn get_font_family(config: &StatsConfig) -> &str {
+    preload_font(config)
+}
 
 // ================= 配色方案 =================
 
@@ -61,38 +119,9 @@ impl Default for ColorScheme {
     }
 }
 
-pub fn get_font_family(config: &StatsConfig) -> &str {
-    if config.font_family.is_empty() {
-        return "sans-serif";
-    }
-
-    if is_font_available(&config.font_family) {
-        return &config.font_family;
-    }
-
-    for family in CJK_FALLBACK_FAMILIES {
-        if is_font_available(family) {
-            warn!(
-                target: "Plugin/Stats",
-                "Font '{}' not found, falling back to '{}'",
-                config.font_family, family
-            );
-            return family;
-        }
-    }
-
-    warn!(
-        target: "Plugin/Stats",
-        "Font '{}' not found and no CJK fallback available; using 'sans-serif'. Chinese text may fail to render.",
-        config.font_family
-    );
-    "sans-serif"
-}
-
 pub fn get_font<'a>(config: &'a StatsConfig, size: u32) -> TextStyle<'a> {
     let colors = ColorScheme::default();
     let family = get_font_family(config);
-
     (family, size).into_font().color(&colors.text_primary)
 }
 
@@ -102,7 +131,6 @@ pub fn get_font_with_color<'a>(
     color: &'a RGBColor,
 ) -> TextStyle<'a> {
     let family = get_font_family(config);
-
     (family, size).into_font().color(color)
 }
 

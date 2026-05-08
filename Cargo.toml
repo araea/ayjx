@@ -39,7 +39,7 @@ sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-rustls",
 
 # 图像处理与生成
 image = "0.25"
-plotters = { version = "0.3", default-features = false, features = ["all_elements", "all_series", "bitmap_backend", "bitmap_encoder", "bitmap_gif", "chrono", "colormaps", "deprecated_items", "full_palette", "image", "lazy_static", "pathfinder_geometry", "svg_backend", "ttf-parser"] }         # 图表绘制
+plotters = { version = "0.3", default-features = false, features = ["all_elements", "all_series", "bitmap_backend", "bitmap_encoder", "bitmap_gif", "chrono", "colormaps", "deprecated_items", "full_palette", "image", "svg_backend", "ab_glyph"] }         # 图表绘制
 fontdb = "0.23"       # 字体处理
 araea-wordcloud = "0.1"   # 词云生成
 cdp-html-shot = "0.2"     # HTML 截图
