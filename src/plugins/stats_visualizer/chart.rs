@@ -11,6 +11,27 @@ use self::avatar::prepare_avatars;
 use self::data_loader::{BarData, SeriesData, fetch_bar_data, fetch_line_data};
 use self::renderer::{draw_bar_chart, draw_line_chart};
 
+/// Guard against plotters panics when font glyphs are missing (e.g. CJK text with Latin-only font).
+fn draw_with_font_panic_guard<F>(config: &StatsConfig, f: F) -> Result<String, String>
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(e) => {
+            let msg = e
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| e.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown rendering error".to_string());
+            Err(format!(
+                "图表渲染失败（字体 '{}' 可能未安装或不支持中文，请安装中文字体或修改 font_family 配置后重试）: {}",
+                config.font_family, msg
+            ))
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn generate(
     ctx: &Context,
@@ -41,7 +62,9 @@ pub async fn generate(
         )
         .await?;
 
-        return draw_line_chart(&config, title, chart_data);
+        return draw_with_font_panic_guard(&config, || {
+            draw_line_chart(&config, title, chart_data)
+        });
     }
 
     // 2. 柱状图 / 排行榜
@@ -61,5 +84,7 @@ pub async fn generate(
     prepare_avatars(&mut bar_data).await;
 
     // 4. 绘图
-    draw_bar_chart(&config, title, bar_data)
+    draw_with_font_panic_guard(&config, || {
+        draw_bar_chart(&config, title, bar_data)
+    })
 }

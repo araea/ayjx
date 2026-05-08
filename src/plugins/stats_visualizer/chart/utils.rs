@@ -2,6 +2,40 @@ use crate::plugins::stats_visualizer::StatsConfig;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use plotters::prelude::*;
+use std::sync::OnceLock;
+
+// ================= 字体查找 =================
+
+static FONT_DB: OnceLock<fontdb::Database> = OnceLock::new();
+
+fn get_font_db() -> &'static fontdb::Database {
+    FONT_DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        db
+    })
+}
+
+fn is_font_available(family: &str) -> bool {
+    let db = get_font_db();
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        ..Default::default()
+    };
+    db.query(&query).is_some()
+}
+
+const CJK_FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK TC",
+    "Source Han Sans SC",
+    "Source Han Sans CN",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "SimHei",
+    "Microsoft YaHei",
+];
 
 // ================= 配色方案 =================
 
@@ -29,10 +63,30 @@ impl Default for ColorScheme {
 
 pub fn get_font_family(config: &StatsConfig) -> &str {
     if config.font_family.is_empty() {
-        "sans-serif"
-    } else {
-        &config.font_family
+        return "sans-serif";
     }
+
+    if is_font_available(&config.font_family) {
+        return &config.font_family;
+    }
+
+    for family in CJK_FALLBACK_FAMILIES {
+        if is_font_available(family) {
+            warn!(
+                target: "Plugin/Stats",
+                "Font '{}' not found, falling back to '{}'",
+                config.font_family, family
+            );
+            return family;
+        }
+    }
+
+    warn!(
+        target: "Plugin/Stats",
+        "Font '{}' not found and no CJK fallback available; using 'sans-serif'. Chinese text may fail to render.",
+        config.font_family
+    );
+    "sans-serif"
 }
 
 pub fn get_font<'a>(config: &'a StatsConfig, size: u32) -> TextStyle<'a> {
