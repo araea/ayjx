@@ -36,7 +36,7 @@ impl Default for PersonaConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            api_base: "https://api.deepseek.com/v1".to_string(),
+            api_base: "https://api.deepseek.com".to_string(),
             api_key: String::new(),
             decide_model: "deepseek-v4-flash".to_string(),
             reply_model: "deepseek-v4-flash".to_string(),
