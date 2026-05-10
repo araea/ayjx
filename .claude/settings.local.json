@@ -3,7 +3,10 @@
     "allow": [
       "Bash(cargo check *)",
       "Bash(cargo clippy *)",
-      "Bash(fc-list :lang=zh)"
+      "Bash(fc-list :lang=zh)",
+      "Bash(find ~/.cargo/registry/src -name \"Cargo.toml\" -path \"*plotters-0.3.7*\" 2>/dev/null | head -1)",
+      "Bash(find C:/Users/15145-name \"Cargo.toml\" -path \"*plotters-0.3*\" 2>/dev/null | head -3)",
+      "Bash(curl -s https://raw.githubusercontent.com/plotters-rs/plotters/v0.3.7/plotters/Cargo.toml)"
     ]
   }
 }

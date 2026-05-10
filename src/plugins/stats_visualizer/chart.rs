@@ -25,8 +25,8 @@ where
                 .or_else(|| e.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown rendering error".to_string());
             Err(format!(
-                "图表渲染失败（字体 '{}' 可能未安装或不支持中文，请安装中文字体或修改 font_family 配置后重试）: {}",
-                config.font_family, msg
+                "图表渲染失败（当前字体可能不支持中文渲染。font_path='{}', font_family='{}'。请通过 font_path 指定字体文件，或安装并配置 font_family）: {}",
+                config.font_path, config.font_family, msg
             ))
         }
     }

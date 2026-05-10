@@ -2,12 +2,38 @@ use crate::plugins::stats_visualizer::StatsConfig;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use plotters::prelude::*;
+use plotters::style::{FontStyle, register_font};
+use std::path::Path;
 use std::sync::OnceLock;
 
-// ================= 字体查找 =================
+// ================= 字体加载 =================
+
+/// 注册到 plotters 的内部字体名。使用固定名称避免与系统字体族名冲突 —
+/// 不论用户提供路径还是字体族，最终绘制时都查找该名称即可命中我们注册的字节。
+const CHART_FONT_NAME: &str = "ChartFont";
+
+/// 当用户未指定字体或指定的字体不可用时按顺序尝试的 CJK 回退字体。
+const CJK_FALLBACK_FAMILIES: &[&str] = &[
+    "Noto Sans CJK SC",
+    "Noto Sans SC",
+    "Noto Sans CJK JP",
+    "Noto Sans CJK TC",
+    "Source Han Sans SC",
+    "Source Han Sans CN",
+    "Source Han Sans",
+    "WenQuanYi Micro Hei",
+    "WenQuanYi Zen Hei",
+    "Microsoft YaHei",
+    "SimHei",
+    "SimSun",
+    "PingFang SC",
+    "Heiti SC",
+    "STHeiti",
+    "Arial Unicode MS",
+];
 
 static FONT_DB: OnceLock<fontdb::Database> = OnceLock::new();
-static RESOLVED_FAMILY: OnceLock<String> = OnceLock::new();
+static RESOLVED_FONT: OnceLock<String> = OnceLock::new();
 
 fn get_font_db() -> &'static fontdb::Database {
     FONT_DB.get_or_init(|| {
@@ -17,68 +43,105 @@ fn get_font_db() -> &'static fontdb::Database {
     })
 }
 
-fn is_font_available(family: &str) -> bool {
+/// 将字节注册到 plotters 的 ab_glyph 后端。注册成功返回 true。
+/// 注意：plotters 需要 `'static` 字节切片，因此我们 leak 一次（每进程最多发生一次）。
+fn register_bytes(bytes: Vec<u8>) -> bool {
+    let static_bytes: &'static [u8] = bytes.leak();
+    register_font(CHART_FONT_NAME, FontStyle::Normal, static_bytes).is_ok()
+}
+
+/// 从文件路径加载字体并注册。
+fn try_load_path(path: &str) -> bool {
+    let p = Path::new(path);
+    if !p.is_file() {
+        warn!(target: "Plugin/Stats", "字体路径不存在或不是文件: {}", path);
+        return false;
+    }
+    match std::fs::read(p) {
+        Ok(bytes) => {
+            if register_bytes(bytes) {
+                info!(target: "Plugin/Stats", "已加载字体文件: {}", path);
+                true
+            } else {
+                warn!(target: "Plugin/Stats", "字体文件无法被解析: {}", path);
+                false
+            }
+        }
+        Err(e) => {
+            warn!(target: "Plugin/Stats", "字体文件读取失败 {}: {}", path, e);
+            false
+        }
+    }
+}
+
+/// 通过 fontdb 在系统字体中查找 family 并注册。
+fn try_load_family(family: &str) -> bool {
     let db = get_font_db();
     let query = fontdb::Query {
         families: &[fontdb::Family::Name(family)],
         ..Default::default()
     };
-    db.query(&query).is_some()
+    let id = match db.query(&query) {
+        Some(id) => id,
+        None => return false,
+    };
+    let bytes: Option<Vec<u8>> = db.with_face_data(id, |data, _idx| data.to_vec());
+    match bytes {
+        Some(b) => register_bytes(b),
+        None => false,
+    }
 }
 
-const CJK_FALLBACK_FAMILIES: &[&str] = &[
-    "Noto Sans CJK SC",
-    "Noto Sans CJK JP",
-    "Noto Sans CJK TC",
-    "Source Han Sans SC",
-    "Source Han Sans CN",
-    "WenQuanYi Micro Hei",
-    "WenQuanYi Zen Hei",
-    "SimHei",
-    "Microsoft YaHei",
-];
+/// 加载并注册字体，优先级：
+/// 1. `font_path`（路径优先，绕过任何系统字体发现）
+/// 2. `font_family`（通过 fontdb 在系统字体中查找）
+/// 3. CJK 回退字体列表
+/// 4. 失败时返回 "sans-serif"，由 plotters 兜底处理
+fn resolve_font(config: &StatsConfig) -> &str {
+    RESOLVED_FONT.get_or_init(|| {
+        let path = config.font_path.trim();
+        let family = config.font_family.trim();
 
-/// Resolve the best available CJK font family name via fontdb.
-/// Result is cached once — subsequent calls return the same family
-/// without re-scanning.  fontdb scans font directories directly,
-/// which is more thorough than plotters' font-kit backend; the
-/// panic guard in chart.rs catches the rare case where fontdb
-/// discovers a font that font-kit cannot rasterise.
-fn resolve_font_family(config: &StatsConfig) -> &str {
-    RESOLVED_FAMILY.get_or_init(|| {
-        if !config.font_family.is_empty() && is_font_available(&config.font_family) {
-            return config.font_family.clone();
+        // 1. 路径优先
+        if !path.is_empty() && try_load_path(path) {
+            return CHART_FONT_NAME.to_string();
         }
 
-        if !config.font_family.is_empty() {
-            for &family in CJK_FALLBACK_FAMILIES {
-                if is_font_available(family) {
-                    warn!(
-                        target: "Plugin/Stats",
-                        "Font '{}' not found, using fallback '{}'",
-                        config.font_family, family
-                    );
-                    return family.to_string();
-                }
+        // 2. 字体族
+        if !family.is_empty() {
+            if try_load_family(family) {
+                info!(target: "Plugin/Stats", "已加载字体族: {}", family);
+                return CHART_FONT_NAME.to_string();
             }
-        } else {
-            for &family in CJK_FALLBACK_FAMILIES {
-                if is_font_available(family) {
-                    return family.to_string();
-                }
+            warn!(
+                target: "Plugin/Stats",
+                "字体族 '{}' 在系统中不可用, 尝试 CJK 回退字体",
+                family
+            );
+        }
+
+        // 3. CJK 回退
+        for &fb in CJK_FALLBACK_FAMILIES {
+            // 跳过用户已尝试过的 family，避免重复警告
+            if !family.is_empty() && fb.eq_ignore_ascii_case(family) {
+                continue;
+            }
+            if try_load_family(fb) {
+                warn!(target: "Plugin/Stats", "使用回退字体族: {}", fb);
+                return CHART_FONT_NAME.to_string();
             }
         }
 
         warn!(
             target: "Plugin/Stats",
-            "No CJK font found; chart text may not render."
+            "未找到任何可用 CJK 字体，图表中的中文可能无法渲染。请通过 font_path 指定字体文件，或安装对应字体族。"
         );
         "sans-serif".to_string()
     })
 }
 
 pub fn get_font_family(config: &StatsConfig) -> &str {
-    resolve_font_family(config)
+    resolve_font(config)
 }
 
 // ================= 配色方案 =================

@@ -20,6 +20,9 @@ mod chart;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct StatsConfig {
     pub enabled: bool,
+    /// 字体文件绝对路径。若提供且存在，优先于 `font_family` 使用。
+    #[serde(default)]
+    pub font_path: String,
     #[serde(default = "default_font_family")]
     pub font_family: String,
     #[serde(default = "default_width")]
@@ -54,6 +57,7 @@ fn default_daily_push_time() -> String {
 pub fn default_config() -> Value {
     build_config(StatsConfig {
         enabled: true,
+        font_path: String::new(),
         font_family: "Noto Sans CJK SC".to_string(),
         width: 960,
         height: 800,
