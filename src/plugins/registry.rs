@@ -34,5 +34,8 @@ register_plugins!(
     oai {
         on_init: Some(oai::init)
     },
+    persona {
+        on_init: Some(persona::init)
+    },
     help,
 );

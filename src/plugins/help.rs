@@ -66,6 +66,7 @@ fn describe(name: &str) -> (&'static str, &'static [&'static str]) {
             &["神断帮助", "随机神断", "神断列表"],
         ),
         "oai" => ("接入 OpenAI 兼容大模型对话", &[]),
+        "persona" => ("群里伪装人类潜水的 AI 角色（DeepSeek）", &[]),
         "help" => ("显示本帮助信息", TRIGGERS),
         _ => ("(暂无说明)", &[]),
     }
