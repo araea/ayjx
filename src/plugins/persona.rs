@@ -1,13 +1,15 @@
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::onebot::{LockedWriter, api, send_msg};
 use crate::config::build_config;
 use crate::event::{Context, EventType, MessageEvent};
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config, get_data_dir};
+use chrono::Timelike;
 use futures_util::future::BoxFuture;
 use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsScalar};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 use std::sync::Arc;
+use std::time::Duration;
 use toml::Value;
 
 pub mod chat;
@@ -17,7 +19,7 @@ pub mod prompt;
 pub mod types;
 
 use data::{MANAGER, Manager};
-use types::{PersonaConfig, RecentMsg};
+use types::{PersonaConfig, RecentMsg, ReplyResult};
 
 pub fn default_config() -> Value {
     build_config(PersonaConfig::default())
@@ -33,17 +35,76 @@ pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             return Ok(());
         }
 
-        // 每 5 分钟落盘一次，避免长时间内存中状态丢失
+        // 周期性落盘
+        let mgr_save = mgr.clone();
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            let mut tick = tokio::time::interval(Duration::from_secs(300));
             tick.tick().await;
             loop {
                 tick.tick().await;
-                mgr.save().await;
+                mgr_save.save().await;
             }
         });
 
         Ok(())
+    })
+}
+
+pub fn on_connected(
+    ctx: Context,
+    writer: LockedWriter,
+) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
+    Box::pin(async move {
+        let cfg: PersonaConfig = match get_config(&ctx, "persona") {
+            Some(c) => c,
+            None => return Ok(Some(ctx)),
+        };
+        if !cfg.enabled || !cfg.initiate_enabled {
+            return Ok(Some(ctx));
+        }
+        let mgr = match MANAGER.get() {
+            Some(m) => m.clone(),
+            None => return Ok(Some(ctx)),
+        };
+
+        let interval = Duration::from_secs(cfg.initiate_check_interval_mins.max(1) * 60);
+        let ctx_owned = ctx.clone();
+        let writer_owned = writer.clone();
+
+        ctx.scheduler.add_interval(interval, move || {
+            let ctx = ctx_owned.clone();
+            let writer = writer_owned.clone();
+            let mgr = mgr.clone();
+            async move {
+                let cfg: PersonaConfig = match get_config(&ctx, "persona") {
+                    Some(c) => c,
+                    None => return,
+                };
+                if !cfg.enabled || !cfg.initiate_enabled {
+                    return;
+                }
+                if is_sleeping(&cfg) {
+                    return;
+                }
+
+                // 选群：明确白名单优先；否则用我们已记录过状态的群
+                let candidate_groups: Vec<String> = if !cfg.allow_groups.is_empty() {
+                    cfg.allow_groups.iter().map(|g| g.to_string()).collect()
+                } else {
+                    mgr.state.read().await.groups.keys().cloned().collect()
+                };
+
+                for group_key in candidate_groups {
+                    let Ok(group_id) = group_key.parse::<i64>() else {
+                        continue;
+                    };
+                    try_initiate(&cfg, &mgr, &ctx, &writer, &group_key, group_id).await;
+                }
+            }
+        });
+
+        info!(target: "Persona", "主动话题任务已启动 (每 {} 分钟一次)", cfg.initiate_check_interval_mins);
+        Ok(Some(ctx))
     })
 }
 
@@ -133,9 +194,27 @@ fn dice(prob: f32) -> bool {
     rand::rng().random::<f32>() < prob
 }
 
+fn random_jitter_ms(base: u64, jitter: u64) -> u64 {
+    use rand::Rng;
+    if jitter == 0 {
+        return base;
+    }
+    base.saturating_add(rand::rng().random_range(0..=jitter))
+}
+
 fn starts_with_command_prefix(text: &str, prefixes: &[String]) -> bool {
     let t = text.trim_start();
     prefixes.iter().any(|p| !p.is_empty() && t.starts_with(p))
+}
+
+fn is_sleeping(cfg: &PersonaConfig) -> bool {
+    if cfg.sleep_start_hour == cfg.sleep_end_hour {
+        return false;
+    }
+    let h = chrono::Local::now().hour();
+    let s = cfg.sleep_start_hour;
+    let e = cfg.sleep_end_hour;
+    if s < e { h >= s && h < e } else { h >= s || h < e }
 }
 
 pub fn handle(
@@ -156,28 +235,30 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        // 处理自己即将发出的消息：把它当作上下文记录下来，让 bot 有"自我记忆"
+        // BeforeSend：把 bot（含本插件外的其他插件）发出的群消息也记入上下文
         if let EventType::BeforeSend(packet) = &ctx.event {
             if let Some(gid) = packet.group_id() {
                 let group_key = gid.to_string();
-                if cfg.allow_groups.is_empty() || cfg.allow_groups.contains(&gid) {
-                    if let Some(msg_value) = packet.message() {
-                        let text = extract_text_from_packet(msg_value);
-                        if !text.is_empty() {
-                            mgr.append_recent(
-                                &group_key,
-                                RecentMsg {
-                                    sender_id: ctx.bot.login_user.id.clone(),
-                                    sender_name: cfg.nickname.clone(),
-                                    text,
-                                    ts: memory::now_secs(),
-                                    is_self: true,
-                                    mentions_self: false,
-                                },
-                                cfg.context_window,
-                            )
-                            .await;
-                        }
+                let in_scope = cfg.allow_groups.is_empty() || cfg.allow_groups.contains(&gid);
+                if in_scope
+                    && let Some(msg_value) = packet.message()
+                {
+                    let text = extract_text_from_packet(msg_value);
+                    if !text.is_empty() {
+                        mgr.append_recent(
+                            &group_key,
+                            RecentMsg {
+                                sender_id: ctx.bot.login_user.id.clone(),
+                                sender_name: cfg.nickname.clone(),
+                                text,
+                                ts: memory::now_secs(),
+                                message_id: 0,
+                                is_self: true,
+                                mentions_self: false,
+                            },
+                            cfg.context_window,
+                        )
+                        .await;
                     }
                 }
             }
@@ -224,7 +305,11 @@ pub fn handle(
 
         let group_key = group_id.to_string();
         let sender_name = event_view.sender_name().to_string();
+        let message_id = event_view.message_id();
         let now_ts = memory::now_secs();
+
+        // 全局用户档案：跨群跨改名都能识别
+        mgr.touch_user(&sender_id, &sender_name).await;
 
         // 任何情况下都先把消息写入上下文
         mgr.append_recent(
@@ -234,6 +319,7 @@ pub fn handle(
                 sender_name: sender_name.clone(),
                 text: text.clone(),
                 ts: now_ts,
+                message_id,
                 is_self: false,
                 mentions_self,
             },
@@ -248,23 +334,30 @@ pub fn handle(
 
         // 节流
         if !mgr
-            .cooldown_ok(&group_key, cfg.min_reply_interval_secs, cfg.max_replies_per_hour)
+            .cooldown_ok(
+                &group_key,
+                cfg.min_reply_interval_secs,
+                cfg.max_replies_per_hour,
+            )
             .await
         {
             return Ok(Some(ctx));
         }
 
-        // 第一道筛子：本地概率，过滤掉绝大多数无关消息，节省 API 调用
-        let prob = if mentions_self {
+        // 本地概率筛
+        let mut prob = if mentions_self {
             cfg.mention_reply_probability
         } else {
             cfg.base_reply_probability
         };
+        if is_sleeping(&cfg) {
+            prob *= cfg.sleep_reply_multiplier;
+        }
         if !dice(prob) {
             return Ok(Some(ctx));
         }
 
-        // 防并发：同一个群正在生成时不再启动新的回复任务
+        // 防并发
         if !mgr.try_acquire(&group_key).await {
             return Ok(Some(ctx));
         }
@@ -274,6 +367,7 @@ pub fn handle(
             sender_name,
             text,
             ts: now_ts,
+            message_id,
             is_self: false,
             mentions_self,
         };
@@ -283,20 +377,106 @@ pub fn handle(
         let writer_clone = writer.clone();
         let ctx_clone = ctx.clone();
         let gk = group_key.clone();
+        let bot_id_clone = bot_id.clone();
 
         tokio::spawn(async move {
-            let result =
-                run_reply_pipeline(&cfg_clone, &mgr_clone, &ctx_clone, &writer_clone, &gk, group_id, trigger).await;
-            if let Err(e) = result {
-                if cfg_clone.log_decisions {
-                    warn!(target: "Persona", "回复流程结束: {}", e);
-                }
+            let result = run_reply_pipeline(
+                &cfg_clone,
+                &mgr_clone,
+                &ctx_clone,
+                &writer_clone,
+                &gk,
+                group_id,
+                &bot_id_clone,
+                trigger,
+            )
+            .await;
+            if let Err(e) = result
+                && cfg_clone.log_decisions
+            {
+                warn!(target: "Persona", "回复流程结束: {}", e);
             }
             mgr_clone.release(&gk).await;
         });
 
         Ok(Some(ctx))
     })
+}
+
+async fn try_initiate(
+    cfg: &PersonaConfig,
+    mgr: &Arc<Manager>,
+    ctx: &Context,
+    writer: &LockedWriter,
+    group_key: &str,
+    group_id: i64,
+) {
+    let now = memory::now_secs();
+    let (quiet_secs, last_initiate_at) = {
+        let s = mgr.state.read().await;
+        let g = match s.groups.get(group_key) {
+            Some(g) => g,
+            None => return,
+        };
+        (
+            (now - g.last_msg_at).max(0),
+            g.last_initiate_at,
+        )
+    };
+
+    let quiet_mins = quiet_secs / 60;
+    if quiet_mins < cfg.initiate_min_quiet_minutes as i64 {
+        return;
+    }
+    if quiet_secs > (cfg.initiate_max_quiet_hours as i64) * 3600 {
+        return;
+    }
+    // 距离上次自启不到 90 分钟就别再开口
+    if (now - last_initiate_at) < 90 * 60 {
+        return;
+    }
+    if !mgr
+        .cooldown_ok(
+            group_key,
+            cfg.min_reply_interval_secs,
+            cfg.max_replies_per_hour,
+        )
+        .await
+    {
+        return;
+    }
+    if !dice(cfg.initiate_probability) {
+        return;
+    }
+    if !mgr.try_acquire(group_key).await {
+        return;
+    }
+
+    let cfg_c = cfg.clone();
+    let mgr_c = mgr.clone();
+    let ctx_c = ctx.clone();
+    let writer_c = writer.clone();
+    let gk = group_key.to_string();
+    let bot_id = ctx.bot.login_user.id.clone();
+
+    tokio::spawn(async move {
+        let res = run_initiate_pipeline(
+            &cfg_c,
+            &mgr_c,
+            &ctx_c,
+            &writer_c,
+            &gk,
+            group_id,
+            &bot_id,
+        )
+        .await;
+        if let Err(e) = res
+            && cfg_c.log_decisions
+        {
+            warn!(target: "Persona", "主动话题流程结束: {}", e);
+        }
+        mgr_c.release(&gk).await;
+    });
 }
 
 async fn run_reply_pipeline(
@@ -306,33 +486,46 @@ async fn run_reply_pipeline(
     writer: &LockedWriter,
     group_key: &str,
     group_id: i64,
+    self_id: &str,
     trigger: RecentMsg,
 ) -> anyhow::Result<()> {
     if cfg.api_key.is_empty() || cfg.api_base.is_empty() {
         return Err(anyhow::anyhow!("API 未配置"));
     }
 
-    // 决策阶段
-    let (state_snap, decide_sys, decide_user) = {
+    // 决策（mention 时按配置可跳过）
+    let need_decide = !(trigger.mentions_self && cfg.skip_decide_when_mentioned);
+    if need_decide {
+        let (decide_sys, decide_user) = {
+            let s = mgr.state.read().await;
+            let g = s.groups.get(group_key).cloned().unwrap_or_default();
+            prompt::build_decide_prompt(cfg, &g, &s.users, self_id, &trigger)
+        };
+        let decide = chat::decide(cfg, &decide_sys, &decide_user).await?;
+        if cfg.log_decisions {
+            info!(
+                target: "Persona",
+                "[{}] decide: reply={} urgency={} why={}",
+                group_id, decide.reply, decide.urgency, decide.why
+            );
+        }
+        if !decide.reply {
+            return Ok(());
+        }
+    }
+
+    // 生成
+    let (state_snap, reply_sys, reply_user) = {
         let s = mgr.state.read().await;
         let g = s.groups.get(group_key).cloned().unwrap_or_default();
-        let (sys, usr) = prompt::build_decide_prompt(cfg, &g, &trigger);
+        let (sys, usr) = prompt::build_reply_prompt(cfg, &g, &s.users, self_id, &trigger);
         (g, sys, usr)
     };
+    let _ = state_snap;
 
-    let decide = chat::decide(cfg, &decide_sys, &decide_user).await?;
-    if cfg.log_decisions {
-        info!(
-            target: "Persona",
-            "[{}] decide: reply={} urgency={} why={}",
-            group_id, decide.reply, decide.urgency, decide.why
-        );
-    }
-    if !decide.reply {
-        return Ok(());
-    }
+    let result = chat::generate(cfg, &reply_sys, &reply_user).await?;
 
-    // 双重确认节流（API 期间可能有变化）
+    // 节流二次校验
     if !mgr
         .cooldown_ok(group_key, cfg.min_reply_interval_secs, cfg.max_replies_per_hour)
         .await
@@ -340,44 +533,184 @@ async fn run_reply_pipeline(
         return Ok(());
     }
 
-    // 回复阶段
-    let (reply_sys, reply_user) = prompt::build_reply_prompt(cfg, &state_snap, &trigger);
-    let reply = chat::reply(cfg, &reply_sys, &reply_user).await?;
-
-    let text = reply.reply.trim().to_string();
-    if text.is_empty() {
-        return Ok(());
-    }
-
-    // 输入延迟，让回复看起来不像机器人秒回
-    if cfg.typing_delay_ms > 0 {
-        let extra = (text.chars().count() as u64).saturating_mul(40);
-        let total = cfg.typing_delay_ms.saturating_add(extra.min(2500));
-        tokio::time::sleep(std::time::Duration::from_millis(total)).await;
-    }
-
-    let _ = send_msg(
+    let did_send = dispatch_result(
+        cfg,
         ctx,
-        writer.clone(),
-        Some(group_id),
-        None,
-        Message::new().text(text.clone()),
+        writer,
+        group_id,
+        Some(&trigger),
+        &result,
     )
     .await;
 
-    // 更新状态：心情漂移、记忆抽取、统计
+    apply_after_effects(
+        cfg,
+        mgr,
+        group_key,
+        Some(&trigger),
+        &result,
+        did_send,
+    )
+    .await;
+
+    Ok(())
+}
+
+async fn run_initiate_pipeline(
+    cfg: &PersonaConfig,
+    mgr: &Arc<Manager>,
+    ctx: &Context,
+    writer: &LockedWriter,
+    group_key: &str,
+    group_id: i64,
+    self_id: &str,
+) -> anyhow::Result<()> {
+    if cfg.api_key.is_empty() || cfg.api_base.is_empty() {
+        return Err(anyhow::anyhow!("API 未配置"));
+    }
+    let (sys, usr) = {
+        let s = mgr.state.read().await;
+        let g = s.groups.get(group_key).cloned().unwrap_or_default();
+        prompt::build_initiate_prompt(cfg, &g, &s.users, self_id)
+    };
+    let result = chat::generate(cfg, &sys, &usr).await?;
+
+    if result.messages.is_empty() && result.react_emoji_id.is_none() {
+        return Ok(());
+    }
+    if cfg.log_decisions {
+        info!(target: "Persona", "[{}] 主动话题: {:?}", group_id, result.messages);
+    }
+    let did_send = dispatch_result(cfg, ctx, writer, group_id, None, &result).await;
+
     {
         let mut s = mgr.state.write().await;
         let g = s.groups.entry(group_key.to_string()).or_default();
-        let shift = reply.mood_shift.clamp(-0.3, 0.3);
+        g.last_initiate_at = memory::now_secs();
+    }
+
+    apply_after_effects(cfg, mgr, group_key, None, &result, did_send).await;
+    Ok(())
+}
+
+async fn dispatch_result(
+    cfg: &PersonaConfig,
+    ctx: &Context,
+    writer: &LockedWriter,
+    group_id: i64,
+    trigger: Option<&RecentMsg>,
+    result: &ReplyResult,
+) -> bool {
+    // 优先：表情回应（仅在有 trigger 时可用）
+    if cfg.allow_emoji_react
+        && let Some(emoji_id) = result.react_emoji_id
+        && let Some(t) = trigger
+        && t.message_id != 0
+    {
+        let _ = api::set_msg_emoji_like(
+            ctx,
+            writer.clone(),
+            t.message_id as i32,
+            emoji_id,
+            true,
+        )
+        .await;
+        return true;
+    }
+
+    let segments: Vec<String> = result
+        .messages
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .take(cfg.max_segments.max(1))
+        .collect();
+
+    if segments.is_empty() {
+        return false;
+    }
+
+    let trigger_user_id: Option<i64> = trigger
+        .and_then(|t| t.sender_id.parse::<i64>().ok())
+        .filter(|id| *id != 0);
+    let trigger_msg_id: Option<i64> = trigger.map(|t| t.message_id).filter(|id| *id != 0);
+
+    for (i, text) in segments.iter().enumerate() {
+        let mut msg = Message::new();
+        let is_first = i == 0;
+        if is_first {
+            if cfg.allow_reply_quote
+                && result.reply_first
+                && let Some(id) = trigger_msg_id
+            {
+                msg = msg.reply(id);
+            }
+            if cfg.allow_at_user
+                && result.at_first
+                && let Some(uid) = trigger_user_id
+            {
+                msg = msg.at(uid).text(" ");
+            }
+        }
+        msg = msg.text(text.clone());
+
+        let delay = if is_first {
+            random_jitter_ms(
+                cfg.typing_delay_ms + (text.chars().count() as u64) * 60,
+                500,
+            )
+        } else {
+            random_jitter_ms(
+                cfg.inter_segment_delay_ms + (text.chars().count() as u64) * 50,
+                400,
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(delay.min(6000))).await;
+
+        let _ = send_msg(ctx, writer.clone(), Some(group_id), None, msg).await;
+    }
+
+    true
+}
+
+async fn apply_after_effects(
+    cfg: &PersonaConfig,
+    mgr: &Arc<Manager>,
+    group_key: &str,
+    trigger: Option<&RecentMsg>,
+    result: &ReplyResult,
+    did_send: bool,
+) {
+    {
+        let mut s = mgr.state.write().await;
+        let shift = result.mood_shift.clamp(-0.3, 0.3);
+        let g = s.groups.entry(group_key.to_string()).or_default();
         g.mood = (g.mood * 0.9 + shift).clamp(-1.0, 1.0);
-        if !reply.remember.trim().is_empty() {
-            memory::add_memory(g, &reply.remember, cfg.max_memories, cfg.memory_half_life_days);
+        if !result.remember_global.trim().is_empty() {
+            memory::add_memory(
+                &mut g.memories,
+                &result.remember_global,
+                cfg.max_memories,
+                cfg.memory_half_life_days,
+            );
+        }
+
+        if !result.remember_user.trim().is_empty()
+            && let Some(t) = trigger
+            && !t.sender_id.is_empty()
+        {
+            if let Some(prof) = s.users.get_mut(&t.sender_id) {
+                memory::add_memory(
+                    &mut prof.notes,
+                    &result.remember_user,
+                    cfg.max_user_notes,
+                    cfg.memory_half_life_days,
+                );
+            }
         }
     }
 
-    mgr.record_reply(group_key).await;
-    // 注意：bot 自己的发言会通过 BeforeSend 路径进入 recent，不需要在这里重复 append
-
-    Ok(())
+    if did_send {
+        mgr.record_reply(group_key).await;
+    }
 }

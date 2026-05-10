@@ -1,4 +1,4 @@
-use super::types::{GroupState, Memory};
+use super::types::Memory;
 
 pub fn now_secs() -> i64 {
     chrono::Local::now().timestamp()
@@ -16,13 +16,12 @@ pub fn memory_score(m: &Memory, now: i64, half_life_days: f64) -> f32 {
 }
 
 pub fn rank_memories<'a>(
-    state: &'a GroupState,
+    mems: &'a [Memory],
     half_life_days: f64,
     keep_top: usize,
 ) -> Vec<&'a Memory> {
     let now = now_secs();
-    let mut idx: Vec<(usize, f32)> = state
-        .memories
+    let mut idx: Vec<(usize, f32)> = mems
         .iter()
         .enumerate()
         .map(|(i, m)| (i, memory_score(m, now, half_life_days)))
@@ -30,48 +29,40 @@ pub fn rank_memories<'a>(
     idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     idx.iter()
         .take(keep_top)
-        .map(|(i, _)| &state.memories[*i])
+        .map(|(i, _)| &mems[*i])
         .collect()
 }
 
-pub fn add_memory(state: &mut GroupState, content: &str, max_memories: usize, half_life: f64) {
+pub fn add_memory(mems: &mut Vec<Memory>, content: &str, max_memories: usize, half_life: f64) {
     let trimmed = content.trim();
-    if trimmed.is_empty() || trimmed.len() > 200 {
+    if trimmed.is_empty() || trimmed.chars().count() > 120 {
         return;
     }
-    if state
-        .memories
-        .iter()
-        .any(|m| m.content.trim() == trimmed || similar(&m.content, trimmed))
+    if let Some(m) = mems
+        .iter_mut()
+        .find(|m| m.content.trim() == trimmed || similar(&m.content, trimmed))
     {
-        if let Some(m) = state
-            .memories
-            .iter_mut()
-            .find(|m| m.content.trim() == trimmed || similar(&m.content, trimmed))
-        {
-            m.last_recalled_at = now_secs();
-            m.recall_count = m.recall_count.saturating_add(1);
-        }
+        m.last_recalled_at = now_secs();
+        m.recall_count = m.recall_count.saturating_add(1);
         return;
     }
     let now = now_secs();
-    state.memories.push(Memory {
+    mems.push(Memory {
         content: trimmed.to_string(),
         importance: 0.6,
         created_at: now,
         last_recalled_at: now,
         recall_count: 0,
     });
-    prune(state, max_memories, half_life);
+    prune(mems, max_memories, half_life);
 }
 
-pub fn prune(state: &mut GroupState, max_memories: usize, half_life: f64) {
-    if state.memories.len() <= max_memories {
+pub fn prune(mems: &mut Vec<Memory>, max_memories: usize, half_life: f64) {
+    if mems.len() <= max_memories {
         return;
     }
     let now = now_secs();
-    let mut scored: Vec<(usize, f32)> = state
-        .memories
+    let mut scored: Vec<(usize, f32)> = mems
         .iter()
         .enumerate()
         .map(|(i, m)| (i, memory_score(m, now, half_life)))
@@ -80,7 +71,7 @@ pub fn prune(state: &mut GroupState, max_memories: usize, half_life: f64) {
     let keep: std::collections::HashSet<usize> =
         scored.iter().take(max_memories).map(|(i, _)| *i).collect();
     let mut i = 0usize;
-    state.memories.retain(|_| {
+    mems.retain(|_| {
         let k = keep.contains(&i);
         i += 1;
         k
@@ -98,8 +89,7 @@ fn similar(a: &str, b: &str) -> bool {
     } else {
         (b, a)
     };
-    let short_chars: Vec<char> = short.chars().collect();
-    if short_chars.len() < 6 {
+    if short.chars().count() < 6 {
         return false;
     }
     long.contains(short)

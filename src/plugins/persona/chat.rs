@@ -72,11 +72,7 @@ fn extract_json_object(s: &str) -> Option<&str> {
     None
 }
 
-pub async fn decide(
-    cfg: &PersonaConfig,
-    system: &str,
-    user: &str,
-) -> anyhow::Result<DecideResult> {
+pub async fn decide(cfg: &PersonaConfig, system: &str, user: &str) -> anyhow::Result<DecideResult> {
     let client = make_client(cfg);
     let req = CreateChatCompletionRequestArgs::default()
         .model(&cfg.decide_model)
@@ -100,12 +96,16 @@ pub async fn decide(
     Ok(parsed)
 }
 
-pub async fn reply(cfg: &PersonaConfig, system: &str, user: &str) -> anyhow::Result<ReplyResult> {
+pub async fn generate(
+    cfg: &PersonaConfig,
+    system: &str,
+    user: &str,
+) -> anyhow::Result<ReplyResult> {
     let client = make_client(cfg);
     let req = CreateChatCompletionRequestArgs::default()
         .model(&cfg.reply_model)
         .messages(build_messages(system, user))
-        .max_tokens(220u32)
+        .max_tokens(360u32)
         .temperature(0.85)
         .build()?;
 
@@ -125,13 +125,13 @@ pub async fn reply(cfg: &PersonaConfig, system: &str, user: &str) -> anyhow::Res
         return Ok(parsed);
     }
 
+    // 兜底：当成单条文本返回
     let cleaned = raw.trim().trim_matches('"').to_string();
     if cleaned.is_empty() {
         return Err(anyhow::anyhow!("empty reply"));
     }
     Ok(ReplyResult {
-        reply: cleaned,
-        mood_shift: 0.0,
-        remember: String::new(),
+        messages: vec![cleaned],
+        ..Default::default()
     })
 }

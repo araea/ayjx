@@ -1,5 +1,5 @@
 use super::memory::now_secs;
-use super::types::{RecentMsg, State};
+use super::types::{RecentMsg, State, UserProfile};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -31,12 +31,6 @@ impl Manager {
         }
     }
 
-    pub fn save_blocking(&self, state: &State) {
-        if let Ok(s) = serde_json::to_string(state) {
-            let _ = std::fs::write(&self.path, s);
-        }
-    }
-
     pub async fn save(&self) {
         let snap = self.state.read().await.clone();
         let path = self.path.clone();
@@ -60,18 +54,53 @@ impl Manager {
         self.in_flight.write().await.remove(group_key);
     }
 
-    pub async fn append_recent(
-        &self,
-        group_key: &str,
-        msg: RecentMsg,
-        context_window: usize,
-    ) {
+    pub async fn append_recent(&self, group_key: &str, msg: RecentMsg, context_window: usize) {
         let mut s = self.state.write().await;
         let g = s.groups.entry(group_key.to_string()).or_default();
+        g.last_msg_at = msg.ts;
         g.recent.push(msg);
         if g.recent.len() > context_window {
             let drop = g.recent.len() - context_window;
             g.recent.drain(0..drop);
+        }
+    }
+
+    pub async fn touch_user(&self, user_id: &str, current_name: &str) {
+        if user_id.is_empty() {
+            return;
+        }
+        let now = now_secs();
+        let mut s = self.state.write().await;
+        let prof = s
+            .users
+            .entry(user_id.to_string())
+            .or_insert_with(|| UserProfile {
+                user_id: user_id.to_string(),
+                last_name: current_name.to_string(),
+                first_seen_at: now,
+                last_seen_at: now,
+                ..Default::default()
+            });
+
+        if prof.first_seen_at == 0 {
+            prof.first_seen_at = now;
+        }
+        prof.last_seen_at = now;
+        prof.message_count = prof.message_count.saturating_add(1);
+
+        if !current_name.is_empty() && current_name != prof.last_name {
+            // 新名字进 last_name；旧名字塞 alias
+            if !prof.last_name.is_empty()
+                && prof.last_name != current_name
+                && !prof.aliases.iter().any(|a| a == &prof.last_name)
+            {
+                prof.aliases.push(prof.last_name.clone());
+                if prof.aliases.len() > 5 {
+                    let drop = prof.aliases.len() - 5;
+                    prof.aliases.drain(0..drop);
+                }
+            }
+            prof.last_name = current_name.to_string();
         }
     }
 
