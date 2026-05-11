@@ -1,12 +1,12 @@
 use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::config::build_config;
-use crate::db::queries;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config, word_cloud};
-use chrono::Local;
+use crate::plugins::{PluginError, get_config};
+use crate::scheduler::PushFrequency;
+use chrono::Weekday;
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use toml::Value;
 
 mod chart;
+mod pusher;
 
 // ================= 配置定义 =================
 
@@ -30,12 +31,53 @@ pub struct StatsConfig {
     #[serde(default = "default_height")]
     pub height: u32,
 
-    #[serde(default)]
+    // —— 主动推送总开关与阈值 ——
+    /// 群在统计区间内消息数低于此值则跳过推送（避免打扰冷群）
+    #[serde(default = "default_push_min_messages")]
+    pub push_min_messages: u64,
+
+    // —— 每日 23:30 当日总结 ——
+    #[serde(default = "default_true")]
     pub daily_push_enabled: bool,
     #[serde(default = "default_daily_push_time")]
     pub daily_push_time: String,
+    /// 兼容字段（暂未使用）
     #[serde(default)]
     pub daily_push_scope: String,
+
+    // —— 每日 09:00 早安回顾（昨日数据） ——
+    #[serde(default = "default_true")]
+    pub morning_recap_enabled: bool,
+    #[serde(default = "default_morning_recap_time")]
+    pub morning_recap_time: String,
+
+    // —— 每日 12:30 午间速览（今日上午） ——
+    #[serde(default = "default_true")]
+    pub noon_brief_enabled: bool,
+    #[serde(default = "default_noon_brief_time")]
+    pub noon_brief_time: String,
+
+    // —— 每周一 10:00 上周回顾 ——
+    #[serde(default = "default_true")]
+    pub weekly_recap_enabled: bool,
+    #[serde(default = "default_weekly_recap_time")]
+    pub weekly_recap_time: String,
+
+    // —— 每周日 21:00 周末轻松榜（表情/类型） ——
+    #[serde(default = "default_true")]
+    pub weekend_fun_enabled: bool,
+    #[serde(default = "default_weekend_fun_time")]
+    pub weekend_fun_time: String,
+
+    // —— 每月 1 日 10:00 上月回顾 ——
+    #[serde(default = "default_true")]
+    pub monthly_recap_enabled: bool,
+    #[serde(default = "default_monthly_recap_time")]
+    pub monthly_recap_time: String,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_font_family() -> String {
@@ -50,8 +92,32 @@ fn default_height() -> u32 {
     800
 }
 
+fn default_push_min_messages() -> u64 {
+    20
+}
+
 fn default_daily_push_time() -> String {
     "23:30:00".to_string()
+}
+
+fn default_morning_recap_time() -> String {
+    "09:00:00".to_string()
+}
+
+fn default_noon_brief_time() -> String {
+    "12:30:00".to_string()
+}
+
+fn default_weekly_recap_time() -> String {
+    "10:00:00".to_string()
+}
+
+fn default_weekend_fun_time() -> String {
+    "21:00:00".to_string()
+}
+
+fn default_monthly_recap_time() -> String {
+    "10:00:00".to_string()
 }
 
 pub fn default_config() -> Value {
@@ -61,9 +127,20 @@ pub fn default_config() -> Value {
         font_family: "Noto Sans CJK SC".to_string(),
         width: 960,
         height: 800,
-        daily_push_enabled: false,
+        push_min_messages: 20,
+        daily_push_enabled: true,
         daily_push_time: "23:30:00".to_string(),
         daily_push_scope: "本群".to_string(),
+        morning_recap_enabled: true,
+        morning_recap_time: "09:00:00".to_string(),
+        noon_brief_enabled: true,
+        noon_brief_time: "12:30:00".to_string(),
+        weekly_recap_enabled: true,
+        weekly_recap_time: "10:00:00".to_string(),
+        weekend_fun_enabled: true,
+        weekend_fun_time: "21:00:00".to_string(),
+        monthly_recap_enabled: true,
+        monthly_recap_time: "10:00:00".to_string(),
     })
 }
 
@@ -216,95 +293,78 @@ pub fn on_connected(
         let config: StatsConfig = get_config(&ctx, "stats_visualizer")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
-        if !config.daily_push_enabled {
-            return Ok(Some(ctx));
-        }
-
         let scheduler = ctx.scheduler.clone();
+        let min = config.push_min_messages;
 
-        // 调度综合日报推送
-        scheduler.schedule_daily_push(
-            ctx.clone(),
-            writer.clone(),
-            "DailyReport",
-            config.daily_push_time.clone(),
-            move |c, w, gid| async move {
-                let date_str = Local::now().format("%Y-%m-%d").to_string();
-                let (start, end) = get_time_range("今日");
+        // 注册一系列分时段的主动推送任务
+        // 每项可独立开关；设计原则：错峰、不打扰冷群、单条推送内按"引言→数字→主榜→走势→副榜→词云"展开
+        let registrations: [(bool, &str, String, PushFrequency, PushFn); 6] = [
+            (
+                config.morning_recap_enabled,
+                "MorningRecap",
+                config.morning_recap_time.clone(),
+                PushFrequency::Daily,
+                |c, w, gid, m| Box::pin(pusher::push_morning_recap(c, w, gid, m)),
+            ),
+            (
+                config.noon_brief_enabled,
+                "NoonBrief",
+                config.noon_brief_time.clone(),
+                PushFrequency::Daily,
+                |c, w, gid, m| Box::pin(pusher::push_noon_brief(c, w, gid, m)),
+            ),
+            (
+                config.daily_push_enabled,
+                "DailySummary",
+                config.daily_push_time.clone(),
+                PushFrequency::Daily,
+                |c, w, gid, m| Box::pin(pusher::push_daily_summary(c, w, gid, m)),
+            ),
+            (
+                config.weekly_recap_enabled,
+                "WeeklyRecap",
+                config.weekly_recap_time.clone(),
+                PushFrequency::Weekly(Weekday::Mon),
+                |c, w, gid, m| Box::pin(pusher::push_weekly_recap(c, w, gid, m)),
+            ),
+            (
+                config.weekend_fun_enabled,
+                "WeekendFun",
+                config.weekend_fun_time.clone(),
+                PushFrequency::Weekly(Weekday::Sun),
+                |c, w, gid, m| Box::pin(pusher::push_weekend_fun(c, w, gid, m)),
+            ),
+            (
+                config.monthly_recap_enabled,
+                "MonthlyRecap",
+                config.monthly_recap_time.clone(),
+                PushFrequency::Monthly(1),
+                |c, w, gid, m| Box::pin(pusher::push_monthly_recap(c, w, gid, m)),
+            ),
+        ];
 
-                // 0. 预检查：判断该群今日是否有消息
-                // 如果是冷门群组（无消息），直接跳过
-                let count =
-                    match queries::get_message_count(&c.db, Some(gid), None, start, end).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            warn!(target: "Plugin/Stats", "查询群 {} 消息记录失败: {}", gid, e);
-                            0
-                        }
-                    };
-
-                if count == 0 {
-                    info!(target: "Plugin/Stats", "群 [{}] 今日无消息，跳过推送。", gid);
-                    return;
-                }
-
-                // 1. 发送提示文本
-                info!(target: "Plugin/Stats", "正在推送群 [{}] 日报...", gid);
-                let intro_text = format!("📅 [{}] 群数据日报\n📊 正在生成统计数据...", date_str);
-                let _ = send_msg(
-                    &c,
-                    w.clone(),
-                    Some(gid),
-                    None,
-                    Message::new().text(intro_text),
-                )
-                .await;
-
-                // 2. 生成并发送排行榜 (串行)
-                let rank_title = "本群 今日 发言 排行榜".to_string();
-                let rank_res = chart::generate(
-                    &c,
-                    false,
-                    "发言",
-                    "排行榜",
-                    Some(gid),
-                    None,
-                    0,
-                    start,
-                    end,
-                    &rank_title,
-                )
-                .await;
-
-                match rank_res {
-                    Ok(b64) => {
-                        let _ = send_msg(&c, w.clone(), Some(gid), None, Message::new().image(b64))
-                            .await;
-                    }
-                    Err(e) => {
-                        warn!(target: "Plugin/Stats", "群 {} 排行榜生成失败: {}", gid, e);
-                    }
-                }
-
-                // 3. 生成并发送词云 (串行)
-                // 调用 word_cloud 模块的公共生成函数
-                let wc_res = word_cloud::generate_image(&c, Some(gid), None, start, end).await;
-
-                match wc_res {
-                    Ok(b64) => {
-                        let _ = send_msg(&c, w.clone(), Some(gid), None, Message::new().image(b64))
-                            .await;
-                    }
-                    Err(e) => {
-                        // 词云生成失败（如消息过少）是正常现象，仅记录日志不打扰群
-                        info!(target: "Plugin/Stats", "群 {} 词云未生成: {}", gid, e);
-                    }
-                }
-
-                // 任务结束，scheduler 会自动等待 x 秒后处理下一个群
-            },
-        );
+        for (enabled, label, time_str, freq, runner) in registrations {
+            if !enabled {
+                continue;
+            }
+            scheduler.schedule_periodic_push(
+                ctx.clone(),
+                writer.clone(),
+                "Stats",
+                label,
+                time_str,
+                freq,
+                move |c, w, gid| runner(c, w, gid, min),
+            );
+        }
 
         Ok(Some(ctx))
     })
 }
+
+type PushFn = fn(
+    Context,
+    LockedWriter,
+    i64,
+    u64,
+) -> futures_util::future::BoxFuture<'static, ()>;

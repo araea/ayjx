@@ -2,13 +2,53 @@
 
 use crate::adapters::onebot::{LockedWriter, api};
 use crate::event::Context;
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Datelike, Local, TimeZone, Weekday};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::task::AbortHandle;
+
+/// 周期性推送的触发条件（每天到点后，再判断今天是否命中）
+#[derive(Clone, Copy)]
+pub enum PushFrequency {
+    /// 每日触发
+    Daily,
+    /// 每周指定星期触发
+    Weekly(Weekday),
+    /// 每月指定日触发 (1..=31)；当月没有该日则跳过
+    Monthly(u32),
+}
+
+impl PushFrequency {
+    fn matches(&self, now: DateTime<Local>) -> bool {
+        match self {
+            PushFrequency::Daily => true,
+            PushFrequency::Weekly(wd) => now.weekday() == *wd,
+            PushFrequency::Monthly(d) => now.day() == *d,
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            PushFrequency::Daily => "每日".to_string(),
+            PushFrequency::Weekly(wd) => {
+                let name = match wd {
+                    Weekday::Mon => "周一",
+                    Weekday::Tue => "周二",
+                    Weekday::Wed => "周三",
+                    Weekday::Thu => "周四",
+                    Weekday::Fri => "周五",
+                    Weekday::Sat => "周六",
+                    Weekday::Sun => "周日",
+                };
+                format!("每{}", name)
+            }
+            PushFrequency::Monthly(d) => format!("每月{}日", d),
+        }
+    }
+}
 
 /// 全局定时任务管理器
 pub struct Scheduler {
@@ -103,14 +143,16 @@ impl Scheduler {
         )
     }
 
-    /// 通用工具：配置并调度每日推送任务
-    /// 包含：时间解析、群列表获取、黑白名单过滤、遍历执行
-    pub fn schedule_daily_push<F, Fut>(
+    /// 通用工具：配置并调度周期性主动推送任务
+    /// 包含：时间解析、频率过滤、群列表获取、黑白名单过滤、遍历执行
+    pub fn schedule_periodic_push<F, Fut>(
         &self,
         ctx: Context,
         writer: LockedWriter,
         plugin_name: &str,
+        task_label: &str,
         time_str: String,
+        frequency: PushFrequency,
         task_logic: F,
     ) where
         F: Fn(Context, LockedWriter, i64) -> Fut + Send + Sync + 'static + Clone,
@@ -128,32 +170,44 @@ impl Scheduler {
             (23, 30, 0)
         };
 
+        let log_target = format!("Plugin/{}", plugin_name);
         info!(
-            target: format!("Plugin/{}", plugin_name).as_str(),
-            "已计划每日推送: {:02}:{:02}:{:02}", h, m, s
+            target: log_target.as_str(),
+            "已计划[{}]推送: {} {:02}:{:02}:{:02}",
+            task_label, frequency.describe(), h, m, s
         );
 
         // 2. 调度任务
         let plugin_name_owned = plugin_name.to_string();
+        let task_label_owned = task_label.to_string();
         self.add_daily_at(h, m, s, move || {
             let ctx = ctx.clone();
             let writer = writer.clone();
             let task_logic = task_logic.clone();
             let p_name = plugin_name_owned.clone();
+            let label = task_label_owned.clone();
+            let freq = frequency;
 
             async move {
-                info!(target: format!("Plugin/{}", p_name).as_str(), "开始执行每日推送...");
+                let log_target = format!("Plugin/{}", p_name);
 
-                // 3. 获取群列表
+                // 3. 频率过滤：非目标日直接跳过
+                if !freq.matches(Local::now()) {
+                    return;
+                }
+
+                info!(target: log_target.as_str(), "开始执行[{}]推送...", label);
+
+                // 4. 获取群列表
                 let groups = match api::get_group_list(&ctx, writer.clone(), false).await {
                     Ok(g) => g,
                     Err(e) => {
-                        error!(target: format!("Plugin/{}", p_name).as_str(), "获取群列表失败: {}", e);
+                        error!(target: log_target.as_str(), "[{}] 获取群列表失败: {}", label, e);
                         return;
                     }
                 };
 
-                // 4. 准备过滤规则
+                // 5. 准备过滤规则
                 let (whitelist_mode, whitelist, blacklist) = {
                     let guard = ctx.config.read().unwrap();
                     (
@@ -163,7 +217,7 @@ impl Scheduler {
                     )
                 };
 
-                // 5. 过滤目标群
+                // 6. 过滤目标群
                 let target_groups: Vec<i64> = groups
                     .into_iter()
                     .map(|g| g.group_id)
@@ -177,13 +231,12 @@ impl Scheduler {
                     .collect();
 
                 if target_groups.is_empty() {
-                    info!(target: format!("Plugin/{}", p_name).as_str(), "没有符合条件的群组，跳过推送。");
+                    info!(target: log_target.as_str(), "[{}] 没有符合条件的群组，跳过推送。", label);
                     return;
                 }
 
-                // 6. 遍历执行
+                // 7. 遍历执行
                 for gid in target_groups {
-                    // 二次检查配置（可选，防止配置热更后未生效）
                     let should_skip = {
                         let guard = ctx.config.read().unwrap();
                         if guard.global_filter.enable_whitelist {
@@ -196,13 +249,12 @@ impl Scheduler {
                         continue;
                     }
 
-                    // 执行具体逻辑
                     task_logic(ctx.clone(), writer.clone(), gid).await;
 
                     // 间隔防风控
                     tokio::time::sleep(Duration::from_secs(5)).await;
                 }
-                info!(target: format!("Plugin/{}", p_name).as_str(), "每日推送任务完成。");
+                info!(target: log_target.as_str(), "[{}] 推送任务完成。", label);
             }
         });
     }

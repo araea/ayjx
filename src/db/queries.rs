@@ -489,6 +489,27 @@ pub async fn get_message_type_stats(
     }))
 }
 
+/// 获取指定条件下的活跃用户数量 (DISTINCT user_id)
+pub async fn get_active_user_count(
+    db: &DatabaseConnection,
+    group_id: Option<i64>,
+    start_time: i64,
+    end_time: i64,
+) -> Result<u64, DbErr> {
+    let mut query = MessageLogs::find()
+        .select_only()
+        .column_as(Expr::cust("COUNT(DISTINCT user_id)"), "count")
+        .filter(entity::Column::Time.gte(start_time))
+        .filter(entity::Column::Time.lt(end_time));
+
+    if let Some(gid) = group_id {
+        query = query.filter(entity::Column::GroupId.eq(gid));
+    }
+
+    let result: Option<i64> = query.into_tuple().one(db).await?;
+    Ok(result.unwrap_or(0) as u64)
+}
+
 /// 获取指定条件下的消息数量
 pub async fn get_message_count(
     db: &DatabaseConnection,
