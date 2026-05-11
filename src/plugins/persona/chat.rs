@@ -119,19 +119,9 @@ pub async fn generate(
         .and_then(|c| c.message.content.clone())
         .unwrap_or_default();
 
-    if let Some(json_str) = extract_json_object(&raw)
-        && let Ok(parsed) = serde_json::from_str::<ReplyResult>(json_str)
-    {
-        return Ok(parsed);
-    }
-
-    // 兜底：当成单条文本返回
-    let cleaned = raw.trim().trim_matches('"').to_string();
-    if cleaned.is_empty() {
-        return Err(anyhow::anyhow!("empty reply"));
-    }
-    Ok(ReplyResult {
-        messages: vec![cleaned],
-        ..Default::default()
-    })
+    let json_str = extract_json_object(&raw)
+        .ok_or_else(|| anyhow::anyhow!("no json in reply"))?;
+    let parsed = serde_json::from_str::<ReplyResult>(json_str)
+        .map_err(|e| anyhow::anyhow!("reply json parse error: {e}"))?;
+    Ok(parsed)
 }
