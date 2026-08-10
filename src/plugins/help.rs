@@ -47,7 +47,7 @@ fn describe(name: &str) -> (&'static str, &'static [&'static str]) {
             &["本群今日词云", "跨群本周词云", "我的总词云"],
         ),
         "stats_visualizer" => (
-            "群发言排行榜与时段走势图",
+            "群统计图表：发言/表情/消息类型排行榜与走势，支持定时推送",
             &["本群今日发言排行榜", "本群本周发言走势"],
         ),
         "card_reader" => ("解析 JSON 卡片消息为可读文本/链接", &["读卡", "解析卡", "看卡"]),
@@ -65,7 +65,10 @@ fn describe(name: &str) -> (&'static str, &'static [&'static str]) {
             "占卜（神断）系统：自定义与触发",
             &["神断帮助", "随机神断", "神断列表"],
         ),
-        "oai" => ("接入 OpenAI 兼容大模型对话", &[]),
+        "oai" => (
+            "多智能体对话：## 创建智能体，智能体 对话，模型/历史管理（符号指令）",
+            &["oai API地址 密钥", "/#", "/%"],
+        ),
         "persona" => ("群里伪装人类潜水的 AI 角色（DeepSeek）", &[]),
         "help" => ("显示本帮助信息", TRIGGERS),
         _ => ("(暂无说明)", &[]),
@@ -107,7 +110,7 @@ fn render_overview(ctx: &Context) -> String {
 
     out.push_str("———————————————\n");
     out.push_str(&format!(
-        "查看某个插件的指令: {p}help <插件名>\n例: {p}help echo",
+        "查看某个插件的指令：{p}help <插件名>\n例：{p}help echo",
         p = prefix
     ));
     out
@@ -132,13 +135,13 @@ fn render_detail(ctx: &Context, name: &str) -> String {
     };
 
     let mut out = String::new();
-    out.push_str(&format!("插件 [{}]  状态: {}\n", plugin.name, status));
-    out.push_str(&format!("简介: {}\n", desc));
+    out.push_str(&format!("插件 [{}]  状态：{}\n", plugin.name, status));
+    out.push_str(&format!("简介：{}\n", desc));
 
     if cmds.is_empty() {
-        out.push_str("指令: 无 (该插件为后台运行或自动触发)");
+        out.push_str("指令：无（该插件为后台运行或自动触发）");
     } else {
-        out.push_str("指令:\n");
+        out.push_str("指令：\n");
         for c in cmds {
             out.push_str(&format!("  {}{}\n", prefix, c));
         }

@@ -275,7 +275,7 @@ pub fn handle(
                     writer,
                     group_id,
                     Some(user_id),
-                    format!("生成失败: {}", e),
+                    format!("❌ 生成失败：{}", e),
                 )
                 .await;
             }

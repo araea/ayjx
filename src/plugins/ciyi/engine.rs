@@ -262,7 +262,7 @@ pub async fn commit_guess(
     } else {
         match CiYiGameState::load(db, group_id).await? {
             Some(s) => s,
-            None => return Ok("游戏尚未开始，请重试".to_string()),
+            None => return Ok("游戏尚未开始，请重试。".to_string()),
         }
     };
 
@@ -271,11 +271,11 @@ pub async fn commit_guess(
     }
 
     if state.current_guesses.contains(&guess_word) {
-        return Ok(format!("{guess_word} 已猜过"));
+        return Ok(format!("{guess_word} 已猜过。"));
     }
 
     if !get_all_words().contains(&guess_word) {
-        return Ok(format!("{guess_word} 不在词库中"));
+        return Ok(format!("{guess_word} 不在词库中。"));
     }
 
     state.current_guesses.insert(guess_word.clone());
@@ -368,20 +368,20 @@ pub async fn toggle_direct_guess_mode(
                 direct_guess_enabled: default,
             }
         }
-        Err(_) => return "数据库错误".to_string(),
+        Err(_) => return "数据库错误。".to_string(),
     };
 
     state.direct_guess_enabled = !state.direct_guess_enabled;
     let new_status = state.direct_guess_enabled;
 
     if (state.save(db).await).is_err() {
-        return "保存状态失败".to_string();
+        return "保存状态失败。".to_string();
     }
 
     if new_status {
-        "直接猜测模式 已开启".to_string()
+        "直接猜测模式已开启。".to_string()
     } else {
-        "直接猜测模式 已关闭".to_string()
+        "直接猜测模式已关闭。".to_string()
     }
 }
 
@@ -409,7 +409,7 @@ pub async fn get_global_leaderboard(db: &DatabaseConnection, limit: usize) -> St
         .await
     {
         Ok(r) => r,
-        Err(_) => return "获取排行榜失败".to_string(),
+        Err(_) => return "获取排行榜失败。".to_string(),
     };
 
     format_leaderboard(results)
@@ -434,7 +434,7 @@ pub async fn get_channel_leaderboard(
         .await
     {
         Ok(r) => r,
-        Err(_) => return "获取排行榜失败".to_string(),
+        Err(_) => return "获取排行榜失败。".to_string(),
     };
 
     format_leaderboard(results)
@@ -482,7 +482,7 @@ pub async fn guess_word(
 ) -> String {
     let fetch_req = match prepare_guess(db, group_id).await {
         Ok(req) => req,
-        Err(e) => return format!("系统错误: {}", e),
+        Err(e) => return format!("系统错误：{}", e),
     };
 
     let fetched_data = if let Some(req) = fetch_req {
@@ -507,6 +507,6 @@ pub async fn guess_word(
     .await
     {
         Ok(msg) => msg,
-        Err(e) => format!("游戏处理错误: {}", e),
+        Err(e) => format!("游戏处理错误：{}", e),
     }
 }

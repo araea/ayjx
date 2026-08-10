@@ -81,7 +81,7 @@ async fn handle_to_url(
     if let Some((url, type_name)) = find_media_in_segments(&matched.args) {
         let reply = Message::new()
             .reply(msg.message_id())
-            .text(format!("🔗 已提取{}:\n{}", type_name, url));
+            .text(format!("🔗 已提取{}：\n{}", type_name, url));
         send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
         return Ok(None);
     }
@@ -96,7 +96,7 @@ async fn handle_to_url(
                         if let Some(url) = seg.data.get("url").and_then(|v| v.as_str()) {
                             let reply = Message::new()
                                 .reply(msg.message_id())
-                                .text(format!("🔗 已提取图片:\n{}", url));
+                                .text(format!("🔗 已提取图片：\n{}", url));
                             send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply)
                                 .await?;
                             return Ok(None);
@@ -111,7 +111,7 @@ async fn handle_to_url(
                         if let Some(url) = url_opt {
                             let reply = Message::new()
                                 .reply(msg.message_id())
-                                .text(format!("🔗 已提取视频:\n{}", url));
+                                .text(format!("🔗 已提取视频：\n{}", url));
                             send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply)
                                 .await?;
                             return Ok(None);

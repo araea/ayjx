@@ -96,13 +96,13 @@ pub fn handle(
             // 回复消息
             let reply_msg = Message::new()
                 .reply(message_id)
-                .text(format!("Pong! 全服累计 Ping 次数: {}", count));
+                .text(format!("✅ Pong！全服累计 Ping 次数：{}", count));
 
             send_msg(&ctx, writer.clone(), group_id, Some(user_id), reply_msg).await?;
 
             // 发送合并转发消息
             let node1 = Message::new().text("系统日志：收到心跳检测请求");
-            let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID: {}", count));
+            let node2 = Message::new().text(format!("数据库写入成功，当前记录 ID：{}", count));
             let node3 = Message::new()
                 .text("这是一个自定义合并转发消息的示例。")
                 .image("https://www.sea-ql.org/SeaORM/img/SeaORM%20banner.png");

@@ -39,4 +39,7 @@ register_plugins!(
         on_connected: Some(persona::on_connected)
     },
     help,
+    auto_restart {
+        on_init: Some(auto_restart::init)
+    },
 );

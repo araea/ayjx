@@ -20,9 +20,12 @@ pub async fn init() -> Result<DatabaseConnection, DbErr> {
     let db_url = "sqlite:data/bot.db?mode=rwc";
 
     // 配置连接池选项
+    // 注意: SQLite 为单写者模型，并发写会串行排队，过大的连接池不仅无用，
+    // 还会让每个连接各自持有 page cache / prepared statement 缓存，白占内存。
+    // 8 个连接已远够用；idle_timeout 会在空闲时及时回收。
     let mut opt = ConnectOptions::new(db_url);
-    opt.max_connections(100)
-        .min_connections(5)
+    opt.max_connections(8)
+        .min_connections(1)
         .connect_timeout(Duration::from_secs(8))
         .acquire_timeout(Duration::from_secs(8))
         .idle_timeout(Duration::from_secs(8))
@@ -46,6 +49,15 @@ pub async fn init() -> Result<DatabaseConnection, DbErr> {
     db.execute(Statement::from_string(
         backend,
         "PRAGMA synchronous=NORMAL;".to_owned(),
+    ))
+    .await?;
+
+    // 启用增量自动回收: 删除行后页面进入 freelist，配合每日 incremental_vacuum 回收，
+    // 避免全量 VACUUM 需要约 2× 文件大小的临时空间和长时间锁库。
+    // (首次从 NONE 切换会对现有库隐式执行一次 VACUUM，之后便为增量模式)
+    db.execute(Statement::from_string(
+        backend,
+        "PRAGMA auto_vacuum=INCREMENTAL;".to_owned(),
     ))
     .await?;
 

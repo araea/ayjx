@@ -109,7 +109,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            "⚠️ 请附带角色卡图片或引用图片消息",
+                            "⚠️ 请附带角色卡图片或引用图片消息。",
                         )
                         .await;
                         return Ok(None);
@@ -135,7 +135,7 @@ pub fn handle(
                                 writer,
                                 msg.group_id(),
                                 Some(msg.user_id()),
-                                format!("❌ 图片下载失败: {}", e),
+                                format!("❌ 图片下载失败：{}", e),
                             )
                             .await;
                             return Ok(None);
@@ -147,7 +147,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            format!("❌ 网络请求失败: {}", e),
+                            format!("❌ 网络请求失败：{}", e),
                         )
                         .await;
                         return Ok(None);
@@ -198,7 +198,7 @@ pub fn handle(
                                 writer.clone(),
                                 gid,
                                 Some(uid),
-                                format!("❌ 文件上传失败: {}", e),
+                                format!("❌ 文件上传失败：{}", e),
                             )
                             .await;
                         }
@@ -212,7 +212,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            format!("❌ 解析失败: {}", e),
+                            format!("❌ 解析失败：{}", e),
                         )
                         .await;
                     }

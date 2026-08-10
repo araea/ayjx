@@ -26,7 +26,7 @@ pub async fn handle_user_count(
     };
 
     let count = storage.get_user_count(&ctx.db, target_id).await;
-    reply_text(ctx, writer, &format!("神断次数: {}", count)).await?;
+    reply_text(ctx, writer, &format!("神断次数：{}", count)).await?;
     Ok(())
 }
 
@@ -44,11 +44,11 @@ pub async fn handle_user_rank(
     let ranks = storage.get_user_ranking(&ctx.db, limit).await;
 
     if ranks.is_empty() {
-        reply_text(ctx, writer, "暂无数据").await?;
+        reply_text(ctx, writer, "暂无数据。").await?;
         return Ok(());
     }
 
-    let mut msg = String::from("用户排行榜:\n");
+    let mut msg = String::from("用户排行榜：\n");
     for (i, r) in ranks.iter().enumerate() {
         msg.push_str(&format!("{}. {}: {}\n", i + 1, r.name, r.count));
     }
@@ -69,13 +69,13 @@ pub async fn handle_item_rank(
         .unwrap_or(max as u64);
     let ranks = storage.get_item_ranking(&ctx.db, limit).await;
     if ranks.is_empty() {
-        reply_text(ctx, writer, "暂无数据").await?;
+        reply_text(ctx, writer, "暂无数据。").await?;
         return Ok(());
     }
 
     let shindans = storage.get_shindans();
 
-    let mut msg = String::from("神断热度榜:\n");
+    let mut msg = String::from("神断热度榜：\n");
     for (i, r) in ranks.iter().enumerate() {
         let name = shindans
             .iter()

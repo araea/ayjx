@@ -111,7 +111,7 @@ pub fn handle(
                             writer,
                             group_id,
                             Some(user_id),
-                            "❌ 请附带图片或引用图片消息",
+                            "❌ 请附带图片或引用图片消息。",
                         )
                         .await;
                         return Ok(None);
@@ -135,7 +135,7 @@ pub fn handle(
                             writer,
                             group_id,
                             Some(msg.user_id()),
-                            format!("❌ 图片下载失败: {}", e),
+                            format!("❌ 图片下载失败：{}", e),
                         )
                         .await;
                         return Ok(None);
@@ -222,7 +222,7 @@ pub fn handle(
                             writer,
                             group_id,
                             Some(user_id),
-                            format!("❌ 处理失败: {}", e),
+                            format!("❌ 处理失败：{}", e),
                         )
                         .await;
                     }
@@ -257,7 +257,7 @@ async fn send_forward_msg(ctx: &Context, writer: LockedWriter, base64_list: Vec<
             writer.clone(),
             group_id,
             Some(user_id),
-            "⚠️ 切片数量过多，为防止风控，仅发送前 99 张",
+            "⚠️ 切片数量过多，为防止风控，仅发送前 99 张。",
         )
         .await;
     }

@@ -26,18 +26,18 @@ pub async fn handle_add(
     let mode = params.get(2).unwrap_or(&"image");
 
     if !id.chars().all(char::is_numeric) {
-        reply_text(ctx, writer, "ID 必须是数字").await?;
+        reply_text(ctx, writer, "ID 必须是数字。").await?;
         return Ok(());
     }
 
     // Check duplicates
     let current = storage.get_shindans();
     if current.iter().any(|s| s.command == cmd) {
-        reply_text(ctx, writer, "命令已存在").await?;
+        reply_text(ctx, writer, "命令已存在。").await?;
         return Ok(());
     }
     if current.iter().any(|s| s.id == id) {
-        reply_text(ctx, writer, "ID 已存在").await?;
+        reply_text(ctx, writer, "ID 已存在。").await?;
         return Ok(());
     }
 
@@ -51,10 +51,10 @@ pub async fn handle_add(
                 mode: mode.to_string(),
             };
             storage.add_shindan(s.clone()).await;
-            reply_text(ctx, writer, &format!("添加成功: {} ({})", s.title, s.id)).await?;
+            reply_text(ctx, writer, &format!("添加成功：{} ({})", s.title, s.id)).await?;
         }
         Err(_) => {
-            reply_text(ctx, writer, "获取神断信息失败，请检查 ID").await?;
+            reply_text(ctx, writer, "获取神断信息失败，请检查 ID。").await?;
         }
     }
     Ok(())
@@ -71,9 +71,9 @@ pub async fn handle_del(
         return Ok(());
     }
     if let Some(s) = storage.remove_shindan(params[0]).await {
-        reply_text(ctx, writer, &format!("已删除: {} ({})", s.title, s.id)).await?;
+        reply_text(ctx, writer, &format!("已删除：{} ({})", s.title, s.id)).await?;
     } else {
-        reply_text(ctx, writer, "未找到该神断").await?;
+        reply_text(ctx, writer, "未找到该神断。").await?;
     }
     Ok(())
 }
@@ -81,7 +81,7 @@ pub async fn handle_del(
 pub async fn handle_list(ctx: &Context, writer: LockedWriter, storage: &Storage) -> Result<()> {
     let mut list = storage.get_shindans();
     if list.is_empty() {
-        reply_text(ctx, writer, "列表为空").await?;
+        reply_text(ctx, writer, "列表为空。").await?;
         return Ok(());
     }
 
@@ -140,13 +140,13 @@ pub async fn handle_set_mode(
     }
     let mode = params[1];
     if mode != "text" && mode != "image" {
-        reply_text(ctx, writer, "模式仅支持 text 或 image").await?;
+        reply_text(ctx, writer, "模式仅支持 text 或 image。").await?;
         return Ok(());
     }
     if storage.update_mode(params[0], mode).await {
-        reply_text(ctx, writer, "设置成功").await?;
+        reply_text(ctx, writer, "设置成功。").await?;
     } else {
-        reply_text(ctx, writer, "未找到该神断").await?;
+        reply_text(ctx, writer, "未找到该神断。").await?;
     }
     Ok(())
 }
@@ -162,9 +162,9 @@ pub async fn handle_modify(
         return Ok(());
     }
     if storage.update_command(params[0], params[1]).await {
-        reply_text(ctx, writer, "修改成功").await?;
+        reply_text(ctx, writer, "修改成功。").await?;
     } else {
-        reply_text(ctx, writer, "未找到该神断").await?;
+        reply_text(ctx, writer, "未找到该神断。").await?;
     }
     Ok(())
 }
@@ -190,9 +190,9 @@ pub async fn handle_search(
         .collect();
 
     if matches.is_empty() {
-        reply_text(ctx, writer, "未找到相关神断").await?;
+        reply_text(ctx, writer, "未找到相关神断。").await?;
     } else {
-        reply_text(ctx, writer, &format!("搜索结果:\n{}", matches.join("\n"))).await?;
+        reply_text(ctx, writer, &format!("搜索结果：\n{}", matches.join("\n"))).await?;
     }
     Ok(())
 }
@@ -211,12 +211,12 @@ pub async fn handle_view_info(
     let list = storage.get_shindans();
     if let Some(s) = list.iter().find(|s| s.command == target || s.id == target) {
         let msg = format!(
-            "标题: {}\nID: {}\n命令: {}\n模式: {}\n描述: {}",
+            "标题：{}\nID：{}\n命令：{}\n模式：{}\n描述：{}",
             s.title, s.id, s.command, s.mode, s.description
         );
         reply_text(ctx, writer, &msg).await?;
     } else {
-        reply_text(ctx, writer, "未找到").await?;
+        reply_text(ctx, writer, "未找到。").await?;
     }
     Ok(())
 }

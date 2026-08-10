@@ -192,11 +192,13 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                         let rows = exec_res.rows_affected();
                         info!(target: "Plugin/Recorder", "已清理 {} 条过期消息记录。", rows);
                         if rows > 0 {
-                            info!(target: "Plugin/Recorder", "正在整理数据库碎片 (VACUUM)...");
-                            if let Err(e) = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "VACUUM;".to_owned())).await {
-                                warn!(target: "Plugin/Recorder", "VACUUM 执行失败: {}", e);
+                            // 增量回收 freelist 页(依赖 db.rs 的 auto_vacuum=INCREMENTAL)，
+                            // 避免全量 VACUUM 需要约 2× 文件大小的临时空间且长时间锁库。
+                            info!(target: "Plugin/Recorder", "正在增量回收数据库空间 (incremental_vacuum)...");
+                            if let Err(e) = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "PRAGMA incremental_vacuum;".to_owned())).await {
+                                warn!(target: "Plugin/Recorder", "incremental_vacuum 执行失败: {}", e);
                             } else {
-                                info!(target: "Plugin/Recorder", "数据库整理完成。");
+                                info!(target: "Plugin/Recorder", "数据库空间回收完成。");
                             }
                         }
                     },

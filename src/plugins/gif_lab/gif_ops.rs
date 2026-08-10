@@ -147,7 +147,7 @@ pub fn gif_info(img_bytes: Vec<u8>) -> Result<String> {
         .sum();
 
     Ok(format!(
-        "📏 尺寸: {}x{}\n🎞️ 帧数: {}\n⏱️ 时长: {:.2}s\n💾 大小: {}",
+        "📏 尺寸：{}x{}\n🎞️ 帧数：{}\n⏱️ 时长：{:.2}s\n💾 大小：{}",
         w,
         h,
         count,

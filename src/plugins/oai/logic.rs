@@ -126,7 +126,7 @@ async fn chat(
                 ctx,
                 writer,
                 &event,
-                "⏳ 正在生成中，请等待或使用 智能体! 停止",
+                "⏳ 正在生成中，请等待，或使用「智能体!」停止。",
             )
             .await;
             return;
@@ -148,7 +148,7 @@ async fn chat(
     };
 
     if api.0.is_empty() || api.1.is_empty() {
-        reply_text(ctx, writer, &event, "❌ API 未配置").await;
+        reply_text(ctx, writer, &event, "❌ API 未配置。").await;
         return;
     }
 
@@ -179,7 +179,7 @@ async fn chat(
         }
     } else {
         if prompt.is_empty() && imgs.is_empty() {
-            reply_text(ctx, writer, &event, "💬 请输入内容").await;
+            reply_text(ctx, writer, &event, "💬 请输入内容。").await;
             return;
         }
         hist.push(ChatMessage::new("user", prompt, imgs.clone()));
@@ -332,7 +332,7 @@ async fn chat(
                     .await
                     .set_generating(name, is_priv_ctx, &uid, false);
             }
-            reply_text(ctx, writer, &event, format!("❌ 请求构建失败: {}", e)).await;
+            reply_text(ctx, writer, &event, format!("❌ 请求构建失败：{}", e)).await;
             return;
         }
     };
@@ -426,7 +426,7 @@ async fn chat(
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        format!("{}\n\n---\n**图片链接:**\n{}", content, urls_text)
+                        format!("{}\n\n---\n**图片链接：**\n{}", content, urls_text)
                     } else {
                         content.clone()
                     };
@@ -501,7 +501,7 @@ async fn chat(
                         .await
                         .set_generating(name, is_priv_ctx, &uid, false);
                 }
-                reply_text(ctx, writer, &event, format!("❌ API错误: {}", e)).await;
+                reply_text(ctx, writer, &event, format!("❌ API 错误：{}", e)).await;
             }
         },
     }
@@ -529,19 +529,19 @@ pub async fn execute(
             c.api_key = key;
             mgr.save(&c);
             drop(c);
-            reply_text(ctx, writer, &msg_event, format!("✅ API 已配置: {}", url)).await;
+            reply_text(ctx, writer, &msg_event, format!("✅ API 已配置：{}", url)).await;
             match mgr.fetch_models().await {
                 Ok(models) => {
                     reply_text(
                         ctx,
                         writer,
                         &msg_event,
-                        format!("📋 验证成功，已获取 {} 个模型", models.len()),
+                        format!("📋 验证成功，已获取 {} 个模型。", models.len()),
                     )
                     .await
                 }
                 Err(e) => {
-                    reply_text(ctx, writer, &msg_event, format!("⚠️ 获取模型失败: {}", e)).await
+                    reply_text(ctx, writer, &msg_event, format!("⚠️ 获取模型失败：{}", e)).await
                 }
             }
         }
@@ -563,7 +563,7 @@ pub async fn execute(
             if let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) {
                 a.generation_id += 1;
                 mgr.save(&c);
-                reply_text(ctx, writer, &msg_event, "🛑 已停止").await;
+                reply_text(ctx, writer, &msg_event, "🛑 已停止。").await;
             } else {
                 reply_text(
                     ctx,
@@ -576,7 +576,7 @@ pub async fn execute(
         }
         Action::Copy => {
             if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定新名称: 智能体~#新名称").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请指定新名称：智能体~#新名称").await;
                 return;
             }
             if cmd.args.chars().count() > 7
@@ -619,7 +619,7 @@ pub async fn execute(
         }
         Action::Rename => {
             if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定新名称: 智能体~=新名称").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请指定新名称：智能体~=新名称").await;
                 return;
             }
             if cmd.args.chars().count() > 7
@@ -662,7 +662,7 @@ pub async fn execute(
         }
         Action::SetDesc => {
             if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请提供描述: 智能体:描述内容").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请提供描述：智能体:描述内容").await;
                 return;
             }
             let mut c = mgr.config.write().await;
@@ -676,7 +676,7 @@ pub async fn execute(
         }
         Action::SetModel => {
             if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定模型: 智能体%模型名").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请指定模型：智能体%模型名").await;
                 return;
             }
             let mut c = mgr.config.write().await;
@@ -690,14 +690,14 @@ pub async fn execute(
                         ctx,
                         writer,
                         &msg_event,
-                        format!("🔄 {} 模型: {} → {}", name, old, model),
+                        format!("🔄 {} 模型：{} → {}", name, old, model),
                     )
                     .await;
                 } else {
                     reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
                 }
             } else {
-                reply_text(ctx, writer, &msg_event, "❌ 无效模型").await;
+                reply_text(ctx, writer, &msg_event, "❌ 无效模型。").await;
             }
         }
         Action::SetPrompt => {
@@ -807,7 +807,7 @@ pub async fn execute(
                     ctx,
                     writer,
                     &msg_event,
-                    format!("⚠️ 刷新失败，将展示缓存列表: {}", e),
+                    format!("⚠️ 刷新失败，将展示缓存列表：{}", e),
                 )
                 .await;
             }
@@ -819,7 +819,7 @@ pub async fn execute(
                     ctx,
                     writer,
                     &msg_event,
-                    "📭 未找到可用模型 (请检查过滤关键字)",
+                    "📭 未找到可用模型（请检查过滤关键字）",
                 )
                 .await;
                 return;
@@ -921,7 +921,7 @@ pub async fn execute(
         }
         Action::ViewAt(scope) => {
             if cmd.indices.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定索引: 智能体/索引").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请指定索引：智能体/索引").await;
                 return;
             }
             let c = mgr.config.read().await;
@@ -976,7 +976,7 @@ pub async fn execute(
                     }
                 }
                 if results.is_empty() {
-                    reply_text(ctx, writer, &msg_event, "❌ 索引无效").await;
+                    reply_text(ctx, writer, &msg_event, "❌ 索引无效。").await;
                 } else {
                     reply(
                         ctx,
@@ -1055,7 +1055,7 @@ pub async fn execute(
                                         ctx,
                                         writer,
                                         &msg_event,
-                                        format!("📤 已导出: {}", fname),
+                                        format!("📤 已导出：{}", fname),
                                     )
                                     .await
                                 }
@@ -1064,17 +1064,17 @@ pub async fn execute(
                                         ctx,
                                         writer,
                                         &msg_event,
-                                        format!("❌ 上传失败: {}", e),
+                                        format!("❌ 上传失败：{}", e),
                                     )
                                     .await
                                 }
                             }
                         } else {
-                            reply_text(ctx, writer, &msg_event, "❌ 写入失败").await;
+                            reply_text(ctx, writer, &msg_event, "❌ 写入失败。").await;
                         }
                     }
                     Err(e) => {
-                        reply_text(ctx, writer, &msg_event, format!("❌ 创建文件失败: {}", e)).await
+                        reply_text(ctx, writer, &msg_event, format!("❌ 创建文件失败：{}", e)).await
                     }
                 }
             } else {
@@ -1083,11 +1083,11 @@ pub async fn execute(
         }
         Action::EditAt(scope) => {
             if cmd.indices.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定索引: 智能体'索引 新内容").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请指定索引：智能体'索引 新内容").await;
                 return;
             }
             if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请提供新内容").await;
+                reply_text(ctx, writer, &msg_event, "❌ 请提供新内容。").await;
                 return;
             }
             let idx = cmd.indices[0];
@@ -1098,7 +1098,7 @@ pub async fn execute(
                     mgr.save(&c);
                     reply_text(ctx, writer, &msg_event, format!("✏️ 已编辑第 {} 条", idx)).await;
                 } else {
-                    reply_text(ctx, writer, &msg_event, format!("❌ 索引 {} 无效", idx)).await;
+                    reply_text(ctx, writer, &msg_event, format!("❌ 索引 {} 无效。", idx)).await;
                 }
             } else {
                 reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
@@ -1110,7 +1110,7 @@ pub async fn execute(
                     ctx,
                     writer,
                     &msg_event,
-                    "❌ 请指定索引: 智能体-索引 (支持 1,3,5 或 1-5)",
+                    "❌ 请指定索引：智能体-索引（支持 1,3,5 或 1-5）",
                 )
                 .await;
                 return;
@@ -1120,7 +1120,7 @@ pub async fn execute(
                 let priv_scope = matches!(scope, Scope::Private);
                 let deleted = a.delete_at(priv_scope, &uid, &cmd.indices);
                 if deleted.is_empty() {
-                    reply_text(ctx, writer, &msg_event, "❌ 索引无效").await;
+                    reply_text(ctx, writer, &msg_event, "❌ 索引无效。").await;
                 } else {
                     mgr.save(&c);
                     let s = deleted
@@ -1132,7 +1132,7 @@ pub async fn execute(
                         ctx,
                         writer,
                         &msg_event,
-                        format!("🗑️ 已删除第 {} 条 (共{}条)", s, deleted.len()),
+                        format!("🗑️ 已删除第 {} 条（共 {} 条）", s, deleted.len()),
                     )
                     .await;
                 }
@@ -1415,7 +1415,7 @@ pub async fn handle_create(
             ctx,
             writer,
             &msg_event,
-            format!("📝 已更新 {} (模型: {})", name, updated_model),
+            format!("📝 已更新 {}（模型：{}）", name, updated_model),
         )
         .await;
     } else {
@@ -1431,7 +1431,7 @@ pub async fn handle_create(
             ctx,
             writer,
             &msg_event,
-            format!("🤖 已创建 {} (模型: {})", name, model),
+            format!("🤖 已创建 {}（模型：{}）", name, model),
         )
         .await;
     }

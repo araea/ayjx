@@ -131,7 +131,7 @@ pub fn handle(
                                 .unwrap_or("")
                                 .trim();
                             if arg.chars().count() != 2 {
-                                "无效输入，请发送两个字的词语".to_string()
+                                "无效输入，请发送两个字的词语。".to_string()
                             } else {
                                 let username = msg_event.sender_name().to_string();
                                 engine::guess_word(

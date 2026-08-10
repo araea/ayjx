@@ -3,8 +3,8 @@ use crate::plugins::recorder::entity::{self, Entity as MessageLogs};
 use plotters::style::RGBColor;
 use sea_orm::sea_query::{Func, SimpleExpr};
 use sea_orm::{
-    ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, QueryTrait,
+    ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, QueryTrait,
 };
 use std::collections::HashMap;
 
@@ -157,35 +157,22 @@ pub async fn fetch_line_data(
     let mut chart_data: Vec<ChartDataPoint> = Vec::new();
 
     if is_hourly {
-        use crate::plugins::recorder::entity::Column as RecordColumn;
-
-        // 获取所有符合条件的时间戳
-        let timestamps: Vec<i64> = MessageLogs::find()
-            .filter(
-                Condition::all()
-                    .add(RecordColumn::Time.gte(start_time))
-                    .add(RecordColumn::Time.lt(end_time)),
-            )
-            .apply_if(query_group, |q, g| q.filter(RecordColumn::GroupId.eq(g)))
-            .apply_if(query_user, |q, u| q.filter(RecordColumn::UserId.eq(u)))
-            .select_only()
-            .column(RecordColumn::Time)
-            .into_tuple()
-            .all(db)
-            .await
-            .map_err(|e| e.to_string())?;
+        // SQL 端按 time_hour 聚合，避免把时间范围内所有消息时间戳一次性载入内存。
+        // 查询入口均为整点开始（今日/昨日等），桶 i 对应 hour=(start_hour+i)%24，
+        // 与 time_hour 语义一致，可精确对齐到 start_time 起点。
+        let hourly =
+            queries::get_hourly_activity(db, query_group, query_user, start_time, end_time)
+                .await
+                .map_err(|e| e.to_string())?;
 
         let duration_hours = ((end_time - start_time) as f64 / 3600.0).ceil() as i64;
         let total_buckets = duration_hours.clamp(1, 24) as usize;
         let mut counts = vec![0i64; total_buckets];
 
-        for ts in timestamps {
-            let offset = ts - start_time;
-            if offset >= 0 {
-                let bucket = (offset / 3600) as usize;
-                if bucket < total_buckets {
-                    counts[bucket] += 1;
-                }
+        for h in hourly {
+            let hour = h.hour.rem_euclid(24) as usize;
+            if hour < total_buckets {
+                counts[hour] += h.count;
             }
         }
 

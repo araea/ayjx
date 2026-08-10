@@ -89,7 +89,7 @@ pub async fn handle_shindan_exec(
 ) -> Result<()> {
     let list = storage.get_shindans();
     if list.is_empty() {
-        reply_text(ctx, writer, "列表为空").await?;
+        reply_text(ctx, writer, "列表为空。").await?;
         return Ok(());
     }
 
@@ -193,7 +193,7 @@ async fn execute_shindan(
             }
             Err(e) => {
                 error!(target: "Shindan", "Text mode error: {}", e);
-                reply_text(ctx, writer, "神断失败: 网络错误").await?;
+                reply_text(ctx, writer, "❌ 神断失败：网络错误").await?;
             }
         }
     } else {
@@ -240,7 +240,7 @@ async fn execute_shindan(
             }
             Err(e) => {
                 error!(target: "Shindan", "Image mode error: {}", e);
-                reply_text(ctx, writer, "神断失败: 网络错误").await?;
+                reply_text(ctx, writer, "❌ 神断失败：网络错误").await?;
             }
         }
     }

@@ -99,7 +99,7 @@ pub fn handle(
                 target_user,
                 Message::new()
                     .reply(reply_id)
-                    .text(format!("正在生成 {}...", title)),
+                    .text(format!("⏳ 正在生成 {}...", title)),
             )
             .await;
 
@@ -110,7 +110,7 @@ pub fn handle(
                     let _ = send_msg(&ctx, writer, target_group, target_user, img_msg).await;
                 }
                 Err(e) => {
-                    let err_msg = Message::new().text(format!("生成失败: {}", e));
+                    let err_msg = Message::new().text(format!("❌ 生成失败：{}", e));
                     let _ = send_msg(&ctx, writer, target_group, target_user, err_msg).await;
                     error!(target: "Plugin/WordCloud", "Handler error: {}", e);
                 }

@@ -99,7 +99,7 @@ pub fn handle(
                         msg.group_id(),
                         Some(msg.user_id()),
                         format!(
-                            "❌ 切片数量过多，最大支持 {}x{}",
+                            "❌ 切片数量过多，最大支持 {}x{}。",
                             config.max_rows, config.max_cols
                         ),
                     )
@@ -153,7 +153,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            "⚠️ 请在发送指令时附带图片，或引用一张图片",
+                            "⚠️ 请在发送指令时附带图片，或引用一张图片。",
                         )
                         .await;
                         return Ok(None);
@@ -179,7 +179,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            "❌ 图片下载失败",
+                            "❌ 图片下载失败。",
                         )
                         .await;
                         return Ok(None);
@@ -230,7 +230,7 @@ pub fn handle(
                             writer,
                             msg.group_id(),
                             Some(msg.user_id()),
-                            format!("❌ 处理失败: {}", e),
+                            format!("❌ 处理失败：{}", e),
                         )
                         .await;
                     }
