@@ -3,7 +3,7 @@ use super::utils::{
     ColorScheme, get_contrast_color, get_font, get_font_family, get_font_with_color,
     mix_with_white, overlay_image, save_rgba_to_base64, truncate_text_to_fit,
 };
-use crate::plugins::stats_visualizer::StatsConfig;
+use crate::plugins::stats::StatsConfig;
 use chrono::Local;
 use image::{Rgba, RgbaImage};
 use plotters::prelude::*;

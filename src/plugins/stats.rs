@@ -41,9 +41,6 @@ pub struct StatsConfig {
     pub daily_push_enabled: bool,
     #[serde(default = "default_daily_push_time")]
     pub daily_push_time: String,
-    /// 兼容字段（暂未使用）
-    #[serde(default)]
-    pub daily_push_scope: String,
 
     // —— 每日 09:00 早安回顾（昨日数据） ——
     #[serde(default = "default_true")]
@@ -130,7 +127,6 @@ pub fn default_config() -> Value {
         push_min_messages: 20,
         daily_push_enabled: true,
         daily_push_time: "23:30:00".to_string(),
-        daily_push_scope: "本群".to_string(),
         morning_recap_enabled: true,
         morning_recap_time: "09:00:00".to_string(),
         noon_brief_enabled: true,
@@ -290,7 +286,7 @@ pub fn on_connected(
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: StatsConfig = get_config(&ctx, "stats_visualizer")
+        let config: StatsConfig = get_config(&ctx, "stats")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
         let scheduler = ctx.scheduler.clone();

@@ -12,21 +12,15 @@ use toml::Value;
 #[derive(Serialize, Deserialize)]
 struct Config {
     enabled: bool,
-    commands: Vec<String>,
-    recall_command: bool,
 }
 
+// 收藏指令（内置，无需配置）
+const COMMANDS: &[&str] = &["表情转图片", "收", "偷", "存表情"];
+// 保存成功后是否撤回触发指令（内置，默认关闭）
+const RECALL_AFTER_SAVE: bool = false;
+
 pub fn default_config() -> Value {
-    build_config(Config {
-        enabled: true,
-        commands: vec![
-            "表情转图片".into(),
-            "收".into(),
-            "偷".into(),
-            "存表情".into(),
-        ],
-        recall_command: false,
-    })
+    build_config(Config { enabled: true })
 }
 
 pub fn handle(
@@ -39,10 +33,14 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        let config: Config = get_config(&ctx, "sticker_saver")
+        let config: Config = get_config(&ctx, "sticker")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
-        for cmd in &config.commands {
+        if !config.enabled {
+            return Ok(Some(ctx));
+        }
+
+        for cmd in COMMANDS {
             if let Some(matched) = match_command(&ctx, cmd) {
                 // 必须通过引用回复
                 let reply_id = match matched.reply_id {
@@ -110,7 +108,7 @@ pub fn handle(
                             )
                             .await;
 
-                            if config.recall_command && msg.is_group() {
+                            if RECALL_AFTER_SAVE && msg.is_group() {
                                 let _ =
                                     api::delete_msg(&ctx, writer, msg.message_id() as i32).await;
                             }

@@ -54,7 +54,7 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        let config: Config = get_config(&ctx, "image_splitter")
+        let config: Config = get_config(&ctx, "image_split")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
         // 支持的指令列表

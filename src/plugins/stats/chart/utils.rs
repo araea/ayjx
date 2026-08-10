@@ -1,4 +1,4 @@
-use crate::plugins::stats_visualizer::StatsConfig;
+use crate::plugins::stats::StatsConfig;
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
 use plotters::prelude::*;

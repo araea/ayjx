@@ -1,4 +1,4 @@
-//! auto_restart 插件:每日定时自动重启 + 内存阈值监控 + 手动重启指令
+//! restart 插件:每日定时自动重启 + 内存阈值监控 + 手动重启指令
 //!
 //! 解决长时间运行导致缓存累积、云服务器内存被撑爆的问题。
 //! 重启流程:先拉起新进程(失败则放弃、保证服务连续性) → 保存配置 → 关闭数据库 → 销毁浏览器 → 退出旧进程。
@@ -19,7 +19,7 @@ use toml::Value;
 // ================= 配置定义 =================
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct AutoRestartConfig {
+struct RestartConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     /// 每日自动重启时间 (HH:MM，24 小时制)，默认凌晨 4 点(群聊低峰期)
@@ -42,7 +42,7 @@ struct AutoRestartConfig {
     restart_command: String,
 }
 
-impl Default for AutoRestartConfig {
+impl Default for RestartConfig {
     fn default() -> Self {
         Self {
             enabled: true,
@@ -80,7 +80,7 @@ static RESTARTING: AtomicBool = AtomicBool::new(false);
 // ================= 插件生命周期 =================
 
 pub fn default_config() -> Value {
-    build_config(AutoRestartConfig::default())
+    build_config(RestartConfig::default())
 }
 
 pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
@@ -88,7 +88,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         // 记录原始启动参数，供自我重启时还原
         let _ = ORIGINAL_ARGS.set(std::env::args().skip(1).collect());
 
-        let cfg = get_config::<AutoRestartConfig>(&ctx, "auto_restart").unwrap_or_default();
+        let cfg = get_config::<RestartConfig>(&ctx, "restart").unwrap_or_default();
         if !cfg.enabled {
             return Ok(());
         }
@@ -100,14 +100,14 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let ctx = daily_ctx.clone();
             async move {
                 info!(
-                    target: "Plugin/auto_restart",
+                    target: "Plugin/restart",
                     "每日定时重启触发，开始执行重启流程..."
                 );
                 do_restart(&ctx, "每日定时".to_string()).await;
             }
         });
         info!(
-            target: "Plugin/auto_restart",
+            target: "Plugin/restart",
             "已计划每日 {:02}:{:02} 自动重启",
             h,
             m
@@ -124,7 +124,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                     match current_rss_mb() {
                         Some(mb) if mb >= threshold => {
                             warn!(
-                                target: "Plugin/auto_restart",
+                                target: "Plugin/restart",
                                 "内存占用 {}MB 达到阈值 {}MB，提前重启",
                                 mb,
                                 threshold
@@ -134,7 +134,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                         }
                         Some(mb) => {
                             debug!(
-                                target: "Plugin/auto_restart",
+                                target: "Plugin/restart",
                                 "内存巡检: {}/{}MB",
                                 mb,
                                 threshold
@@ -142,7 +142,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                         }
                         None => {
                             debug!(
-                                target: "Plugin/auto_restart",
+                                target: "Plugin/restart",
                                 "当前平台不支持读取内存占用，跳过巡检"
                             );
                         }
@@ -150,7 +150,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 }
             });
             info!(
-                target: "Plugin/auto_restart",
+                target: "Plugin/restart",
                 "已开启内存监控: 阈值 {}MB，每 {} 分钟巡检一次",
                 threshold,
                 cfg.memory_check_interval_minutes
@@ -167,14 +167,14 @@ pub fn handle(
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
         if let Some(_cmd) = match_command(&ctx, "restart") {
-            let cfg = get_config::<AutoRestartConfig>(&ctx, "auto_restart").unwrap_or_default();
+            let cfg = get_config::<RestartConfig>(&ctx, "restart").unwrap_or_default();
 
             // 未开放手动重启时给出提示
             if !cfg.allow_manual_restart {
                 let msg = ctx.as_message().unwrap();
                 let reply = Message::new()
                     .reply(msg.message_id())
-                    .text("⚠️ 重启指令未开放，如需开启请将配置 [plugins.auto_restart].allow_manual_restart 设为 true。");
+                    .text("⚠️ 重启指令未开放，可用 /设置 restart allow_manual_restart true 开启。");
                 let _ = send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await;
                 return Ok(None);
             }
@@ -194,7 +194,7 @@ pub fn handle(
                 .reply(message_id)
                 .text(format!("⏳ 收到，{} 秒后重启，稍等片刻~", delay));
             if let Err(e) = send_msg(&ctx, writer.clone(), group_id, Some(user_id), reply).await {
-                error!(target: "Plugin/auto_restart", "重启通知发送失败: {}", e);
+                error!(target: "Plugin/restart", "重启通知发送失败: {}", e);
             }
 
             // 延迟执行重启，确保回复消息已刷新到 WebSocket
@@ -217,19 +217,19 @@ pub fn handle(
 async fn do_restart(ctx: &Context, reason: String) {
     if RESTARTING.swap(true, Ordering::SeqCst) {
         info!(
-            target: "Plugin/auto_restart",
+            target: "Plugin/restart",
             "重启流程已在进行中，忽略本次触发 ({})",
             reason
         );
         return;
     }
     info!(
-        target: "Plugin/auto_restart",
+        target: "Plugin/restart",
         "========== 开始重启 (原因: {}) ==========",
         reason
     );
 
-    let cfg = get_config::<AutoRestartConfig>(ctx, "auto_restart").unwrap_or_default();
+    let cfg = get_config::<RestartConfig>(ctx, "restart").unwrap_or_default();
 
     // 1. 先拉起新进程(失败则不退出，保证服务连续性)
     let spawned = if !cfg.restart_command.trim().is_empty() {
@@ -238,11 +238,11 @@ async fn do_restart(ctx: &Context, reason: String) {
         spawn_self()
     };
     if let Err(e) = spawned {
-        error!(target: "Plugin/auto_restart", "拉起新进程失败: {}，放弃重启", e);
+        error!(target: "Plugin/restart", "拉起新进程失败: {}，放弃重启", e);
         RESTARTING.store(false, Ordering::SeqCst);
         return;
     }
-    info!(target: "Plugin/auto_restart", "新进程已拉起，开始清理资源...");
+    info!(target: "Plugin/restart", "新进程已拉起，开始清理资源...");
 
     // 2. 保存配置(加锁避免与 update_config 并发写文件)
     {
@@ -252,20 +252,20 @@ async fn do_restart(ctx: &Context, reason: String) {
             guard.clone()
         };
         if let Err(e) = snapshot.save(&ctx.config_path).await {
-            error!(target: "Plugin/auto_restart", "重启前保存配置失败: {}", e);
+            error!(target: "Plugin/restart", "重启前保存配置失败: {}", e);
         }
     }
 
     // 3. 关闭数据库连接(WAL 模式下安全落盘)
     // 注: ctx.db 为共享引用，clone 连接池句柄后 close，等价于关闭整个连接池
     if let Err(e) = ctx.db.clone().close().await {
-        error!(target: "Plugin/auto_restart", "关闭数据库失败: {}", e);
+        error!(target: "Plugin/restart", "关闭数据库失败: {}", e);
     }
 
     // 4. 销毁全局无头浏览器实例，释放其内存
     cdp_html_shot::Browser::shutdown_global().await;
 
-    info!(target: "Plugin/auto_restart", "资源清理完毕，旧进程退出。");
+    info!(target: "Plugin/restart", "资源清理完毕，旧进程退出。");
     std::process::exit(0);
 }
 
@@ -287,7 +287,7 @@ fn spawn_self() -> Result<(), PluginError> {
 
     let child = cmd.spawn()?;
     info!(
-        target: "Plugin/auto_restart",
+        target: "Plugin/restart",
         "已自我拉起新进程: {:?} (pid: {:?})",
         exe,
         child.id()
@@ -306,7 +306,7 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
             .creation_flags(CREATE_NEW_PROCESS_GROUP)
             .spawn()?;
         info!(
-            target: "Plugin/auto_restart",
+            target: "Plugin/restart",
             "已执行外部重启命令: {} (pid: {:?})",
             command,
             child.id()
@@ -316,7 +316,7 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
     {
         let child = std::process::Command::new("sh").args(["-c", command]).spawn()?;
         info!(
-            target: "Plugin/auto_restart",
+            target: "Plugin/restart",
             "已执行外部重启命令: {} (pid: {:?})",
             command,
             child.id()

@@ -131,7 +131,7 @@ pub async fn generate_image(
     start_time: i64,
     end_time: i64,
 ) -> Result<String, String> {
-    let config: WordCloudConfig = get_config(ctx, "word_cloud")
+    let config: WordCloudConfig = get_config(ctx, "wordcloud")
         .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
     if !config.enabled {

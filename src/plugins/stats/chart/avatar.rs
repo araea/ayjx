@@ -15,7 +15,7 @@ pub async fn prepare_avatars(data: &mut [BarData]) {
     let default_avatar = create_default_avatar(AVATAR_SIZE);
 
     // 获取缓存目录
-    let cache_dir = match get_data_dir("stats_visualizer").await {
+    let cache_dir = match get_data_dir("stats").await {
         Ok(dir) => {
             let avatar_dir = dir.join("avatars");
             if !avatar_dir.exists() {

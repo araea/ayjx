@@ -5,7 +5,7 @@ pub mod utils;
 
 use crate::event::Context;
 use crate::plugins::get_config;
-use crate::plugins::stats_visualizer::{StatsConfig, default_config};
+use crate::plugins::stats::{StatsConfig, default_config};
 
 use self::avatar::prepare_avatars;
 use self::data_loader::{BarData, SeriesData, fetch_bar_data, fetch_line_data};
@@ -46,7 +46,7 @@ pub async fn generate(
     title: &str,
 ) -> Result<String, String> {
     let db = &ctx.db;
-    let config: StatsConfig = get_config(ctx, "stats_visualizer")
+    let config: StatsConfig = get_config(ctx, "stats")
         .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
     // 1. 走势图

@@ -145,6 +145,7 @@ impl Scheduler {
 
     /// 通用工具：配置并调度周期性主动推送任务
     /// 包含：时间解析、频率过滤、群列表获取、黑白名单过滤、遍历执行
+    #[allow(clippy::too_many_arguments)]
     pub fn schedule_periodic_push<F, Fut>(
         &self,
         ctx: Context,

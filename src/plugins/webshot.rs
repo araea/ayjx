@@ -161,7 +161,7 @@ pub fn handle(
         };
 
         // 读取配置
-        let config: Config = get_config(&ctx, "web_shot").unwrap_or_else(|| {
+        let config: Config = get_config(&ctx, "webshot").unwrap_or_else(|| {
             // 这里的 fallback 主要是为了防止反序列化失败，正常情况下 init 会写入默认配置
             let val = default_config();
             serde_json::from_value(serde_json::to_value(val).unwrap()).unwrap()

@@ -6,8 +6,8 @@ use crate::db::queries;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::stats_visualizer::chart;
-use crate::plugins::word_cloud;
+use crate::plugins::stats::chart;
+use crate::plugins::wordcloud;
 use chrono::{Datelike, Duration, Local};
 
 const LOG_TARGET: &str = "Plugin/Stats";
@@ -42,7 +42,7 @@ async fn send_chart(
 }
 
 async fn send_wordcloud(c: &Context, w: LockedWriter, gid: i64, range: (i64, i64)) {
-    match word_cloud::generate_image(c, Some(gid), None, range.0, range.1).await {
+    match wordcloud::generate_image(c, Some(gid), None, range.0, range.1).await {
         Ok(b64) => {
             let _ = send_msg(c, w, Some(gid), None, Message::new().image(b64)).await;
         }

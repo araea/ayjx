@@ -19,6 +19,8 @@ pub type PluginInitHandler = fn(Context) -> BoxFuture<'static, Result<(), Plugin
 
 pub struct Plugin {
     pub name: &'static str,
+    /// 中文显示名（面向用户的展示名，默认与 name 相同，可在注册时覆盖）
+    pub display_name: &'static str,
     pub handler: PluginHandler,
     pub on_init: Option<PluginInitHandler>,
     /// 当 Bot 连接成功且获取到自身信息后触发 (用于注册主动推送任务等)
@@ -48,6 +50,7 @@ macro_rules! register_plugins {
                             #[allow(unused)]
                             let mut p = Plugin {
                                 name: stringify!($module),
+                                display_name: stringify!($module),
                                 handler: $module::handle,
                                 on_init: None,
                                 on_connected: None,

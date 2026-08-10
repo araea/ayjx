@@ -16,21 +16,15 @@ use toml::Value;
 #[derive(Serialize, Deserialize)]
 struct Config {
     enabled: bool,
-    cmd_to_url: Vec<String>,
-    cmd_to_media: Vec<String>,
 }
 
+// 媒体 → 链接 指令（内置，无需配置）
+const CMD_TO_URL: &[&str] = &["转链接", "看链接", "提取地址", "url"];
+// 链接 → 媒体 指令（内置，无需配置）
+const CMD_TO_MEDIA: &[&str] = &["转图片", "转视频", "预览"];
+
 pub fn default_config() -> Value {
-    build_config(Config {
-        enabled: true,
-        cmd_to_url: vec![
-            "转链接".into(),
-            "看链接".into(),
-            "提取地址".into(),
-            "url".into(),
-        ],
-        cmd_to_media: vec!["转图片".into(), "转视频".into(), "预览".into()],
-    })
+    build_config(Config { enabled: true })
 }
 
 static URL_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -44,7 +38,7 @@ pub fn handle(
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: Config = get_config(&ctx, "media_transfer")
+        let config: Config = get_config(&ctx, "media")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
         if !config.enabled {
@@ -52,14 +46,14 @@ pub fn handle(
         }
 
         // 功能 1: 转链接 (Media -> URL)
-        for cmd in &config.cmd_to_url {
+        for cmd in CMD_TO_URL {
             if let Some(matched) = match_command(&ctx, cmd) {
                 return handle_to_url(ctx, writer, matched).await;
             }
         }
 
         // 功能 2: 转媒体 (URL -> Media)
-        for cmd in &config.cmd_to_media {
+        for cmd in CMD_TO_MEDIA {
             if let Some(matched) = match_command(&ctx, cmd) {
                 let is_video_cmd = cmd.contains("视频");
                 return handle_to_media(ctx, writer, matched, is_video_cmd).await;

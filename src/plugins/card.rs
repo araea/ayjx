@@ -22,14 +22,13 @@ pub mod parser;
 #[derive(Serialize, Deserialize)]
 struct Config {
     enabled: bool,
-    commands: Vec<String>,
 }
 
+// 触发指令（内置，无需配置）
+const COMMANDS: &[&str] = &["读卡", "解析卡", "看卡", "card"];
+
 pub fn default_config() -> Value {
-    build_config(Config {
-        enabled: true,
-        commands: vec!["读卡".into(), "解析卡".into(), "看卡".into(), "card".into()],
-    })
+    build_config(Config { enabled: true })
 }
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -89,10 +88,14 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        let config: Config = get_config(&ctx, "card_reader")
+        let config: Config = get_config(&ctx, "card")
             .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
 
-        for cmd in &config.commands {
+        if !config.enabled {
+            return Ok(Some(ctx));
+        }
+
+        for cmd in COMMANDS {
             if let Some(matched) = match_command(&ctx, cmd) {
                 let img_url = match get_image_url(
                     &ctx,
@@ -167,7 +170,7 @@ pub fn handle(
 
                         let timestamp = chrono::Local::now().format("%H%M%S").to_string();
 
-                        let data_dir = get_data_dir("card_reader").await?;
+                        let data_dir = get_data_dir("card").await?;
                         // 生成 JSON 文件，内容为完整的 JSON
                         let json_file = format!("{}_{}.json", safe_name, timestamp);
                         let json_path = data_dir.join(&json_file);
