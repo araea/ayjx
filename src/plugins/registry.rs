@@ -34,10 +34,6 @@ register_plugins!(
     oai {
         on_init: Some(oai::init)
     },
-    persona {
-        on_init: Some(persona::init),
-        on_connected: Some(persona::on_connected)
-    },
     help,
     auto_restart {
         on_init: Some(auto_restart::init)

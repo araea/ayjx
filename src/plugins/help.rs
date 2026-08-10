@@ -69,7 +69,6 @@ fn describe(name: &str) -> (&'static str, &'static [&'static str]) {
             "多智能体对话：## 创建智能体，智能体 对话，模型/历史管理（符号指令）",
             &["oai API地址 密钥", "/#", "/%"],
         ),
-        "persona" => ("群里伪装人类潜水的 AI 角色（DeepSeek）", &[]),
         "help" => ("显示本帮助信息", TRIGGERS),
         _ => ("(暂无说明)", &[]),
     }
