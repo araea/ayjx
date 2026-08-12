@@ -218,7 +218,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     info!("激活 Bot 数量: {}。按 Ctrl+C 退出。", active_bots);
 
-    // 等待退出信号 (优雅关闭)
+    // 等待退出信号 (优雅关闭): 同时监听 SIGINT (Ctrl+C) 与 SIGTERM (kill/systemd stop)
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal as unix_signal};
+        let mut sigterm = unix_signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                info!("收到退出信号 (Ctrl+C)，正在清理资源...");
+            }
+            _ = sigterm.recv() => {
+                info!("收到退出信号 (SIGTERM)，正在清理资源...");
+            }
+        }
+    }
+    #[cfg(not(unix))]
     match signal::ctrl_c().await {
         Ok(()) => {
             info!("收到退出信号，正在清理资源...");
@@ -228,12 +242,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    // 执行清理工作
-    scheduler.shutdown();
-    let _ = db.close().await;
-
-    // 清理浏览器资源
-    cdp_html_shot::Browser::shutdown_global().await;
+    // 执行清理工作 (带超时保护，避免浏览器销毁等操作卡死导致进程挂起)
+    let cleanup = async {
+        scheduler.shutdown();
+        let _ = db.close().await;
+        cdp_html_shot::Browser::shutdown_global().await;
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(25), cleanup)
+        .await
+        .is_err()
+    {
+        error!("清理超时 (25s)，强制退出。");
+        std::process::exit(1);
+    }
 
     // 退出前强制再保存一次配置，确保万无一失
     let config_snapshot = if let Ok(guard) = shared_config.read() {
