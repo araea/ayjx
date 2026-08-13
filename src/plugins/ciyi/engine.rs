@@ -1,5 +1,5 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use rand::Rng;
+use rand::RngExt;
 use sea_orm::sea_query::{Alias, Expr, OnConflict};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,

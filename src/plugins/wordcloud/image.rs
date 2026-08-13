@@ -2,7 +2,7 @@ use super::stopwords::get_stop_words;
 use araea_wordcloud::{WordCloudBuilder, WordInput};
 use base64::{Engine as _, engine::general_purpose};
 use image::{GenericImageView, ImageFormat};
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::OnceLock;
