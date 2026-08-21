@@ -10,6 +10,10 @@
 //!   - 12:30 / 20:30 精选速递（过去 24 小时精选，按群去重，只推新条目）
 //!   - 21:30 当前热点榜（Top 10 快照）
 //!
+//! 防刷屏：定时推送与指令回复共用一套发送逻辑——整条消息超过
+//! `forward_threshold_chars`（默认 500 字）就按条目拆成合并转发，
+//! 群里只留一个折叠卡片；短内容仍走普通文本。
+//!
 //! 指令：
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
 //!   /ai热点             当前热点榜
@@ -38,6 +42,8 @@ pub mod api;
 mod pusher;
 mod render;
 mod state;
+
+use render::Rendered;
 
 pub const LOG_TARGET: &str = "Plugin/AiNews";
 
@@ -91,6 +97,12 @@ pub struct AiNewsConfig {
     /// 日报最多展示的条目数
     #[serde(default = "default_daily_blocks")]
     pub daily_max_blocks: usize,
+    /// 整条消息超过多少字符就改用合并转发（折叠成一个卡片，避免刷屏）；0 表示永远发纯文本
+    #[serde(default = "default_forward_threshold")]
+    pub forward_threshold_chars: usize,
+    /// 合并转发时单个节点的字符软上限，单条超长的资讯不会被切断
+    #[serde(default = "default_forward_node_chars")]
+    pub forward_node_chars: usize,
     /// 多个群之间的发送间隔（秒），防风控
     #[serde(default = "default_send_interval")]
     pub send_interval_seconds: u64,
@@ -143,6 +155,12 @@ fn default_summary_chars() -> usize {
 fn default_daily_blocks() -> usize {
     12
 }
+fn default_forward_threshold() -> usize {
+    500
+}
+fn default_forward_node_chars() -> usize {
+    300
+}
 fn default_send_interval() -> u64 {
     3
 }
@@ -172,6 +190,8 @@ impl Default for AiNewsConfig {
             show_reason: true,
             show_original_link: false,
             daily_max_blocks: default_daily_blocks(),
+            forward_threshold_chars: default_forward_threshold(),
+            forward_node_chars: default_forward_node_chars(),
             send_interval_seconds: default_send_interval(),
             brief_enabled: true,
             brief_times: default_brief_times(),
@@ -362,14 +382,15 @@ pub fn handle(
             let arg = extract_text_arg(&matched.args);
             let config = load_config(&ctx);
 
-            let text = match trigger {
+            let rendered = match trigger {
                 "ai搜索" => query_search(&config, &arg).await,
                 "ai热点" => query_hot_topics(&config).await,
                 "ai日报" => query_daily(&config).await,
                 _ => query_brief(&config).await,
             };
 
-            let body = Message::new().reply(message_id).text(text);
+            // 内容太长时自动折叠成合并转发，别把群刷屏
+            let body = pusher::build_message(&ctx, &config, &rendered, Some(message_id));
             send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
             return Ok(None);
         }
@@ -378,49 +399,52 @@ pub fn handle(
     })
 }
 
-async fn query_brief(config: &AiNewsConfig) -> String {
+async fn query_brief(config: &AiNewsConfig) -> Rendered {
     match pusher::fetch_brief(config, false).await {
         Ok(Some(items)) if !items.is_empty() => {
             let header = format!("🤖 AI 资讯速递 · {}", pusher::window_label(&config.window));
             render::render_items(&header, &items, &pusher::render_options(config))
         }
-        Ok(_) => format!("📭 {}内暂无 AI 精选资讯。", pusher::window_label(&config.window)),
+        Ok(_) => Rendered::plain(format!(
+            "📭 {}内暂无 AI 精选资讯。",
+            pusher::window_label(&config.window)
+        )),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询精选失败: {}", e);
-            format!("❌ 获取 AI 资讯失败：{}", e)
+            Rendered::plain(format!("❌ 获取 AI 资讯失败：{}", e))
         }
     }
 }
 
-async fn query_hot_topics(config: &AiNewsConfig) -> String {
+async fn query_hot_topics(config: &AiNewsConfig) -> Rendered {
     match api::fetch_hot_topics(config.request_timeout_seconds, false).await {
         Ok(Some(topics)) if !topics.is_empty() => render::render_hot_topics(&topics),
-        Ok(_) => "📭 当前没有热点条目。".to_string(),
+        Ok(_) => Rendered::plain("📭 当前没有热点条目。"),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询热点榜失败: {}", e);
-            format!("❌ 获取 AI 热点榜失败：{}", e)
+            Rendered::plain(format!("❌ 获取 AI 热点榜失败：{}", e))
         }
     }
 }
 
-async fn query_daily(config: &AiNewsConfig) -> String {
+async fn query_daily(config: &AiNewsConfig) -> Rendered {
     match api::fetch_latest_daily(config.request_timeout_seconds).await {
         Ok(Some(report)) => render::render_daily(&report, config.daily_max_blocks),
-        Ok(None) => "📭 当前没有可用的 AI 日报。".to_string(),
+        Ok(None) => Rendered::plain("📭 当前没有可用的 AI 日报。"),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询日报失败: {}", e);
-            format!("❌ 获取 AI 日报失败：{}", e)
+            Rendered::plain(format!("❌ 获取 AI 日报失败：{}", e))
         }
     }
 }
 
-async fn query_search(config: &AiNewsConfig, keyword: &str) -> String {
+async fn query_search(config: &AiNewsConfig, keyword: &str) -> Rendered {
     let keyword = keyword.trim();
     if keyword.chars().count() < 2 {
-        return "用法：/ai搜索 <关键词>（关键词至少 2 个字）".to_string();
+        return Rendered::plain("用法：/ai搜索 <关键词>（关键词至少 2 个字）");
     }
     if keyword.chars().count() > 200 {
-        return "关键词太长了，请控制在 200 字以内。".to_string();
+        return Rendered::plain("关键词太长了，请控制在 200 字以内。");
     }
 
     match pusher::search(config, keyword).await {
@@ -432,10 +456,10 @@ async fn query_search(config: &AiNewsConfig, keyword: &str) -> String {
             };
             render::render_items(&header, &items, &pusher::render_options(config))
         }
-        Ok(_) => format!("📭 近 7 天没有找到与「{}」相关的 AI 资讯。", keyword),
+        Ok(_) => Rendered::plain(format!("📭 近 7 天没有找到与「{}」相关的 AI 资讯。", keyword)),
         Err(e) => {
             warn!(target: LOG_TARGET, "搜索 [{}] 失败: {}", keyword, e);
-            format!("❌ 搜索失败：{}", e)
+            Rendered::plain(format!("❌ 搜索失败：{}", e))
         }
     }
 }
@@ -605,7 +629,7 @@ mod tests {
             let header = format!("🤖 AI 资讯速递 · {}", pusher::window_label(&cfg.window));
             println!(
                 "{}",
-                render::render_items(&header, &items, &pusher::render_options(&cfg))
+                render::render_items(&header, &items, &pusher::render_options(&cfg)).to_text()
             );
         }
 
@@ -618,7 +642,7 @@ mod tests {
                 .expect("非条件请求必然带响应体");
 
             assert!(topics.len() <= 10, "热点榜最多 Top 10");
-            println!("{}", render::render_hot_topics(&topics));
+            println!("{}", render::render_hot_topics(&topics).to_text());
         }
 
         #[tokio::test]
@@ -634,7 +658,7 @@ mod tests {
                 return;
             };
             assert!(report.date.is_some(), "日报应带日期");
-            println!("{}", render::render_daily(&report, cfg.daily_max_blocks));
+            println!("{}", render::render_daily(&report, cfg.daily_max_blocks).to_text());
         }
 
         #[tokio::test]

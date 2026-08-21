@@ -4,7 +4,7 @@
 //! 既满足官方「同一端点定时任务至少间隔 60 秒」的要求，也避免群数增长时把请求量放大。
 
 use super::api::{self, Item};
-use super::render::{self, RenderOptions};
+use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET};
 use crate::adapters::onebot::{LockedWriter, send_msg};
@@ -33,9 +33,54 @@ fn is_allowed(ctx: &Context, group_id: i64) -> bool {
     true
 }
 
-/// 发送一条推送文本，返回是否发送成功（失败时不应记入去重，留待下次补推）
-pub async fn send_text(ctx: &Context, writer: LockedWriter, group_id: i64, text: String) -> bool {
-    match send_msg(ctx, writer, Some(group_id), None, Message::new().text(text)).await {
+/// 把渲染结果装配成待发消息。
+///
+/// 短内容照旧发一条纯文本；一旦整体超过 `forward_threshold_chars`，
+/// 就按条目拆成合并转发的节点——群里只留一个折叠卡片，不刷屏。
+/// 合并转发的消息链里只能放 node 段，因此这种情况下会舍弃回复引用。
+pub fn build_message(
+    ctx: &Context,
+    cfg: &AiNewsConfig,
+    rendered: &Rendered,
+    reply_to: Option<i64>,
+) -> Message {
+    let threshold = cfg.forward_threshold_chars;
+    let as_forward = threshold > 0 && rendered.char_count() > threshold;
+
+    if !as_forward {
+        let msg = match reply_to {
+            Some(id) => Message::new().reply(id),
+            None => Message::new(),
+        };
+        return msg.text(rendered.to_text());
+    }
+
+    let bot_id = ctx.bot.login_user.id.parse::<i64>().unwrap_or(10000);
+    let bot_name = ctx
+        .bot
+        .login_user
+        .name
+        .clone()
+        .unwrap_or_else(|| "AI 资讯".to_string());
+
+    let nodes = rendered.nodes(cfg.forward_node_chars);
+    let mut forward = Message::new();
+    for node in nodes {
+        forward = forward.node_custom(bot_id, &bot_name, Message::new().text(node));
+    }
+    forward
+}
+
+/// 发送一条渲染结果，返回是否发送成功（失败时不应记入去重，留待下次补推）
+pub async fn send_rendered(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: i64,
+    cfg: &AiNewsConfig,
+    rendered: &Rendered,
+) -> bool {
+    let body = build_message(ctx, cfg, rendered, None);
+    match send_msg(ctx, writer, Some(group_id), None, body).await {
         Ok(_) => true,
         Err(e) => {
             warn!(target: LOG_TARGET, "群 {} 推送发送失败: {}", group_id, e);
@@ -162,13 +207,8 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             .collect();
 
         let header = format!("🤖 AI 资讯速递 · {}", window_label(&cfg.window));
-        let sent = send_text(
-            &ctx,
-            writer.clone(),
-            *group_id,
-            render::render_items(&header, &picked, &opts),
-        )
-        .await;
+        let rendered = render::render_items(&header, &picked, &opts);
+        let sent = send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await;
 
         // 只有真正发出去了才记入去重，发送失败的条目下次继续推
         if sent {
@@ -199,7 +239,7 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         warn!(target: LOG_TARGET, "AI 日报缺少日期字段，跳过推送。");
         return;
     };
-    let text = render::render_daily(&report, cfg.daily_max_blocks);
+    let rendered = render::render_daily(&report, cfg.daily_max_blocks);
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
@@ -210,7 +250,7 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             continue;
         }
 
-        if send_text(&ctx, writer.clone(), *group_id, text.clone()).await {
+        if send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await {
             state::mark_daily(*group_id, &date).await;
         }
 
@@ -244,13 +284,13 @@ pub async fn push_hot_topics(
         return;
     }
 
-    let text = render::render_hot_topics(&topics);
+    let rendered = render::render_hot_topics(&topics);
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
             continue;
         }
-        let _ = send_text(&ctx, writer.clone(), *group_id, text.clone()).await;
+        let _ = send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await;
         if idx + 1 < groups.len() {
             pace(&cfg).await;
         }

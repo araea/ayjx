@@ -94,6 +94,8 @@ const SETTINGS: &[SettingSpec] = &[
     s("ai_news", "show_reason", "显示推荐理由", "是否展示 AIHOT 的推荐理由", Kind::Bool, "true"),
     s("ai_news", "show_original_link", "显示原文链接", "是否附带第三方原文链接", Kind::Bool, "false"),
     s("ai_news", "dedupe_days", "资讯去重天数", "同一条资讯在多少天内不重复推送", Kind::Int, "7"),
+    s("ai_news", "forward_threshold_chars", "合并转发阈值", "消息超过多少字改用合并转发防刷屏，0 为永远纯文本", Kind::Int, "500"),
+    s("ai_news", "forward_node_chars", "转发节点长度", "合并转发时每个节点的字数软上限", Kind::Int, "300"),
     s("ai_news", "daily_enabled", "AI 日报推送", "每天推送一期 AIHOT 日报", Kind::Bool, "true"),
     s("ai_news", "daily_time", "AI 日报时间", "日报推送时间（HH:MM:SS），需重启后生效", Kind::Str, "08:30:00"),
     s("ai_news", "brief_enabled", "精选速递推送", "每天定时推送 AI 精选资讯", Kind::Bool, "true"),
