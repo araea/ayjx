@@ -69,6 +69,11 @@ register_plugins!(
         display_name: "智能对话",
         on_init: Some(oai::init)
     },
+    ai_news {
+        display_name: "AI 资讯推送",
+        on_init: Some(ai_news::init),
+        on_connected: Some(ai_news::on_connected)
+    },
     settings {
         display_name: "设置"
     },
