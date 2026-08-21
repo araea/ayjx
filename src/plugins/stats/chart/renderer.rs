@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::data_loader::{BarData, SeriesData};
 use super::utils::{
     ColorScheme, get_contrast_color, get_font, get_font_family, get_font_with_color,
@@ -48,34 +50,36 @@ pub fn draw_bar_chart(
 
     let font_family = get_font_family(config);
     let font_obj = (font_family, font_size).into_font();
+    let pct_font_size = 20 * s;
+    let pct_font_obj = (font_family, pct_font_size).into_font();
 
-    let mut formatted_counts = Vec::new();
+    // 每行都展示 "数值 + 百分比"，百分比用更小的灰色字体，提升可读性
+    let mut formatted_counts: Vec<(String, String)> = Vec::new();
     let mut max_count_text_width = 0u32;
 
     for item in data.iter() {
-        let mut text = item.value.to_string();
-        // 只有最大值才显示百分比
-        if item.value == max_val && max_val > 0 {
-            let pct = if total_val > 0 {
-                item.value as f64 / total_val as f64 * 100.0
-            } else {
-                0.0
-            };
-            let pct_str = if pct > 0.0 && pct < 0.01 {
-                "<0.01".to_string()
-            } else if pct > 0.0 && pct < 1.0 {
-                format!("{:.2}", pct)
-            } else if pct >= 1.0 {
-                format!("{:.0}", pct)
-            } else {
-                "0".to_string()
-            };
-            text = format!("{} ({}%)", text, pct_str);
-        }
+        let value_text = item.value.to_string();
+        let pct = if total_val > 0 {
+            item.value as f64 / total_val as f64 * 100.0
+        } else {
+            0.0
+        };
+        let pct_str = if pct > 0.0 && pct < 0.01 {
+            "<0.01".to_string()
+        } else if pct > 0.0 && pct < 1.0 {
+            format!("{:.2}", pct)
+        } else if pct >= 1.0 {
+            format!("{:.0}", pct)
+        } else {
+            "0".to_string()
+        };
+        let pct_text = format!("{}%", pct_str);
 
-        let (w, _) = font_obj.box_size(&text).unwrap_or((0, 0));
-        max_count_text_width = max_count_text_width.max(w);
-        formatted_counts.push(text);
+        let (vw, _) = font_obj.box_size(&value_text).unwrap_or((0, 0));
+        let (pw, _) = pct_font_obj.box_size(&pct_text).unwrap_or((0, 0));
+        let total_w = vw + (8 * s) + pw;
+        max_count_text_width = max_count_text_width.max(total_w);
+        formatted_counts.push((value_text, pct_text));
     }
 
     // 计算内容区域尺寸
@@ -182,18 +186,23 @@ pub fn draw_bar_chart(
                 .map_err(|e| e.to_string())?;
             }
 
-            // 5. 绘制数值 (Bar 外部右侧)
-            let count_text = &formatted_counts[i];
+            // 5. 绘制数值 (Bar 外部右侧，黑色) + 百分比 (灰色小字号)
+            let (value_text, pct_text) = &formatted_counts[i];
+            let count_x = start_x + current_bar_width + (10 * s as i32);
+            let text_mid_y = y + (row_height / 2) as i32 + (2 * s as i32);
+
             let count_style = get_font_with_color(config, font_size, &BLACK)
                 .pos(Pos::new(HPos::Left, VPos::Center));
+            root.draw_text(value_text, &count_style, (count_x, text_mid_y))
+                .map_err(|e| e.to_string())?;
 
+            let (vw, _) = font_obj.box_size(value_text).unwrap_or((0, 0));
+            let pct_style = get_font_with_color(config, pct_font_size, &RGBColor(100, 116, 139))
+                .pos(Pos::new(HPos::Left, VPos::Center));
             root.draw_text(
-                count_text,
-                &count_style,
-                (
-                    start_x + current_bar_width + (10 * s as i32),
-                    y + (row_height / 2) as i32 + (2 * s as i32),
-                ),
+                pct_text,
+                &pct_style,
+                (count_x + vw as i32 + (8 * s as i32), text_mid_y),
             )
             .map_err(|e| e.to_string())?;
         }
@@ -218,6 +227,35 @@ pub fn draw_bar_chart(
             ))
             .map_err(|e| e.to_string())?;
             line_x += 100 * s as i32;
+        }
+
+        // 7. 绘制图标徽章 (消息类型等无头像条目：主题色圆底 + 类型字符)
+        for (i, item) in data.iter().enumerate() {
+            if item.avatar_img.is_some() {
+                continue;
+            }
+            let Some(icon_char) = item.icon_char.as_deref() else {
+                continue;
+            };
+
+            let y = top_area_height as i32 + (i as u32 * row_height) as i32;
+            let cx = padding as i32 + (avatar_width / 2) as i32;
+            let cy = y + (row_height / 2) as i32;
+            let radius = (avatar_width as f32 * 0.46) as i32;
+
+            // 外圈淡色光晕 + 主题色圆底
+            let halo_color = mix_with_white(item.theme_color, 0.35);
+            root.draw(&Circle::new((cx, cy), radius + (3 * s as i32), halo_color.filled()))
+                .map_err(|e| e.to_string())?;
+            root.draw(&Circle::new((cx, cy), radius, item.theme_color.filled()))
+                .map_err(|e| e.to_string())?;
+
+            // 圆内字符 (自动根据底色选择黑/白)
+            let icon_color = get_contrast_color(item.theme_color);
+            let icon_style = get_font_with_color(config, 24 * s, &icon_color)
+                .pos(Pos::new(HPos::Center, VPos::Center));
+            root.draw_text(icon_char, &icon_style, (cx, cy + (2 * s as i32)))
+                .map_err(|e| e.to_string())?;
         }
 
         root.present().map_err(|e| e.to_string())?;
@@ -247,7 +285,52 @@ pub fn draw_bar_chart(
     save_rgba_to_base64(rgba_image)
 }
 
-/// 绘制折线图 (支持单线/多线)
+// ================= 走势图 (与排行榜统一的手绘风格) =================
+
+/// 将坐标轴刻度取整为 1/2/5×10^k 的"美观"步长，返回 (步长, 格数)
+fn nice_axis(max_val: i64) -> (f64, usize) {
+    let target = (max_val.max(1) as f64) * 1.05;
+    let raw_step = target / 4.0;
+    let exp = raw_step.log10().floor() as i32;
+    let base = 10f64.powi(exp);
+    let frac = raw_step / base;
+    let step = if frac <= 1.0 {
+        base
+    } else if frac <= 2.0 {
+        2.0 * base
+    } else if frac <= 5.0 {
+        5.0 * base
+    } else {
+        10.0 * base
+    };
+    let steps = ((target / step).ceil() as usize).clamp(2, 6);
+    (step, steps)
+}
+
+/// Y 轴刻度文本：过万缩写为 "x.x万"，其余直接显示整数
+fn format_y_label(v: f64) -> String {
+    let vi = v.round() as i64;
+    if vi >= 10000 {
+        let t = format!("{:.1}", vi as f64 / 10000.0);
+        let t = t.strip_suffix(".0").unwrap_or(&t).to_string();
+        format!("{}万", t)
+    } else {
+        vi.to_string()
+    }
+}
+
+/// X 轴标签：去掉日期前缀中的年份部分 (如 "2026-08-01" -> "08-01")
+fn short_x_label(label: &str) -> String {
+    if label.len() >= 10 && label.contains('-') {
+        label[5..].to_string()
+    } else {
+        label.to_string()
+    }
+}
+
+/// 绘制折线图 (支持单线/多线)。
+/// 与排行榜柱状图共用同一套视觉规范：白底、灰阶时间戳/标题、统一字体字号与边距、
+/// 浅色网格线、白描边圆点数据点，配色取自系列颜色（消息类型与排行榜共用调色板）。
 pub fn draw_line_chart(
     config: &StatsConfig,
     title: &str,
@@ -262,132 +345,263 @@ pub fn draw_line_chart(
     let height = config.height * s;
 
     let colors = ColorScheme::default();
-    let mut buffer = vec![0u8; (width * height * 3) as usize];
+    let multi = series_list.len() > 1;
 
+    // === 1. 统一 X 轴：合并所有系列的标签（按首次出现顺序去重），
+    //        保证多系列的稀疏数据点也按真实时间位置对齐 ===
+    let mut x_labels: Vec<String> = Vec::new();
+    let mut label_index: HashMap<&str, usize> = HashMap::new();
+    for series in &series_list {
+        for p in &series.points {
+            if let std::collections::hash_map::Entry::Vacant(e) =
+                label_index.entry(p.label.as_str())
+            {
+                e.insert(x_labels.len());
+                x_labels.push(p.label.clone());
+            }
+        }
+    }
+    let point_count = x_labels.len().max(1);
+
+    let max_val = series_list
+        .iter()
+        .flat_map(|sr| sr.points.iter().map(|p| p.value))
+        .max()
+        .unwrap_or(0);
+    let (step, steps) = nice_axis(max_val);
+    let y_max = step * steps as f64;
+
+    // === 2. 布局 (与柱状图一致的字号与边距) ===
+    let padding = 24 * s;
+    let header_font_size = 20 * s;
+    let title_font_size = 32 * s;
+    let axis_font_size = 20 * s;
+    let legend_font_size = 20 * s;
+    let gap = 10 * s;
+
+    let font_family = get_font_family(config);
+    let axis_font = (font_family, axis_font_size).into_font();
+    let legend_font = (font_family, legend_font_size).into_font();
+
+    // Y 轴标签宽度
+    let mut y_label_w = 0u32;
+    for i in 0..=steps {
+        let text = format_y_label(step * i as f64);
+        let (w, _) = axis_font.box_size(&text).unwrap_or((0, 0));
+        y_label_w = y_label_w.max(w);
+    }
+
+    let title_y = padding + header_font_size + gap;
+
+    // === 3. 图例布局 (多系列时)：圆点 + 名称，水平排列，超宽自动换行 ===
+    let dot_r = 6 * s;
+    let item_gap = 24 * s;
+    let legend_row_h = 32 * s;
+    let mut legend_rows: Vec<Vec<(usize, u32)>> = Vec::new();
+    let mut legend_h = 0u32;
+
+    if multi {
+        let avail = width.saturating_sub(2 * padding);
+        let mut row: Vec<(usize, u32)> = Vec::new();
+        let mut row_w = 0u32;
+
+        for (idx, series) in series_list.iter().enumerate() {
+            let (tw, _) = legend_font.box_size(&series.name).unwrap_or((0, 0));
+            let item_w = 2 * dot_r + (8 * s) + tw;
+            let new_w = if row.is_empty() {
+                item_w
+            } else {
+                row_w + item_gap + item_w
+            };
+            if !row.is_empty() && new_w > avail {
+                legend_rows.push(std::mem::take(&mut row));
+                row_w = item_w;
+            } else {
+                row_w = new_w;
+            }
+            row.push((idx, item_w));
+        }
+        if !row.is_empty() {
+            legend_rows.push(row);
+        }
+        legend_h = legend_rows.len() as u32 * legend_row_h;
+    }
+
+    let legend_y = title_y + title_font_size + gap;
+    let chart_top = if multi {
+        legend_y + legend_h + (12 * s)
+    } else {
+        title_y + title_font_size + (24 * s)
+    };
+    let x_label_area = axis_font_size + 14 * s;
+    let chart_bottom = height.saturating_sub(padding + x_label_area).max(chart_top + 40 * s);
+    let chart_left = padding + y_label_w + (14 * s);
+    let chart_right = width.saturating_sub(padding).max(chart_left + 40 * s);
+
+    let chart_w = (chart_right - chart_left) as f64;
+    let chart_h = (chart_bottom - chart_top) as f64;
+
+    // X/Y 坐标换算
+    let x_pos = |i: usize| chart_left as f64 + chart_w * ((i as f64 + 0.5) / point_count as f64);
+    let y_pos = |v: i64| chart_bottom as f64 - chart_h * (v as f64 / y_max).clamp(0.0, 1.0);
+
+    // === 4. 绘制 ===
+    let mut buffer = vec![0u8; (width * height * 3) as usize];
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (width, height)).into_drawing_area();
 
-        root.fill(&colors.background).map_err(|e| e.to_string())?;
+        root.fill(&RGBColor(255, 255, 255)).map_err(|e| e.to_string())?;
 
-        // 1. 计算Y轴最大值 (所有Series的Max)
-        let max_val = series_list
-            .iter()
-            .flat_map(|s| s.points.iter().map(|p| p.value))
-            .max()
-            .unwrap_or(10);
-        let y_max = (max_val as f64 * 1.15) as i64;
-
-        // 2. 提取X轴标签 (假设所有Series的X轴对齐，取第一个有数据的Series)
-        // 实际上 Series 可能会有缺失点，这里简单假设时间点一致
-        let x_labels: Vec<String> = series_list
-            .first()
-            .map(|s| s.points.iter().map(|p| p.label.clone()).collect())
-            .unwrap_or_default();
-        let point_count = x_labels.len();
-
-        let padding_top = 25 * s;
-        let header_font_size = 20 * s;
-        let title_font_size = 28 * s;
-        let gap = 10 * s;
-
+        // 4.1 时间戳 + 标题 (与柱状图一致)
         let now_str = Local::now().format("%Y-%m-%d %H:%M").to_string();
         let header_style = get_font(config, header_font_size)
             .pos(Pos::new(HPos::Center, VPos::Top))
             .color(&RGBColor(100, 116, 139));
+        root.draw_text(&now_str, &header_style, (width as i32 / 2, padding as i32))
+            .map_err(|e| e.to_string())?;
 
-        root.draw_text(
-            &now_str,
-            &header_style,
-            (width as i32 / 2, padding_top as i32),
-        )
-        .map_err(|e| e.to_string())?;
-
-        let title_y = padding_top + header_font_size + gap;
-        let title_style = get_font(config, title_font_size).pos(Pos::new(HPos::Center, VPos::Top));
+        let title_style =
+            get_font(config, title_font_size).pos(Pos::new(HPos::Center, VPos::Top));
         root.draw_text(title, &title_style, (width as i32 / 2, title_y as i32))
             .map_err(|e| e.to_string())?;
 
-        // 计算图表顶部边距
-        let chart_margin_top = title_y + title_font_size + (20 * s);
+        // 4.2 图例
+        for (row_i, row) in legend_rows.iter().enumerate() {
+            let row_total: u32 = row.iter().map(|(_, w)| *w).sum::<u32>() + item_gap * (row.len() as u32 - 1);
+            let mut x = (width.saturating_sub(row_total)) as i32 / 2;
+            let row_mid_y = legend_y + row_i as u32 * legend_row_h + legend_row_h / 2;
 
-        let mut chart = ChartBuilder::on(&root)
-            .margin_top(chart_margin_top as i32)
-            .margin_bottom(25 * s as i32)
-            .margin_left(45 * s as i32)
-            .margin_right(45 * s as i32)
-            .x_label_area_size(45 * s as i32)
-            .y_label_area_size(55 * s as i32)
-            .build_cartesian_2d(0..point_count, 0..y_max)
+            for &(idx, item_w) in row {
+                let color = series_list[idx].color;
+                root.draw(&Circle::new((x + dot_r as i32, row_mid_y as i32), dot_r as i32, color.filled()))
+                    .map_err(|e| e.to_string())?;
+                let legend_style = get_font_with_color(config, legend_font_size, &colors.text_primary)
+                    .pos(Pos::new(HPos::Left, VPos::Center));
+                root.draw_text(
+                    &series_list[idx].name,
+                    &legend_style,
+                    (x + 2 * dot_r as i32 + (8 * s as i32), row_mid_y as i32 + (2 * s as i32)),
+                )
+                .map_err(|e| e.to_string())?;
+                x += item_w as i32 + item_gap as i32;
+            }
+        }
+
+        // 4.3 水平网格线 + Y 轴刻度 (基线加深，与柱状图竖线装饰同色系)
+        let y_label_style = get_font_with_color(config, axis_font_size, &colors.text_secondary)
+            .pos(Pos::new(HPos::Right, VPos::Center));
+
+        for i in 0..=steps {
+            let v = step * i as f64;
+            let y = y_pos(v.round() as i64);
+            let line_color = if i == 0 {
+                RGBAColor(0, 0, 0, 0.12)
+            } else {
+                RGBAColor(colors.grid_line.0, colors.grid_line.1, colors.grid_line.2, 1.0)
+            };
+            root.draw(&PathElement::new(
+                vec![(chart_left as i32, y as i32), (chart_right as i32, y as i32)],
+                line_color.stroke_width(2 * s),
+            ))
             .map_err(|e| e.to_string())?;
 
-        chart
-            .configure_mesh()
-            .light_line_style(colors.grid_line.stroke_width(s))
-            .bold_line_style(colors.grid_line.stroke_width(s))
-            .x_labels(point_count.min(12))
-            .x_label_formatter(&|x| {
-                if *x < x_labels.len() {
-                    let full = &x_labels[*x];
-                    if full.len() >= 10 && full.contains('-') {
-                        full[5..].to_string() // remove YYYY-
-                    } else {
-                        full.clone()
-                    }
-                } else {
-                    "".to_string()
-                }
-            })
-            // 放大坐标轴字体
-            .x_label_style(get_font_with_color(config, 11 * s, &colors.text_secondary))
-            .y_label_style(get_font_with_color(config, 11 * s, &colors.text_secondary))
-            .y_desc("数量")
-            .draw()
+            let label = format_y_label(v);
+            root.draw_text(
+                &label,
+                &y_label_style,
+                ((chart_left - (10 * s)) as i32, y as i32),
+            )
             .map_err(|e| e.to_string())?;
+        }
 
-        // 3. 绘制每条线
+        // 4.4 X 轴标签 (过多时自动抽稀)
+        let x_label_style = get_font_with_color(config, axis_font_size, &colors.text_secondary)
+            .pos(Pos::new(HPos::Center, VPos::Top));
+        let label_every = ((point_count as f64) / 10.0).ceil().max(1.0) as usize;
+
+        for (i, label) in x_labels.iter().enumerate() {
+            if i % label_every != 0 && i != point_count - 1 {
+                continue;
+            }
+            let text = short_x_label(label);
+            root.draw_text(
+                &text,
+                &x_label_style,
+                (x_pos(i) as i32, (chart_bottom + (12 * s)) as i32),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        // 4.5 数据系列：面积填充(单系列) + 折线 + 白描边圆点
         for series in &series_list {
             let color = series.color;
 
-            // Line
-            chart
-                .draw_series(LineSeries::new(
-                    series.points.iter().enumerate().map(|(i, d)| (i, d.value)),
-                    color.stroke_width(3 * s),
-                ))
-                .map_err(|e| e.to_string())?
-                .label(&series.name)
-                .legend(move |(x, y)| {
-                    PathElement::new(vec![(x, y), (x + 20, y)], color.stroke_width(3 * s))
-                });
+            // 将系列数据点映射到统一 X 轴位置
+            let pts: Vec<(f64, f64)> = series
+                .points
+                .iter()
+                .filter_map(|p| label_index.get(p.label.as_str()).map(|&i| (x_pos(i), y_pos(p.value))))
+                .collect();
+            if pts.is_empty() {
+                continue;
+            }
 
-            // Points
-            chart
-                .draw_series(PointSeries::of_element(
-                    series.points.iter().enumerate().map(|(i, d)| (i, d.value)),
-                    5 * s,
-                    color.filled(),
-                    &|c, sz, st| {
-                        EmptyElement::at(c)
-                            + Circle::new((0, 0), sz, RGBColor(255, 255, 255).filled())
-                            + Circle::new((0, 0), sz.saturating_sub(2 * s), st)
-                    },
+            // 面积填充 (仅单系列，避免多系列叠加混淆)
+            if !multi {
+                let mut poly: Vec<(i32, i32)> = pts
+                    .iter()
+                    .map(|&(x, y)| (x.round() as i32, y.round() as i32))
+                    .collect();
+                poly.push((pts[pts.len() - 1].0.round() as i32, chart_bottom as i32));
+                poly.push((pts[0].0.round() as i32, chart_bottom as i32));
+                root.draw(&Polygon::new(
+                    poly,
+                    RGBAColor(color.0, color.1, color.2, 0.13).filled(),
                 ))
                 .map_err(|e| e.to_string())?;
+            }
+
+            // 折线
+            let line_pts: Vec<(i32, i32)> = pts
+                .iter()
+                .map(|&(x, y)| (x.round() as i32, y.round() as i32))
+                .collect();
+            root.draw(&PathElement::new(line_pts, color.stroke_width(3 * s)))
+                .map_err(|e| e.to_string())?;
+
+            // 数据点：白底圆 + 主题色内圆
+            for &(x, y) in &pts {
+                let (xi, yi) = (x.round() as i32, y.round() as i32);
+                root.draw(&Circle::new((xi, yi), (6 * s) as i32, RGBColor(255, 255, 255).filled()))
+                    .map_err(|e| e.to_string())?;
+                root.draw(&Circle::new((xi, yi), (4 * s) as i32, color.filled()))
+                    .map_err(|e| e.to_string())?;
+            }
         }
 
-        // 4. 绘制图例
-        chart
-            .configure_series_labels()
-            .background_style(RGBColor(255, 255, 255))
-            .border_style(colors.grid_line)
-            .position(SeriesLabelPosition::UpperRight)
-            .label_font(get_font_with_color(config, 14 * s, &colors.text_primary))
-            .draw()
-            .map_err(|e| e.to_string())?;
+        // 4.6 峰值标注 (仅单系列：在最高点上方标注数值)
+        if !multi && max_val > 0 {
+            if let Some(peak) = series_list[0].points.iter().max_by_key(|p| p.value) {
+                if let Some(&i) = label_index.get(peak.label.as_str()) {
+                    let px = x_pos(i);
+                    let py = y_pos(peak.value);
+                    let text = peak.value.to_string();
+                    let peak_style = get_font_with_color(config, axis_font_size, &colors.text_primary)
+                        .pos(Pos::new(HPos::Center, VPos::Bottom));
+                    root.draw_text(
+                        &text,
+                        &peak_style,
+                        (px.round() as i32, (py - (10 * s) as f64).round() as i32),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+            }
+        }
 
         root.present().map_err(|e| e.to_string())?;
     }
 
+    // === 5. RGB -> RGBA 并编码 ===
     let mut rgba_image = RgbaImage::new(width, height);
     for y in 0..height {
         for x in 0..width {
@@ -401,3 +615,4 @@ pub fn draw_line_chart(
 
     save_rgba_to_base64(rgba_image)
 }
+

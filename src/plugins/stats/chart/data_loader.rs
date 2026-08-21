@@ -31,6 +31,35 @@ pub struct BarData {
     pub avatar_url: Option<String>,
     pub avatar_img: Option<image::RgbaImage>,
     pub theme_color: RGBColor, // 从头像提取的主题色
+    /// 非用户条目（如消息类型）的图标字符：不绘制头像，改为绘制彩色图标徽章
+    pub icon_char: Option<String>,
+}
+
+/// 消息类型的视觉样式（颜色 + 图标字符）。
+/// 排行榜与走势图共用同一份样式，保证两种图表中同一消息类型的颜色/标识一致。
+pub struct MessageTypeStyle {
+    pub label: &'static str,
+    pub color: RGBColor,
+    pub icon: &'static str,
+}
+
+pub const MESSAGE_TYPE_STYLES: [MessageTypeStyle; 6] = [
+    MessageTypeStyle { label: "文本", color: RGBColor(100, 116, 139), icon: "文" },
+    MessageTypeStyle { label: "图片", color: RGBColor(59, 130, 246), icon: "图" },
+    MessageTypeStyle { label: "语音", color: RGBColor(16, 185, 129), icon: "语" },
+    MessageTypeStyle { label: "视频", color: RGBColor(139, 92, 246), icon: "视" },
+    MessageTypeStyle { label: "动画表情", color: RGBColor(249, 115, 22), icon: "动" },
+    MessageTypeStyle { label: "表情", color: RGBColor(234, 179, 8), icon: "表" },
+];
+
+/// 按类型名查找视觉样式，未知类型回退到主题蓝
+pub fn message_type_style(label: &str) -> (RGBColor, &'static str) {
+    for st in MESSAGE_TYPE_STYLES.iter() {
+        if st.label == label {
+            return (st.color, st.icon);
+        }
+    }
+    (RGBColor(59, 130, 246), "?")
 }
 
 /// 调色板助手
@@ -121,17 +150,18 @@ pub async fn fetch_line_data(
 
         type Extractor = fn(&queries::MessageTypeTrend) -> i64;
 
-        // 预定义颜色和对应值提取函数
-        let types: Vec<(&str, RGBColor, Extractor)> = vec![
-            ("文本", RGBColor(100, 116, 139), |t| t.text),
-            ("图片", RGBColor(59, 130, 246), |t| t.image),
-            ("语音", RGBColor(16, 185, 129), |t| t.voice),
-            ("视频", RGBColor(139, 92, 246), |t| t.video),
-            ("动画表情", RGBColor(249, 115, 22), |t| t.anim_emoji),
-            ("表情", RGBColor(234, 179, 8), |t| t.face),
+        // 预定义值提取函数；颜色统一取自 MESSAGE_TYPE_STYLES，与排行榜保持一致
+        let types: Vec<(&str, Extractor)> = vec![
+            ("文本", |t| t.text),
+            ("图片", |t| t.image),
+            ("语音", |t| t.voice),
+            ("视频", |t| t.video),
+            ("动画表情", |t| t.anim_emoji),
+            ("表情", |t| t.face),
         ];
 
-        for (name, color, extractor) in types {
+        for (name, extractor) in types {
+            let (color, _) = message_type_style(name);
             let points: Vec<ChartDataPoint> = trend
                 .iter()
                 .map(|t| ChartDataPoint {
@@ -244,13 +274,18 @@ pub async fn fetch_bar_data(
         bar_data = raw_data
             .into_iter()
             .filter(|(_, v)| *v > 0)
-            .map(|(k, v)| BarData {
-                label: k,
-                value: v,
-                user_id: None,
-                avatar_url: None,
-                avatar_img: None,
-                theme_color: RGBColor(59, 130, 246),
+            .map(|(k, v)| {
+                // 每种消息类型使用与走势图一致的差异化颜色和图标
+                let (color, icon) = message_type_style(&k);
+                BarData {
+                    label: k,
+                    value: v,
+                    user_id: None,
+                    avatar_url: None,
+                    avatar_img: None,
+                    theme_color: color,
+                    icon_char: Some(icon.to_string()),
+                }
             })
             .collect();
 
@@ -278,6 +313,7 @@ pub async fn fetch_bar_data(
                 avatar_url: Some(url),
                 avatar_img: None,
                 theme_color: RGBColor(59, 130, 246),
+                icon_char: None,
             });
         }
         return Ok(bar_data);
@@ -298,6 +334,7 @@ pub async fn fetch_bar_data(
                 avatar_url: Some(url),
                 avatar_img: None,
                 theme_color: RGBColor(59, 130, 246),
+                icon_char: None,
             });
         }
         return Ok(bar_data);
@@ -333,6 +370,7 @@ pub async fn fetch_bar_data(
             avatar_url: Some(url),
             avatar_img: None,
             theme_color: RGBColor(59, 130, 246),
+            icon_char: None,
         });
     }
 
@@ -395,6 +433,7 @@ pub async fn fetch_bar_data(
                 avatar_url: Some(url),
                 avatar_img: None,
                 theme_color: RGBColor(59, 130, 246),
+                icon_char: None,
             });
         }
     }

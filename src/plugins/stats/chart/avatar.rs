@@ -56,6 +56,10 @@ pub async fn prepare_avatars(data: &mut [BarData]) {
     let avatar_results = futures_util::future::join_all(futures).await;
 
     for (i, avatar) in avatar_results.into_iter().enumerate() {
+        // 图标条目（如消息类型统计）不使用头像，由渲染器按主题色绘制图标徽章
+        if data[i].icon_char.is_some() {
+            continue;
+        }
         if let Some(img) = avatar {
             data[i].theme_color = get_average_color(&img);
             data[i].avatar_img = Some(img);
