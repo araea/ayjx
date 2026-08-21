@@ -161,7 +161,7 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
             ],
         ),
         "ai_news" => (
-            "定时向指定群推送 AI 新资讯（数据源 AIHOT），也可随时手动查询",
+            "定时向指定群推送 AI 新资讯（数据源 AIHOT），先发排版卡片图再补带链接的合并转发",
             cmds![
                 ("ai资讯 / ai新闻", "最近 24 小时 AI 精选资讯"),
                 ("ai热点", "当前 AI 热点榜 Top 10"),

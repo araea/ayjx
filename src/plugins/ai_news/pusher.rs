@@ -4,6 +4,7 @@
 //! 既满足官方「同一端点定时任务至少间隔 60 秒」的要求，也避免群数增长时把请求量放大。
 
 use super::api::{self, Item};
+use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET};
@@ -33,9 +34,45 @@ fn is_allowed(ctx: &Context, group_id: i64) -> bool {
     true
 }
 
+/// 一次推送的成品：一张排版好的卡片图 + 一条带链接的文本。
+///
+/// 图片在进入分群循环前只截一次，多个群共用同一份 base64，
+/// 免得每个群都去跑一遍无头浏览器。
+pub struct Payload {
+    pub rendered: Rendered,
+    /// 卡片图的 base64；渲染失败或未开启时为 None，此时只发文本
+    pub image: Option<String>,
+}
+
+impl Payload {
+    /// 文本 + 卡片：卡片渲染失败不影响推送，退回纯文本继续
+    pub async fn build(cfg: &AiNewsConfig, rendered: Rendered, card_html: Option<String>) -> Self {
+        let image = match card_html {
+            Some(html) if cfg.image_enabled => match card::capture(&html).await {
+                Ok(b64) => Some(b64),
+                Err(e) => {
+                    warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
+                    None
+                }
+            },
+            _ => None,
+        };
+        Self { rendered, image }
+    }
+
+    /// 只有文本，没有配图（错误提示、空结果等）
+    pub fn text_only(rendered: Rendered) -> Self {
+        Self {
+            rendered,
+            image: None,
+        }
+    }
+}
+
 /// 把渲染结果装配成待发消息。
 ///
 /// 短内容照旧发一条纯文本；一旦整体超过 `forward_threshold_chars`，
+/// 或者前面已经发过卡片图（此时文本只是链接附录），
 /// 就按条目拆成合并转发的节点——群里只留一个折叠卡片，不刷屏。
 /// 合并转发的消息链里只能放 node 段，因此这种情况下会舍弃回复引用。
 pub fn build_message(
@@ -43,9 +80,12 @@ pub fn build_message(
     cfg: &AiNewsConfig,
     rendered: &Rendered,
     reply_to: Option<i64>,
+    force_forward: bool,
 ) -> Message {
     let threshold = cfg.forward_threshold_chars;
-    let as_forward = threshold > 0 && rendered.char_count() > threshold;
+    let as_forward = threshold > 0
+        && !rendered.entries.is_empty()
+        && (force_forward || rendered.char_count() > threshold);
 
     if !as_forward {
         let msg = match reply_to {
@@ -71,22 +111,57 @@ pub fn build_message(
     forward
 }
 
-/// 发送一条渲染结果，返回是否发送成功（失败时不应记入去重，留待下次补推）
-pub async fn send_rendered(
+/// 先图后文地投递一次推送：卡片图负责好看，随后的合并转发负责链接与检索。
+///
+/// 返回「对方是否收到了内容」——两条都没发出去才算失败，
+/// 失败的条目不记入去重，留待下一轮补推。
+pub async fn deliver(
     ctx: &Context,
     writer: LockedWriter,
-    group_id: i64,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
     cfg: &AiNewsConfig,
-    rendered: &Rendered,
+    payload: &Payload,
+    reply_to: Option<i64>,
 ) -> bool {
-    let body = build_message(ctx, cfg, rendered, None);
-    match send_msg(ctx, writer, Some(group_id), None, body).await {
-        Ok(_) => true,
-        Err(e) => {
-            warn!(target: LOG_TARGET, "群 {} 推送发送失败: {}", group_id, e);
-            false
+    let mut image_sent = false;
+
+    if let Some(b64) = &payload.image {
+        let mut msg = match reply_to {
+            Some(id) => Message::new().reply(id),
+            None => Message::new(),
+        };
+        msg = msg.image(format!("base64://{}", b64));
+
+        match send_msg(ctx, writer.clone(), group_id, user_id, msg).await {
+            Ok(_) => image_sent = true,
+            Err(e) => warn!(target: LOG_TARGET, "卡片图发送失败，改由文本兜底: {}", e),
         }
     }
+
+    // 图片已经带上了引用，文本就不必再引用一次
+    let body = build_message(
+        ctx,
+        cfg,
+        &payload.rendered,
+        if image_sent { None } else { reply_to },
+        image_sent,
+    );
+    let text_sent = match send_msg(ctx, writer, group_id, user_id, body).await {
+        Ok(_) => true,
+        Err(e) => {
+            warn!(target: LOG_TARGET, "推送文本发送失败: {}", e);
+            false
+        }
+    };
+
+    image_sent || text_sent
+}
+
+/// 卡片图只画前 `image_max_items` 条，剩下的交给文本；图太长反而不好读
+pub fn card_slice<'a, T>(items: &'a [T], cfg: &AiNewsConfig) -> &'a [T] {
+    let max = cfg.image_max_items.clamp(1, 30);
+    &items[..items.len().min(max)]
 }
 
 /// 目标群之间的间隔，防止短时间内连发触发风控
@@ -182,6 +257,7 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         .filter_map(|item| item.dedupe_key().map(|key| (key, item)))
         .collect();
     let opts = render_options(&cfg);
+    let subtitle = window_label(&cfg.window);
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
@@ -206,9 +282,26 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             .map(|(_, item)| item.clone())
             .collect();
 
-        let header = format!("🤖 AI 资讯速递 · {}", window_label(&cfg.window));
+        // 每个群去重后的条目各不相同，卡片只能逐群渲染
+        let header = format!("🤖 AI 资讯速递 · {}", subtitle);
         let rendered = render::render_items(&header, &picked, &opts);
-        let sent = send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await;
+        let card_html = Some(card::items_card(
+            "AI 资讯速递",
+            subtitle,
+            card_slice(&picked, &cfg),
+            &opts,
+        ));
+        let payload = Payload::build(&cfg, rendered, card_html).await;
+        let sent = deliver(
+            &ctx,
+            writer.clone(),
+            Some(*group_id),
+            None,
+            &cfg,
+            &payload,
+            None,
+        )
+        .await;
 
         // 只有真正发出去了才记入去重，发送失败的条目下次继续推
         if sent {
@@ -239,7 +332,10 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         warn!(target: LOG_TARGET, "AI 日报缺少日期字段，跳过推送。");
         return;
     };
+    // 各群内容一致，卡片只截一次
     let rendered = render::render_daily(&report, cfg.daily_max_blocks);
+    let card_html = Some(card::daily_card(&report, cfg.daily_max_blocks));
+    let payload = Payload::build(&cfg, rendered, card_html).await;
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
@@ -250,7 +346,17 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             continue;
         }
 
-        if send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await {
+        if deliver(
+            &ctx,
+            writer.clone(),
+            Some(*group_id),
+            None,
+            &cfg,
+            &payload,
+            None,
+        )
+        .await
+        {
             state::mark_daily(*group_id, &date).await;
         }
 
@@ -285,12 +391,23 @@ pub async fn push_hot_topics(
     }
 
     let rendered = render::render_hot_topics(&topics);
+    let card_html = Some(card::hot_topics_card(card_slice(&topics, &cfg)));
+    let payload = Payload::build(&cfg, rendered, card_html).await;
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
             continue;
         }
-        let _ = send_rendered(&ctx, writer.clone(), *group_id, &cfg, &rendered).await;
+        let _ = deliver(
+            &ctx,
+            writer.clone(),
+            Some(*group_id),
+            None,
+            &cfg,
+            &payload,
+            None,
+        )
+        .await;
         if idx + 1 < groups.len() {
             pace(&cfg).await;
         }

@@ -10,9 +10,12 @@
 //!   - 12:30 / 20:30 精选速递（过去 24 小时精选，按群去重，只推新条目）
 //!   - 21:30 当前热点榜（Top 10 快照）
 //!
-//! 防刷屏：定时推送与指令回复共用一套发送逻辑——整条消息超过
-//! `forward_threshold_chars`（默认 500 字）就按条目拆成合并转发，
-//! 群里只留一个折叠卡片；短内容仍走普通文本。
+//! 呈现方式：定时推送与指令回复共用一套投递逻辑，先图后文——
+//!   1. 先发一张排版好的卡片图（见 `card.rs`），负责好看、好读、好转发；
+//!   2. 再补一条文本，带上每条的 AIHOT 阅读链接，能点能搜能复制。
+//! 文本部分超过 `forward_threshold_chars`（默认 500 字）、或前面已经发过图，
+//! 就折叠成合并转发，群里只留一个卡片，不刷屏。
+//! 卡片渲染失败（浏览器不可用等）会自动退回纯文本，不影响推送。
 //!
 //! 指令：
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
@@ -39,10 +42,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value;
 
 pub mod api;
+mod card;
 mod pusher;
 mod render;
 mod state;
 
+use pusher::Payload;
 use render::Rendered;
 
 pub const LOG_TARGET: &str = "Plugin/AiNews";
@@ -97,6 +102,12 @@ pub struct AiNewsConfig {
     /// 日报最多展示的条目数
     #[serde(default = "default_daily_blocks")]
     pub daily_max_blocks: usize,
+    /// 是否把资讯排版成卡片图先发一张（随后仍会补一条带链接的文本）
+    #[serde(default = "default_true")]
+    pub image_enabled: bool,
+    /// 卡片图最多画几条，其余交给文本；图太长反而不好读
+    #[serde(default = "default_image_max_items")]
+    pub image_max_items: usize,
     /// 整条消息超过多少字符就改用合并转发（折叠成一个卡片，避免刷屏）；0 表示永远发纯文本
     #[serde(default = "default_forward_threshold")]
     pub forward_threshold_chars: usize,
@@ -155,6 +166,9 @@ fn default_summary_chars() -> usize {
 fn default_daily_blocks() -> usize {
     12
 }
+fn default_image_max_items() -> usize {
+    10
+}
 fn default_forward_threshold() -> usize {
     500
 }
@@ -190,6 +204,8 @@ impl Default for AiNewsConfig {
             show_reason: true,
             show_original_link: false,
             daily_max_blocks: default_daily_blocks(),
+            image_enabled: true,
+            image_max_items: default_image_max_items(),
             forward_threshold_chars: default_forward_threshold(),
             forward_node_chars: default_forward_node_chars(),
             send_interval_seconds: default_send_interval(),
@@ -382,16 +398,24 @@ pub fn handle(
             let arg = extract_text_arg(&matched.args);
             let config = load_config(&ctx);
 
-            let rendered = match trigger {
+            let payload = match trigger {
                 "ai搜索" => query_search(&config, &arg).await,
                 "ai热点" => query_hot_topics(&config).await,
                 "ai日报" => query_daily(&config).await,
                 _ => query_brief(&config).await,
             };
 
-            // 内容太长时自动折叠成合并转发，别把群刷屏
-            let body = pusher::build_message(&ctx, &config, &rendered, Some(message_id));
-            send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
+            // 先发卡片图，再补一条带链接的合并转发文本
+            pusher::deliver(
+                &ctx,
+                writer,
+                group_id,
+                Some(user_id),
+                &config,
+                &payload,
+                Some(message_id),
+            )
+            .await;
             return Ok(None);
         }
 
@@ -399,67 +423,100 @@ pub fn handle(
     })
 }
 
-async fn query_brief(config: &AiNewsConfig) -> Rendered {
+/// 提示类回复：只有文本，不配图
+fn notice(text: impl Into<String>) -> Payload {
+    Payload::text_only(Rendered::plain(text))
+}
+
+async fn query_brief(config: &AiNewsConfig) -> Payload {
+    let window = pusher::window_label(&config.window);
     match pusher::fetch_brief(config, false).await {
         Ok(Some(items)) if !items.is_empty() => {
-            let header = format!("🤖 AI 资讯速递 · {}", pusher::window_label(&config.window));
-            render::render_items(&header, &items, &pusher::render_options(config))
+            let opts = pusher::render_options(config);
+            let rendered =
+                render::render_items(&format!("🤖 AI 资讯速递 · {}", window), &items, &opts);
+            let html = card::items_card(
+                "AI 资讯速递",
+                window,
+                pusher::card_slice(&items, config),
+                &opts,
+            );
+            Payload::build(config, rendered, Some(html)).await
         }
-        Ok(_) => Rendered::plain(format!(
-            "📭 {}内暂无 AI 精选资讯。",
-            pusher::window_label(&config.window)
-        )),
+        Ok(_) => notice(format!("📭 {}内暂无 AI 精选资讯。", window)),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询精选失败: {}", e);
-            Rendered::plain(format!("❌ 获取 AI 资讯失败：{}", e))
+            notice(format!("❌ 获取 AI 资讯失败：{}", e))
         }
     }
 }
 
-async fn query_hot_topics(config: &AiNewsConfig) -> Rendered {
+async fn query_hot_topics(config: &AiNewsConfig) -> Payload {
     match api::fetch_hot_topics(config.request_timeout_seconds, false).await {
-        Ok(Some(topics)) if !topics.is_empty() => render::render_hot_topics(&topics),
-        Ok(_) => Rendered::plain("📭 当前没有热点条目。"),
+        Ok(Some(topics)) if !topics.is_empty() => {
+            let rendered = render::render_hot_topics(&topics);
+            let html = card::hot_topics_card(pusher::card_slice(&topics, config));
+            Payload::build(config, rendered, Some(html)).await
+        }
+        Ok(_) => notice("📭 当前没有热点条目。"),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询热点榜失败: {}", e);
-            Rendered::plain(format!("❌ 获取 AI 热点榜失败：{}", e))
+            notice(format!("❌ 获取 AI 热点榜失败：{}", e))
         }
     }
 }
 
-async fn query_daily(config: &AiNewsConfig) -> Rendered {
+async fn query_daily(config: &AiNewsConfig) -> Payload {
     match api::fetch_latest_daily(config.request_timeout_seconds).await {
-        Ok(Some(report)) => render::render_daily(&report, config.daily_max_blocks),
-        Ok(None) => Rendered::plain("📭 当前没有可用的 AI 日报。"),
+        Ok(Some(report)) => {
+            let rendered = render::render_daily(&report, config.daily_max_blocks);
+            let html = card::daily_card(&report, config.daily_max_blocks);
+            Payload::build(config, rendered, Some(html)).await
+        }
+        Ok(None) => notice("📭 当前没有可用的 AI 日报。"),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询日报失败: {}", e);
-            Rendered::plain(format!("❌ 获取 AI 日报失败：{}", e))
+            notice(format!("❌ 获取 AI 日报失败：{}", e))
         }
     }
 }
 
-async fn query_search(config: &AiNewsConfig, keyword: &str) -> Rendered {
+async fn query_search(config: &AiNewsConfig, keyword: &str) -> Payload {
     let keyword = keyword.trim();
     if keyword.chars().count() < 2 {
-        return Rendered::plain("用法：/ai搜索 <关键词>（关键词至少 2 个字）");
+        return notice("用法：/ai搜索 <关键词>（关键词至少 2 个字）");
     }
     if keyword.chars().count() > 200 {
-        return Rendered::plain("关键词太长了，请控制在 200 字以内。");
+        return notice("关键词太长了，请控制在 200 字以内。");
     }
 
     match pusher::search(config, keyword).await {
         Ok((items, from_all_pool)) if !items.is_empty() => {
-            let header = if from_all_pool {
-                format!("🔎 「{}」近 7 天相关动态（未进入精选）", keyword)
+            let opts = pusher::render_options(config);
+            let (header, subtitle) = if from_all_pool {
+                (
+                    format!("🔎 「{}」近 7 天相关动态（未进入精选）", keyword),
+                    format!("「{}」· 近 7 天 · 未进入精选", keyword),
+                )
             } else {
-                format!("🔎 「{}」近 7 天精选", keyword)
+                (
+                    format!("🔎 「{}」近 7 天精选", keyword),
+                    format!("「{}」· 近 7 天精选", keyword),
+                )
             };
-            render::render_items(&header, &items, &pusher::render_options(config))
+            let rendered = render::render_items(&header, &items, &opts);
+            let html = card::items_card(
+                "关键词检索",
+                &subtitle,
+                pusher::card_slice(&items, config),
+                &opts,
+            );
+            Payload::build(config, rendered, Some(html)).await
         }
-        Ok(_) => Rendered::plain(format!("📭 近 7 天没有找到与「{}」相关的 AI 资讯。", keyword)),
+        Ok(_) => notice(format!("📭 近 7 天没有找到与「{}」相关的 AI 资讯。", keyword)),
         Err(e) => {
             warn!(target: LOG_TARGET, "搜索 [{}] 失败: {}", keyword, e);
-            Rendered::plain(format!("❌ 搜索失败：{}", e))
+            notice(format!("❌ 搜索失败：{}", e))
         }
     }
 }

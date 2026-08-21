@@ -113,19 +113,19 @@ impl Rendered {
 }
 
 /// 北京时间（UTC+8）
-fn beijing() -> FixedOffset {
+pub(super) fn beijing() -> FixedOffset {
     FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区偏移")
 }
 
 /// ISO8601 → `MM-DD HH:MM`（北京时间）
-fn fmt_time(iso: &str) -> Option<String> {
+pub(super) fn fmt_time(iso: &str) -> Option<String> {
     DateTime::parse_from_rfc3339(iso)
         .ok()
         .map(|dt| dt.with_timezone(&beijing()).format("%m-%d %H:%M").to_string())
 }
 
 /// 按字符（而非字节）截断，避免切坏中文
-fn truncate(text: &str, max_chars: usize) -> String {
+pub(super) fn truncate(text: &str, max_chars: usize) -> String {
     let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.chars().count() <= max_chars {
         return cleaned;
