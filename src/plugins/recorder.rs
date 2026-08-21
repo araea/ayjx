@@ -5,7 +5,9 @@ use crate::plugins::{PluginError, get_config};
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use futures_util::future::BoxFuture;
 use jieba_rs::Jieba;
-use sea_orm::{ActiveModelTrait, ActiveValue, ConnectionTrait, Schema, Set, Statement};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ConnectionTrait, Schema, Set, Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsScalar};
@@ -156,7 +158,12 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let _ = db.execute(stmt).await;
         }
 
-        // 3. 注册每日数据清理任务
+        // 3. 初始化统计聚合表（建表；若有历史数据则一次性回填，否则自愈近 7 天）
+        if let Err(e) = crate::db::stats::init(db).await {
+            warn!(target: "Plugin/Recorder", "统计聚合表初始化失败: {}", e);
+        }
+
+        // 4. 注册每日数据清理任务
         let scheduler = ctx.scheduler.clone();
         let db_clone = ctx.db.clone();
         let config_clone = ctx.config.clone();
@@ -165,6 +172,12 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let db = db_clone.clone();
             let cfg = config_clone.clone();
             async move {
+                // 统计聚合自愈：重建近 7 天聚合行，修复异常场景下的计数漂移
+                // （保留期之外的聚合行是冻结的历史，不会被触碰）
+                if let Err(e) = crate::db::stats::self_heal_recent(&db).await {
+                    warn!(target: "Plugin/Recorder", "统计聚合自愈失败: {}", e);
+                }
+
                 let retention_days = {
                     let guard = cfg.read().unwrap();
                     if let Some(v) = guard.plugins.get("recorder") {
@@ -184,6 +197,9 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
                 info!(target: "Plugin/Recorder", "开始清理 {} 天前的数据 (Time < {})...", retention_days, timestamp);
 
+                // 注意：只删除原始消息记录，统计聚合表 (message_stats_daily /
+                // message_user_stats_daily) 中对应日期的聚合行保留——历史统计
+                // （如"去年消息数"）在原始数据过期后依然可查。
                 let delete_sql = format!("DELETE FROM message_records WHERE time < {}", timestamp);
                 let res = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, delete_sql)).await;
 
@@ -369,13 +385,69 @@ pub fn handle(
                 record.tokens = Set("".to_string());
             }
 
-            if let Err(e) = record.insert(&ctx.db).await {
+            // 构建统计聚合增量（与消息入库同事务执行，保证两表一致）
+            let delta = crate::db::stats::MessageStatsDelta {
+                group_id: active_i64(&record.group_id),
+                group_name: active_str(&record.group_name),
+                user_id: active_i64(&record.user_id),
+                nick: active_str(&record.sender_nick),
+                time: ts,
+                length: active_i32(&record.length),
+                image_count: active_i32(&record.image_count),
+                is_anim_emoji: active_bool(&record.is_anim_emoji),
+                is_voice: active_bool(&record.is_voice),
+                is_video: active_bool(&record.is_video),
+                face_count: active_i32(&record.face_count),
+            };
+
+            // 消息插入 + 聚合 UPSERT 在同一事务内：要么同时生效，要么同时回滚
+            let insert_res = ctx.db.transaction(|txn| {
+                let record = record;
+                let delta = delta;
+                Box::pin(async move {
+                    record.insert(txn).await?;
+                    crate::db::stats::upsert_message_stats(txn, &delta).await?;
+                    Ok::<(), sea_orm::DbErr>(())
+                })
+            })
+            .await;
+
+            if let Err(e) = insert_res {
                 error!(target: "Plugin/Recorder", "消息记录失败: {}", e);
             }
         }
 
         Ok(Some(ctx))
     })
+}
+
+/// 读取 ActiveModel 字段当前值（未设置时返回默认值），用于构建统计聚合增量
+fn active_i64(v: &ActiveValue<i64>) -> i64 {
+    match v {
+        ActiveValue::Set(x) | ActiveValue::Unchanged(x) => *x,
+        _ => 0,
+    }
+}
+
+fn active_i32(v: &ActiveValue<i32>) -> i32 {
+    match v {
+        ActiveValue::Set(x) | ActiveValue::Unchanged(x) => *x,
+        _ => 0,
+    }
+}
+
+fn active_bool(v: &ActiveValue<bool>) -> bool {
+    match v {
+        ActiveValue::Set(x) | ActiveValue::Unchanged(x) => *x,
+        _ => false,
+    }
+}
+
+fn active_str(v: &ActiveValue<String>) -> String {
+    match v {
+        ActiveValue::Set(x) | ActiveValue::Unchanged(x) => x.clone(),
+        _ => String::new(),
+    }
 }
 
 /// 解析消息段数组，提取富文本摘要、特征标记，并返回 (纯文本长度, 拼接后的纯文本)

@@ -8,6 +8,7 @@ use tokio::fs;
 use crate::info;
 
 pub mod queries;
+pub mod stats;
 pub mod utils;
 
 /// 初始化数据库连接
