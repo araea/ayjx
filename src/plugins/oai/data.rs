@@ -1,6 +1,4 @@
 use super::types::{Config, GeneratingState};
-use async_openai::Client;
-use async_openai::config::OpenAIConfig;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -57,12 +55,34 @@ impl Manager {
             return Err(anyhow::anyhow!("API未配置"));
         }
 
-        let config = OpenAIConfig::new().with_api_base(base).with_api_key(key);
-        let client = Client::with_config(config);
-        let response = client.models().list().await?;
+        // 自实现 GET {base}/models：DeepSeek 官方（及多数中转）返回的 model 对象
+        // 字段不全（缺 created），async-openai 的强类型反序列化会失败，这里宽松解析只取 id。
+        let url = format!("{}/models", base.trim_end_matches('/'));
+        let resp = reqwest::Client::new()
+            .get(&url)
+            .bearer_auth(&key)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "模型列表请求失败: HTTP {}",
+                resp.status().as_u16()
+            ));
+        }
 
-        let mut models: Vec<String> = response.data.into_iter().map(|m| m.id).collect();
+        let body: serde_json::Value = resp.json().await?;
+        let mut models: Vec<String> = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()))
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         models.sort();
+        models.dedup();
 
         let filtered = super::utils::filter_models(&models);
         let final_models = if filtered.is_empty() {

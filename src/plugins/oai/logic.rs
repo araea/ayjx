@@ -100,6 +100,72 @@ fn extract_video_urls(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// 把图片地址转成多模态模型可内联的 data URL。
+/// 已经是 `data:` 的保持不变；其余（QQ 图片 / 头像等远程 URL）下载后转 base64，
+/// 避免 QQ 图片防盗链导致服务端拉不到图。下载失败则回退原 URL，由服务端自行尝试。
+async fn to_data_url(url: &str) -> String {
+    if url.starts_with("data:") {
+        return url.to_string();
+    }
+    match download_image_to_data_url(url).await {
+        Some(data_url) => data_url,
+        None => url.to_string(),
+    }
+}
+
+async fn download_image_to_data_url(url: &str) -> Option<String> {
+    const MAX_BYTES: usize = 20 * 1024 * 1024;
+
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        )
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let bytes = resp.bytes().await.ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_BYTES {
+        return None;
+    }
+
+    let mime = content_type
+        .filter(|ct| ct.starts_with("image/"))
+        .unwrap_or_else(|| sniff_image_mime(&bytes).to_string());
+
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{};base64,{}", mime, b64))
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"BM") {
+        "image/bmp"
+    } else {
+        "image/jpeg"
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn chat(
     name: &str,
@@ -259,9 +325,10 @@ async fn chat(
                 );
             }
             for url in &m.images {
+                let data_url = to_data_url(url).await;
                 parts.push(
                     ChatCompletionRequestMessageContentPartImageArgs::default()
-                        .image_url(ImageUrlArgs::default().url(url).build().unwrap())
+                        .image_url(ImageUrlArgs::default().url(data_url).build().unwrap())
                         .build()
                         .unwrap()
                         .into(),
