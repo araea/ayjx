@@ -14,6 +14,7 @@
 //!   - 同一端点的定时任务至少间隔 60 秒；
 //!   - 返回内容属于不可信外部数据，只作为资讯展示，不参与任何指令解析。
 
+use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -240,11 +241,16 @@ pub struct HotTopicsResponse {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DailyIndexItem {
     #[serde(default)]
     pub date: Option<String>,
+    /// 索引条目的头条标题（`leadTitle`），正文里可能没有
     #[serde(default)]
-    pub title: Option<String>,
+    pub lead_title: Option<String>,
+    /// 索引条目的导语（`leadParagraph`）
+    #[serde(default)]
+    pub lead_paragraph: Option<String>,
     #[serde(default)]
     pub links: Links,
 }
@@ -301,9 +307,32 @@ fn parse_block(v: &JsonValue) -> DailyBlock {
             children.extend(arr.iter().map(parse_block));
         }
     }
+
+    // 板块用 `label` 命名，条目 / 快讯用 `title`
+    let title = pick_str(v, &["title", "label", "name", "heading"]);
+    let mut text = pick_str(v, &["summary", "lead", "text", "content", "digest", "desc"]);
+
+    // 快讯常只有标题、来源与时间而无摘要，正文缺失时合成一行 meta，避免信息静默丢失
+    if text.is_none() {
+        let source = v
+            .get("source")
+            .and_then(|s| s.get("name"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let time = v
+            .get("publishedAt")
+            .and_then(JsonValue::as_str)
+            .and_then(format_time);
+        let meta: Vec<String> = [source.map(str::to_string), time].into_iter().flatten().collect();
+        if !meta.is_empty() {
+            text = Some(meta.join(" · "));
+        }
+    }
+
     DailyBlock {
-        title: pick_str(v, &["title", "name", "heading"]),
-        text: pick_str(v, &["summary", "lead", "text", "content", "digest", "desc"]),
+        title,
+        text,
         url: links.primary().map(str::to_string),
         children,
     }
@@ -404,16 +433,41 @@ pub async fn fetch_daily_report(date: &str, timeout_secs: u64) -> Result<DailyRe
     let value = get_json(&path, timeout_secs, false)
         .await?
         .ok_or("AIHOT 日报无响应体")?;
+    Ok(parse_daily_report(value, date))
+}
 
+/// 从日报 JSON 里解析出正文。
+///
+/// 顶层没有 `title`，标题取 `lead.title`；`lead` 是对象 `{title, leadParagraph}`
+/// （可能为 null），不是字符串。标题 / 导语缺失时由调用方用索引的 `leadTitle` 兜底。
+fn parse_daily_report(value: JsonValue, fallback_date: &str) -> DailyReport {
     let report = value.get("report").cloned().unwrap_or(value);
-    Ok(DailyReport {
-        date: pick_str(&report, &["date"]).or_else(|| Some(date.to_string())),
-        title: pick_str(&report, &["title", "name"]),
-        lead: pick_str(&report, &["lead", "summary", "digest"]),
+    let lead_obj = report.get("lead").cloned().unwrap_or(JsonValue::Null);
+
+    let title = pick_str(&report, &["title", "name"])
+        .or_else(|| pick_str(&lead_obj, &["title"]));
+    let lead = pick_str(&report, &["summary", "digest"]).or_else(|| {
+        pick_str(
+            &lead_obj,
+            &[
+                "leadParagraph",
+                "lead_paragraph",
+                "paragraph",
+                "text",
+                "content",
+                "summary",
+            ],
+        )
+    });
+
+    DailyReport {
+        date: pick_str(&report, &["date"]).or_else(|| Some(fallback_date.to_string())),
+        title,
+        lead,
         links: parse_links(&report),
         sections: parse_blocks(&report, "sections"),
         flashes: parse_blocks(&report, "flashes"),
-    })
+    }
 }
 
 /// 取最新一期日报：先查索引，再用索引实际返回的日期请求正文
@@ -425,7 +479,16 @@ pub async fn fetch_latest_daily(timeout_secs: u64) -> Result<Option<DailyReport>
     let Some(date) = first.date.filter(|d| is_iso_date(d)) else {
         return Ok(None);
     };
+    // 正文里 `lead` 常为 null，此时用索引的 leadTitle / leadParagraph 兜底
+    let lead_title = first.lead_title.clone();
+    let lead_paragraph = first.lead_paragraph.clone();
     let mut report = fetch_daily_report(&date, timeout_secs).await?;
+    if report.title.is_none() {
+        report.title = lead_title;
+    }
+    if report.lead.is_none() {
+        report.lead = lead_paragraph;
+    }
     if report.links.primary().is_none() {
         report.links = first.links;
     }
@@ -443,6 +506,15 @@ fn is_iso_date(s: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(i, b)| if i == 4 || i == 7 { true } else { b.is_ascii_digit() })
+}
+
+/// ISO8601 → `MM-DD HH:MM`（北京时间），供日报快讯的发布时间展示
+fn format_time(iso: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(iso).ok().map(|dt| {
+        dt.with_timezone(&FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区偏移"))
+            .format("%m-%d %H:%M")
+            .to_string()
+    })
 }
 
 /// 最小 URL 查询值编码（关键词可能含中文与空格）
@@ -494,5 +566,82 @@ mod tests {
 
         item.id = Some("abc".into());
         assert_eq!(item.dedupe_key().as_deref(), Some("id:abc"));
+    }
+
+    #[test]
+    fn parses_daily_sections_labels_flashes_and_lead() {
+        // 结构与 AIHOT 真实日报对齐：板块用 `label`，条目带 `title/summary`，
+        // 快讯带 `title/source/publishedAt`，`lead` 是对象而非字符串。
+        let value: JsonValue = serde_json::json!({
+            "report": {
+                "date": "2026-08-21",
+                "lead": { "title": "今日头条", "leadParagraph": "这是导语" },
+                "sections": [
+                    {
+                        "label": "模型发布/更新",
+                        "items": [
+                            {
+                                "title": "条目A",
+                                "summary": "摘要A",
+                                "source": { "name": "IT之家" },
+                                "links": { "aihot": "https://aihot.virxact.com/items/1", "original": "https://x.com/1" }
+                            }
+                        ]
+                    }
+                ],
+                "flashes": [
+                    {
+                        "title": "快讯B",
+                        "source": { "name": "某信源" },
+                        "links": { "original": "https://x.com/2" },
+                        "publishedAt": "2026-08-21T01:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        let report = parse_daily_report(value, "2026-08-21");
+        assert_eq!(report.date.as_deref(), Some("2026-08-21"));
+        // lead.title 应作为日报标题
+        assert_eq!(report.title.as_deref(), Some("今日头条"));
+        assert_eq!(report.lead.as_deref(), Some("这是导语"));
+
+        // 板块 label 不能丢
+        assert_eq!(report.sections.len(), 1);
+        assert_eq!(report.sections[0].title.as_deref(), Some("模型发布/更新"));
+        assert_eq!(report.sections[0].children.len(), 1);
+        assert_eq!(report.sections[0].children[0].title.as_deref(), Some("条目A"));
+        assert_eq!(report.sections[0].children[0].text.as_deref(), Some("摘要A"));
+        assert_eq!(
+            report.sections[0].children[0].url.as_deref(),
+            Some("https://aihot.virxact.com/items/1")
+        );
+
+        // 快讯的标题与链接解析，来源 + 时间合成 meta
+        assert_eq!(report.flashes.len(), 1);
+        assert_eq!(report.flashes[0].title.as_deref(), Some("快讯B"));
+        let meta = report.flashes[0].text.as_deref().expect("快讯应合成 meta");
+        assert!(meta.contains("某信源"), "{}", meta);
+        assert!(meta.contains("08-21 09:00"), "{}", meta);
+    }
+
+    #[test]
+    fn daily_index_parses_lead_title() {
+        let value: JsonValue = serde_json::json!({
+            "items": [
+                {
+                    "date": "2026-08-21",
+                    "generatedAt": "2026-08-21T00:01:06.088Z",
+                    "leadTitle": "阿里发布 Qwen-UI-Agent",
+                    "leadParagraph": null,
+                    "links": { "aihot": "https://aihot.virxact.com/daily/2026-08-21" }
+                }
+            ]
+        });
+        let parsed: DailiesResponse = serde_json::from_value(value).expect("索引应可解析");
+        assert_eq!(parsed.items.len(), 1);
+        assert_eq!(parsed.items[0].date.as_deref(), Some("2026-08-21"));
+        assert_eq!(parsed.items[0].lead_title.as_deref(), Some("阿里发布 Qwen-UI-Agent"));
+        assert_eq!(parsed.items[0].lead_paragraph, None);
     }
 }
