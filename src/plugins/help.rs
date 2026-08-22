@@ -83,7 +83,7 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
             ],
         ),
         "stats" => (
-            "群统计图表：发言/表情/消息类型排行榜与走势，支持定时推送",
+            "群统计图表：发言/表情/消息类型排行榜与走势，支持早中晚与周月的错峰定时推送",
             cmds![
                 ("<范围><时间><类型><图表>", "范围：本群/跨群/我的/所有群；时间：今日…总；类型：发言/表情包/消息类型；图表：排行榜/走势"),
                 ("本群今日发言排行榜", "示例"),
@@ -161,11 +161,12 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
             ],
         ),
         "ai_news" => (
-            "定时向指定群推送 AI 新资讯（数据源 AIHOT），先发排版卡片图再补带链接的合并转发",
+            "AI 资讯 / 热点 / 日报 / 模型榜（数据源 AIHOT）：定时推送与随时查询，先发排版卡片图，再补带链接的合并转发",
             cmds![
                 ("ai资讯 / ai新闻", "最近 24 小时 AI 精选资讯"),
                 ("ai热点", "当前 AI 热点榜 Top 10"),
                 ("ai日报", "最新一期 AI 日报"),
+                ("ai模型榜 / 模型排行榜", "AIHOT 大模型排行榜：共识分、评测完整度与官网参考价"),
                 ("ai搜索 <关键词>", "近 7 天按关键词检索 AI 资讯"),
                 ("ai推送开启 / ai推送关闭", "开启/关闭本群的定时推送"),
                 ("ai推送状态", "查看推送开关与排期"),
@@ -205,6 +206,9 @@ fn is_enabled(ctx: &Context, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 与其他插件保持一致的分隔线
+const DIVIDER: &str = "———————————————";
+
 fn render_overview(ctx: &Context) -> String {
     let prefix = get_prefixes(ctx)
         .first()
@@ -217,20 +221,20 @@ fn render_overview(ctx: &Context) -> String {
 
     let mut out = String::new();
     out.push_str(&format!(
-        "ayjx 插件总览 ({}/{} 已启用)\n",
-        enabled_count, total
+        "🧩 ayjx 插件总览\n已启用 {} / {} 个插件\n{}\n",
+        enabled_count, total, DIVIDER
     ));
-    out.push_str("———————————————\n");
 
+    // 一条两行：首行是身份与开关，次行是它到底做什么，扫读时不必在长句里找边界
     for p in plugins {
         let (desc, _) = describe(p.name);
-        let mark = if is_enabled(ctx, p.name) { "✅" } else { "❌" };
-        out.push_str(&format!("{} {}（{}）— {}\n", mark, p.display_name, p.name, desc));
+        let mark = if is_enabled(ctx, p.name) { "✅" } else { "⬜" };
+        out.push_str(&format!("{} {}（{}）\n   {}\n", mark, p.display_name, p.name, desc));
     }
 
-    out.push_str("———————————————\n");
+    out.push_str(DIVIDER);
     out.push_str(&format!(
-        "查看某个插件的指令：{p}help <插件名>\n例：{p}help echo",
+        "\n💡 看某个插件的全部指令：{p}help <插件名>\n   例：{p}help ai_news",
         p = prefix
     ));
     out
@@ -244,43 +248,45 @@ fn render_detail(ctx: &Context, name: &str) -> String {
 
     let plugins = get_plugins();
     let Some(plugin) = plugins.iter().find(|p| p.name == name) else {
-        return format!("未找到插件 [{}]，可发送 {}help 查看插件列表。", name, prefix);
+        return format!(
+            "🔍 没有找到插件「{}」\n{}\n发送 {}help 可以查看全部插件。",
+            name, DIVIDER, prefix
+        );
     };
 
     let (desc, cmds) = describe(plugin.name);
     let status = if is_enabled(ctx, plugin.name) {
-        "已启用"
+        "✅ 已启用"
     } else {
-        "已禁用"
+        "⬜ 已禁用"
     };
 
     let mut out = String::new();
     out.push_str(&format!(
-        "插件 [{}]（{}）状态：{}\n",
-        plugin.display_name, plugin.name, status
+        "🧩 {}（{}）\n状态：{}\n{}\n📖 {}\n{}\n",
+        plugin.display_name, plugin.name, status, DIVIDER, desc, DIVIDER
     ));
-    out.push_str(&format!("简介：{}\n", desc));
-    out.push_str("———————————————\n");
 
     if cmds.is_empty() {
-        out.push_str("指令：无（该插件为后台运行或自动触发）");
-    } else {
-        out.push_str("指令：\n");
-        for c in cmds {
-            // 符号指令（/#、~名、##、-# 等）本身是完整指令，不再拼接前缀
-            let full = if c.cmd.starts_with(['/', '#', '~', '-']) {
-                c.cmd.to_string()
-            } else {
-                format!("{}{}", prefix, c.cmd)
-            };
-            if c.note.is_empty() {
-                out.push_str(&format!("  {}\n", full));
-            } else {
-                out.push_str(&format!("  {}  — {}\n", full, c.note));
-            }
-        }
-        out.pop();
+        out.push_str("该插件在后台自动工作，没有需要手动触发的指令。");
+        return out;
     }
+
+    out.push_str("⌨️ 指令\n");
+    for c in cmds {
+        // 符号指令（/#、~名、##、-# 等）本身是完整指令，不再拼接前缀
+        let full = if c.cmd.starts_with(['/', '#', '~', '-']) {
+            c.cmd.to_string()
+        } else {
+            format!("{}{}", prefix, c.cmd)
+        };
+        if c.note.is_empty() {
+            out.push_str(&format!("· {}\n", full));
+        } else {
+            out.push_str(&format!("· {}\n   {}\n", full, c.note));
+        }
+    }
+    out.pop();
     out
 }
 

@@ -17,6 +17,12 @@ pub struct Matcher {
     waiter_count: AtomicUsize,
 }
 
+/// 已登记、等待领取的 API 响应
+pub struct PendingResp {
+    id: u64,
+    rx: oneshot::Receiver<Event>,
+}
+
 struct Waiter {
     id: u64,
     // 消息匹配条件
@@ -26,6 +32,12 @@ struct Waiter {
     echo: Option<String>,
 
     sender: oneshot::Sender<Event>,
+}
+
+/// 单调递增 id，用于超时后定位并移除自身条目
+fn next_waiter_id() -> u64 {
+    static WAITER_ID: AtomicUsize = AtomicUsize::new(1);
+    WAITER_ID.fetch_add(1, Ordering::Relaxed) as u64
 }
 
 impl Matcher {
@@ -53,6 +65,52 @@ impl Matcher {
             .await
     }
 
+    /// 立即登记一个响应等待者，返回待领取的句柄。
+    ///
+    /// 与 [`Matcher::wait_resp`] 的差别在于登记时机：`wait_resp` 是 async fn，
+    /// 直到 future 首次被 poll 才真正登记；发请求与 await 之间若被调度切走，
+    /// 响应可能先一步到达而找不到等待者。需要「先登记、再发送」的场景用这个。
+    pub fn register_resp(&self, echo: String) -> PendingResp {
+        let (tx, rx) = oneshot::channel();
+        let id = next_waiter_id();
+
+        let mut guard = self.waiters.lock().unwrap();
+        guard.push(Waiter {
+            id,
+            group_id: None,
+            user_id: None,
+            echo: Some(echo),
+            sender: tx,
+        });
+        self.waiter_count.store(guard.len(), Ordering::Release);
+
+        PendingResp { id, rx }
+    }
+
+    /// 领取 [`Matcher::register_resp`] 登记的响应；超时返回 None 并清理登记项
+    pub async fn await_resp(
+        &self,
+        pending: PendingResp,
+        timeout_duration: Duration,
+    ) -> Option<Event> {
+        let PendingResp { id, rx } = pending;
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(event)) => Some(event),
+            _ => {
+                self.drop_waiter(id);
+                None
+            }
+        }
+    }
+
+    fn drop_waiter(&self, id: u64) {
+        let mut guard = self.waiters.lock().unwrap();
+        if let Some(idx) = guard.iter().position(|w| w.id == id) {
+            guard.swap_remove(idx);
+            self.waiter_count.store(guard.len(), Ordering::Release);
+        }
+    }
+
     async fn wait_internal(
         &self,
         group_id: Option<i64>,
@@ -61,9 +119,7 @@ impl Matcher {
         timeout_duration: Duration,
     ) -> Option<Event> {
         let (tx, rx) = oneshot::channel();
-        // 单调递增 id 用于超时后定位移除
-        static WAITER_ID: AtomicUsize = AtomicUsize::new(1);
-        let id = WAITER_ID.fetch_add(1, Ordering::Relaxed) as u64;
+        let id = next_waiter_id();
 
         {
             let mut guard = self.waiters.lock().unwrap();
@@ -81,11 +137,7 @@ impl Matcher {
             Ok(Ok(event)) => Some(event),
             _ => {
                 // 超时或被取消：主动清理自身条目，避免内存累积
-                let mut guard = self.waiters.lock().unwrap();
-                if let Some(idx) = guard.iter().position(|w| w.id == id) {
-                    guard.swap_remove(idx);
-                    self.waiter_count.store(guard.len(), Ordering::Release);
-                }
+                self.drop_waiter(id);
                 None
             }
         }

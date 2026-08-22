@@ -1,7 +1,10 @@
 //! 主动推送任务集合：按"引言 → 关键数字 → 主榜 → 走势 → 副榜 → 词云"的顺序串行渲染。
 //! 每种推送配套独立的时机（早/午/晚/周/月），由 `on_connected` 注册到调度器。
+//!
+//! 每条消息都等 OneBot 回执再发下一条：图片要先上传，即发即忘的话
+//! 后一张小图会抢在前一张大图前面落地，群里看到的顺序就乱了。
 
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::onebot::{LockedWriter, send_msg_ack};
 use crate::db::queries;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
@@ -15,7 +18,7 @@ const LOG_TARGET: &str = "Plugin/Stats";
 // ================= 通用工具 =================
 
 async fn send_text(c: &Context, w: LockedWriter, gid: i64, text: String) {
-    let _ = send_msg(c, w, Some(gid), None, Message::new().text(text)).await;
+    let _ = send_msg_ack(c, w, Some(gid), None, Message::new().text(text)).await;
 }
 
 async fn send_chart(
@@ -33,7 +36,7 @@ async fn send_chart(
         range.0, range.1, title,
     ).await {
         Ok(b64) => {
-            let _ = send_msg(c, w, Some(gid), None, Message::new().image(b64)).await;
+            let _ = send_msg_ack(c, w, Some(gid), None, Message::new().image(b64)).await;
         }
         Err(e) => {
             warn!(target: LOG_TARGET, "群 {} 「{}」生成失败: {}", gid, title, e);
@@ -44,7 +47,7 @@ async fn send_chart(
 async fn send_wordcloud(c: &Context, w: LockedWriter, gid: i64, range: (i64, i64)) {
     match wordcloud::generate_image(c, Some(gid), None, range.0, range.1).await {
         Ok(b64) => {
-            let _ = send_msg(c, w, Some(gid), None, Message::new().image(b64)).await;
+            let _ = send_msg_ack(c, w, Some(gid), None, Message::new().image(b64)).await;
         }
         Err(e) => {
             // 词云失败（消息过少等）属正常现象，仅记录日志，不打扰群
@@ -191,7 +194,7 @@ pub async fn push_weekend_fun(c: Context, w: LockedWriter, gid: i64, min: u64) {
     send_chart(&c, w, gid, "消息类型", "排行榜", range, "本群 本周 消息类型 分布").await;
 }
 
-/// [每月 1 日 10:00] 上月回顾：上月发言榜 + 上月走势 + 上月词云
+/// [每月 1 日 10:20] 上月回顾：上月发言榜 + 上月走势 + 上月词云
 pub async fn push_monthly_recap(c: Context, w: LockedWriter, gid: i64, min: u64) {
     let range = get_time_range("上月");
     let label = "上月回顾";

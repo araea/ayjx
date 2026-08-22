@@ -14,7 +14,8 @@ pub type ApiError = Box<dyn std::error::Error + Send + Sync>;
 
 static ECHO_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-fn next_echo() -> String {
+/// 生成一个全局唯一的请求标记，用于把 OneBot 的响应对回到发起方
+pub fn next_echo() -> String {
     let count = ECHO_COUNTER.fetch_add(1, Ordering::SeqCst);
     format!("api-req-{}", count)
 }
