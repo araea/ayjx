@@ -171,6 +171,9 @@ pub enum EventType {
 pub struct SendPacket {
     pub action: String,
     pub params: OwnedValue,
+    /// 需要等待 OneBot 回执时携带的标记；普通发送不带，保持即发即忘
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub echo: Option<String>,
     /// 原始触发事件（不参与序列化发送给 Bot）
     #[serde(skip)]
     pub original_event: Option<Event>,

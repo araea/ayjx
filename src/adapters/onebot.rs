@@ -9,7 +9,7 @@ use http::HeaderValue;
 use sea_orm::DatabaseConnection;
 use serde::Serialize;
 use simd_json::base::ValueAsScalar;
-use simd_json::derived::ValueObjectAccess;
+use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
@@ -317,12 +317,74 @@ pub async fn process_frame(
     Ok(())
 }
 
+/// 发送一条消息（即发即忘）。
+///
+/// OneBot 实现收到帧后才开始上传图片等附件，因此本函数返回时消息未必已经落地；
+/// 需要保证多条消息的先后顺序（例如「先图后文」）时改用 [`send_msg_ack`]。
 pub async fn send_msg<M>(
     ctx: &Context,
     writer: LockedWriter,
     group_id: Option<i64>,
     user_id: Option<i64>,
     message: M,
+) -> Result<(), BotError>
+where
+    M: Serialize,
+{
+    dispatch_send(ctx, writer, group_id, user_id, message, None).await
+}
+
+/// 发送一条消息并等待 OneBot 的发送回执。
+///
+/// 图片要先上传再发出，耗时远大于纯文本：紧接着发出的文本会后发先至，
+/// 结果就是文本跑到图片上面。等回执再发下一条，顺序才与预期一致。
+///
+/// 返回值表示「是否确认送达」：回执报错或等待超时都返回 `false`
+/// （消息可能仍会发出，只是无法确认），调用方据此决定是否兜底。
+pub async fn send_msg_ack<M>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+) -> Result<bool, BotError>
+where
+    M: Serialize,
+{
+    let echo = api::next_echo();
+    // 先登记再发送：回执比调用方回到 await 更快时也不会漏接
+    let pending = ctx.matcher.register_resp(echo.clone());
+
+    dispatch_send(ctx, writer, group_id, user_id, message, Some(echo)).await?;
+
+    let Some(resp) = ctx.matcher.await_resp(pending, ACK_TIMEOUT).await else {
+        warn!(target: "Bot", "等待发送回执超时（{:?}），继续后续发送。", ACK_TIMEOUT);
+        return Ok(false);
+    };
+
+    let retcode = resp
+        .get_i64("retcode")
+        .or_else(|| resp.get_u64("retcode").map(|v| v as i64))
+        .unwrap_or(-1);
+    if retcode != 0 {
+        let msg = resp.get_str("msg").unwrap_or("未知错误");
+        warn!(target: "Bot", "消息发送失败 (retcode={}): {}", retcode, msg);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// 等待发送回执的上限：图片上传可能较慢，给足时间又不至于卡死推送队列
+/// （与 `api::call_action` 的默认超时保持一致）
+const ACK_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn dispatch_send<M>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+    echo: Option<String>,
 ) -> Result<(), BotError>
 where
     M: Serialize,
@@ -356,6 +418,7 @@ where
     let packet = SendPacket {
         action: "send_msg".to_string(),
         params: params_val,
+        echo,
         original_event,
     };
 

@@ -5,7 +5,7 @@ use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
-use crate::scheduler::PushFrequency;
+use crate::scheduler::{Pace, PushFrequency};
 use chrono::Weekday;
 use futures_util::future::BoxFuture;
 use regex::Regex;
@@ -35,6 +35,15 @@ pub struct StatsConfig {
     /// 群在统计区间内消息数低于此值则跳过推送（避免打扰冷群）
     #[serde(default = "default_push_min_messages")]
     pub push_min_messages: u64,
+
+    // —— 多群推送节奏 ——
+    /// 群与群之间的最小等待秒数
+    #[serde(default = "default_push_gap_min")]
+    pub push_group_gap_min_seconds: u64,
+    /// 群与群之间的最大等待秒数；实际间隔在 min—max 之间随机取值，
+    /// 避免所有群在同一时刻收到推送，也让节奏不那么"机器"
+    #[serde(default = "default_push_gap_max")]
+    pub push_group_gap_max_seconds: u64,
 
     // —— 每日 23:30 当日总结 ——
     #[serde(default = "default_true")]
@@ -66,7 +75,7 @@ pub struct StatsConfig {
     #[serde(default = "default_weekend_fun_time")]
     pub weekend_fun_time: String,
 
-    // —— 每月 1 日 10:00 上月回顾 ——
+    // —— 每月 1 日 10:20 上月回顾（与周一 10:00 的周报错开，1 号恰逢周一时不会挤在一起）——
     #[serde(default = "default_true")]
     pub monthly_recap_enabled: bool,
     #[serde(default = "default_monthly_recap_time")]
@@ -93,6 +102,14 @@ fn default_push_min_messages() -> u64 {
     20
 }
 
+fn default_push_gap_min() -> u64 {
+    20
+}
+
+fn default_push_gap_max() -> u64 {
+    75
+}
+
 fn default_daily_push_time() -> String {
     "23:30:00".to_string()
 }
@@ -114,30 +131,38 @@ fn default_weekend_fun_time() -> String {
 }
 
 fn default_monthly_recap_time() -> String {
-    "10:00:00".to_string()
+    "10:20:00".to_string()
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            font_path: String::new(),
+            font_family: default_font_family(),
+            width: default_width(),
+            height: default_height(),
+            push_min_messages: default_push_min_messages(),
+            push_group_gap_min_seconds: default_push_gap_min(),
+            push_group_gap_max_seconds: default_push_gap_max(),
+            daily_push_enabled: true,
+            daily_push_time: default_daily_push_time(),
+            morning_recap_enabled: true,
+            morning_recap_time: default_morning_recap_time(),
+            noon_brief_enabled: true,
+            noon_brief_time: default_noon_brief_time(),
+            weekly_recap_enabled: true,
+            weekly_recap_time: default_weekly_recap_time(),
+            weekend_fun_enabled: true,
+            weekend_fun_time: default_weekend_fun_time(),
+            monthly_recap_enabled: true,
+            monthly_recap_time: default_monthly_recap_time(),
+        }
+    }
 }
 
 pub fn default_config() -> Value {
-    build_config(StatsConfig {
-        enabled: true,
-        font_path: String::new(),
-        font_family: "Noto Sans CJK SC".to_string(),
-        width: 960,
-        height: 800,
-        push_min_messages: 20,
-        daily_push_enabled: true,
-        daily_push_time: "23:30:00".to_string(),
-        morning_recap_enabled: true,
-        morning_recap_time: "09:00:00".to_string(),
-        noon_brief_enabled: true,
-        noon_brief_time: "12:30:00".to_string(),
-        weekly_recap_enabled: true,
-        weekly_recap_time: "10:00:00".to_string(),
-        weekend_fun_enabled: true,
-        weekend_fun_time: "21:00:00".to_string(),
-        monthly_recap_enabled: true,
-        monthly_recap_time: "10:00:00".to_string(),
-    })
+    build_config(StatsConfig::default())
 }
 
 // ================= 正则匹配 =================
@@ -286,14 +311,20 @@ pub fn on_connected(
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: StatsConfig = get_config(&ctx, "stats")
-            .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
+        let config: StatsConfig = get_config(&ctx, "stats").unwrap_or_default();
 
         let scheduler = ctx.scheduler.clone();
         let min = config.push_min_messages;
+        let pace = Pace::new(
+            config.push_group_gap_min_seconds,
+            config.push_group_gap_max_seconds,
+        );
 
         // 注册一系列分时段的主动推送任务
         // 每项可独立开关；设计原则：错峰、不打扰冷群、单条推送内按"引言→数字→主榜→走势→副榜→词云"展开
+        //
+        // 排期与 ai_news 的资讯推送整体错开（见 `plugins::ai_news` 模块文档的时间表），
+        // 同一时刻不会有两个插件同时往群里刷图。
         let registrations: [(bool, &str, String, PushFrequency, PushFn); 6] = [
             (
                 config.morning_recap_enabled,
@@ -350,6 +381,7 @@ pub fn on_connected(
                 label,
                 time_str,
                 freq,
+                pace,
                 move |c, w, gid| runner(c, w, gid, min),
             );
         }

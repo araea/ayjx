@@ -1,13 +1,21 @@
 //! 把资讯排版成一张卡片图（HTML → 截图）。
 //!
-//! 设计取向：深色「夜读」版式，正文区留白克制、层级靠字重与灰阶拉开，
-//! 而不是靠分割线堆砌。三类内容各有一个主色——速递靛蓝、热点橙、日报薄荷绿，
-//! 主色只出现在序号、标签、顶部微光与引用左界这几处，保证整体安静、可读。
+//! 设计取向：深色「夜读」版式，靠字号、字重与明度三级台阶拉开层级，
+//! 而不是靠分割线堆砌。四类内容各有一个主色——速递靛蓝、热点橙、日报薄荷绿、
+//! 模型榜琥珀金，主色只出现在序号、标签、顶部微光与引用左界这几处。
+//!
+//! 排版参数是按「群聊里被缩略图裹一层再点开看」这个真实场景定的：
+//!   - 版心 720 CSS px 配合 `image_scale`（默认 3 倍）出图，2160px 宽，放大不糊；
+//!   - 标题 26px、正文 18.5px——相对版心足够大，缩略图状态下也能读出标题；
+//!   - 文字明度分三档（标题近白 / 正文 #BFC9D9 / 元信息 #8A94A8），
+//!     一眼扫过先看到标题与数字，细节再往下沉；
+//!   - 一条一格，格与格之间用 26px 上下留白而非重分割线。
 //!
 //! 图片只承载「读」的部分：链接一概不画进图里，改由随后的合并转发文本承载，
 //! 这样图好看、链接又能点能搜。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
+use super::leaderboard::{Board, Trend};
 use super::render::{RenderOptions, fmt_time, truncate};
 use anyhow::Result;
 use cdp_html_shot::{Browser, CaptureOptions, Viewport};
@@ -33,8 +41,12 @@ const DAILY: Accent = Accent {
     hex: "#3FD6AC",
     rgb: "63,214,172",
 };
+const MODELS: Accent = Accent {
+    hex: "#FFC24B",
+    rgb: "255,194,75",
+};
 
-/// 卡片渲染宽度（CSS 像素），配合 2 倍缩放出图 1440px 宽
+/// 卡片渲染宽度（CSS 像素）。实际出图宽度 = WIDTH × `image_scale`（默认 3 倍 → 2160px）
 const WIDTH: u32 = 720;
 
 fn esc(text: &str) -> String {
@@ -62,79 +74,111 @@ fn stamp() -> String {
 
 const CSS: &str = r#"
 *{margin:0;padding:0;box-sizing:border-box}
-.shot{padding:26px;background:#05070C}
-.card{position:relative;overflow:hidden;border-radius:22px;padding:38px 40px 30px;
-  background:#0B0E15;border:1px solid rgba(255,255,255,.06);
-  background-image:radial-gradient(rgba(255,255,255,.042) 1px,transparent 1px);
-  background-size:26px 26px;
+.shot{padding:26px;background:#04060A}
+.card{position:relative;overflow:hidden;border-radius:24px;padding:44px 44px 34px;
+  background:#0C1017;border:1px solid rgba(255,255,255,.08);
+  background-image:radial-gradient(rgba(255,255,255,.04) 1px,transparent 1px);
+  background-size:28px 28px;
   font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC","WenQuanYi Zen Hei","Helvetica Neue",Arial,sans-serif;
-  color:#E9ECF3;-webkit-font-smoothing:antialiased}
+  color:#F2F5FA;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
 /* 左上角一团主色微光，给深底一点纵深，不喧宾夺主 */
-.card::before{content:"";position:absolute;top:-220px;left:-120px;width:460px;height:460px;
-  border-radius:50%;background:rgba(__RGB__,.16);filter:blur(90px);pointer-events:none}
+.card::before{content:"";position:absolute;top:-230px;left:-130px;width:480px;height:480px;
+  border-radius:50%;background:rgba(__RGB__,.20);filter:blur(95px);pointer-events:none}
 .card>*{position:relative}
 
-.eyebrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.kicker{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;
-  letter-spacing:.14em;color:__ACCENT__}
-.dot{width:7px;height:7px;border-radius:50%;background:__ACCENT__;
-  box-shadow:0 0 0 4px rgba(__RGB__,.15)}
-.stamp{font-size:12px;color:#5A6478;letter-spacing:.04em;font-variant-numeric:tabular-nums}
+.eyebrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.kicker{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:800;
+  letter-spacing:.18em;color:__ACCENT__}
+.dot{width:9px;height:9px;border-radius:50%;background:__ACCENT__;
+  box-shadow:0 0 0 5px rgba(__RGB__,.16)}
+.stamp{font-size:14px;color:#6B7689;letter-spacing:.04em;font-variant-numeric:tabular-nums}
 
-.title{font-size:33px;line-height:1.28;font-weight:700;letter-spacing:-.01em;color:#F4F6FA}
-.subtitle{margin-top:9px;font-size:14px;line-height:1.65;color:#8A94A8}
-.rule{height:1px;margin:26px 0 4px;
-  background:linear-gradient(90deg,rgba(__RGB__,.55),rgba(255,255,255,.07) 42%,transparent)}
+.title{font-size:42px;line-height:1.24;font-weight:800;letter-spacing:-.015em;color:#FFFFFF}
+.subtitle{margin-top:12px;font-size:18px;line-height:1.6;font-weight:500;color:#98A3B8}
+.rule{height:2px;margin:28px 0 2px;border-radius:2px;
+  background:linear-gradient(90deg,__ACCENT__,rgba(__RGB__,.35) 38%,rgba(255,255,255,.05))}
 
-.row{display:grid;grid-template-columns:44px 1fr;gap:16px;padding:22px 0;
-  border-bottom:1px solid rgba(255,255,255,.05)}
-.row:last-child{border-bottom:none;padding-bottom:6px}
-.idx{font-size:15px;font-weight:600;line-height:1.7;color:rgba(__RGB__,.75);
-  font-variant-numeric:tabular-nums;text-align:right}
-.rank{display:flex;align-items:center;justify-content:center;width:30px;height:30px;
-  margin-left:auto;border-radius:9px;font-size:14px;font-weight:700;
+.row{display:grid;grid-template-columns:56px 1fr;gap:18px;padding:26px 0;
+  border-bottom:1px solid rgba(255,255,255,.07)}
+.row:last-child{border-bottom:none;padding-bottom:8px}
+.idx{font-size:26px;font-weight:800;line-height:1.35;color:rgba(__RGB__,.85);
+  font-variant-numeric:tabular-nums;text-align:right;letter-spacing:-.02em}
+.rank{display:flex;align-items:center;justify-content:center;width:42px;height:42px;
+  margin-left:auto;border-radius:12px;font-size:20px;font-weight:800;
   font-variant-numeric:tabular-nums;
-  color:rgba(__RGB__,.8);background:rgba(__RGB__,.09);border:1px solid rgba(__RGB__,.16)}
-.rank.top{color:#0B0E15;background:__ACCENT__;border-color:transparent}
+  color:rgba(__RGB__,.95);background:rgba(__RGB__,.12);border:1px solid rgba(__RGB__,.28)}
+.rank.top{color:#0A0D13;background:__ACCENT__;border-color:transparent;
+  box-shadow:0 6px 18px rgba(__RGB__,.28)}
 
-.h{font-size:18.5px;line-height:1.5;font-weight:600;color:#EDF0F6;
+.h{font-size:26px;line-height:1.46;font-weight:700;letter-spacing:-.01em;color:#FFFFFF;
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.meta{margin-top:9px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;
-  font-size:12px;color:#626C80}
-.sep{color:#39415220}
-.chip{padding:2px 8px;border-radius:5px;font-size:11px;font-weight:600;letter-spacing:.02em;
-  color:rgba(__RGB__,.9);background:rgba(__RGB__,.1)}
-.chip.plain{color:#7C879B;background:rgba(255,255,255,.05)}
-.sum{margin-top:10px;font-size:13.5px;line-height:1.75;color:#939DB1;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.why{margin-top:11px;padding:8px 13px;border-left:2px solid rgba(__RGB__,.55);
-  border-radius:0 7px 7px 0;background:rgba(__RGB__,.055);
-  font-size:12.5px;line-height:1.7;color:#96A0B5;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.meta{margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+  font-size:15px;font-weight:500;color:#8A94A8}
+.sep{color:rgba(255,255,255,.16)}
+.chip{padding:3px 11px;border-radius:7px;font-size:14px;font-weight:700;letter-spacing:.02em;
+  color:__ACCENT__;background:rgba(__RGB__,.14)}
+.chip.plain{color:#93A0B6;background:rgba(255,255,255,.07)}
+.sum{margin-top:12px;font-size:18.5px;line-height:1.72;color:#BFC9D9;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.why{margin-top:14px;padding:12px 16px;border-left:4px solid __ACCENT__;
+  border-radius:0 10px 10px 0;background:rgba(__RGB__,.09);
+  font-size:17px;line-height:1.66;color:#CBD4E4;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.why b{color:__ACCENT__;font-weight:800;letter-spacing:.02em}
 
-.lead{margin:22px 0 4px;padding:16px 18px;border-radius:12px;
-  background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
-  font-size:14.5px;line-height:1.8;color:#B4BCCC}
-.sec{padding:20px 0 4px;border-bottom:1px solid rgba(255,255,255,.05)}
+.lead{margin:26px 0 4px;padding:20px 22px;border-radius:14px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
+  font-size:20px;line-height:1.74;font-weight:500;color:#D2DAE7}
+.sec{padding:26px 0 6px;border-bottom:1px solid rgba(255,255,255,.07)}
 .sec:last-of-type{border-bottom:none}
-.sec-h{display:flex;align-items:center;gap:10px;font-size:16px;font-weight:700;color:#E4E8F0}
-.bar{width:3px;height:15px;border-radius:2px;background:__ACCENT__}
-.li{margin-top:12px;padding-left:16px;position:relative;font-size:14px;line-height:1.7;color:#A7B0C2}
-.li::before{content:"";position:absolute;left:2px;top:10px;width:4px;height:4px;
-  border-radius:50%;background:rgba(__RGB__,.55)}
-.li b{color:#DDE2EC;font-weight:600}
-.li .t{margin-top:3px;font-size:13px;line-height:1.7;color:#828C9F}
+.sec-h{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:800;color:#FFFFFF}
+.bar{width:5px;height:22px;border-radius:3px;background:__ACCENT__}
+.li{margin-top:16px;padding-left:20px;position:relative;font-size:19px;line-height:1.6;color:#C2CBDA}
+.li::before{content:"";position:absolute;left:2px;top:12px;width:7px;height:7px;
+  border-radius:50%;background:__ACCENT__}
+.li b{color:#FFFFFF;font-weight:700}
+.li .t{margin-top:6px;font-size:17px;line-height:1.68;color:#A5B0C4}
+
+/* —— 模型榜 —— */
+.mrow{display:grid;grid-template-columns:56px 1fr 150px;gap:18px;align-items:center;
+  padding:22px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.mrow:last-of-type{border-bottom:none}
+.mname{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px;
+  font-size:25px;line-height:1.35;font-weight:700;color:#FFFFFF}
+.trend{font-size:15px;font-weight:800;letter-spacing:.02em;
+  font-variant-numeric:tabular-nums;color:#6B7689}
+.trend.up{color:#4ADE80}
+.trend.down{color:#FF7A7A}
+.trend.new{color:__ACCENT__}
+.meter{margin-top:12px;height:7px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden}
+.meter i{display:block;height:100%;border-radius:4px;
+  background:linear-gradient(90deg,rgba(__RGB__,.55),__ACCENT__)}
+.mscore{text-align:right}
+.mscore strong{display:block;font-size:34px;line-height:1;font-weight:800;
+  letter-spacing:-.02em;color:__ACCENT__;font-variant-numeric:tabular-nums}
+.mscore small{display:block;margin-top:6px;font-size:14px;line-height:1.4;color:#8A94A8;white-space:nowrap}
+.note{margin-top:22px;font-size:15px;line-height:1.7;color:#7E8899}
 
 .foot{display:flex;align-items:center;justify-content:space-between;
-  margin-top:26px;padding-top:18px;border-top:1px solid rgba(255,255,255,.06);
-  font-size:11.5px;color:#4E5769;letter-spacing:.02em}
-.foot .src{display:flex;align-items:center;gap:8px}
-.mark{width:4px;height:4px;border-radius:50%;background:rgba(__RGB__,.5);
-  box-shadow:8px 0 0 rgba(255,255,255,.1),16px 0 0 rgba(255,255,255,.06)}
+  margin-top:30px;padding-top:20px;border-top:1px solid rgba(255,255,255,.09);
+  font-size:14px;font-weight:500;color:#6B7689;letter-spacing:.02em}
+.foot .src{display:flex;align-items:center;gap:10px}
+.mark{width:5px;height:5px;border-radius:50%;background:rgba(__RGB__,.7);
+  box-shadow:9px 0 0 rgba(255,255,255,.14),18px 0 0 rgba(255,255,255,.08)}
 "#;
 
 /// 套上统一的卡片外壳：页眉（主色标签 + 出图时间）、大标题、正文、页脚。
-fn shell(accent: Accent, kicker: &str, title: &str, subtitle: &str, body: &str) -> String {
+///
+/// `foot_note` 是页脚右侧那句提示。它对应的是随后真的会发出去的那条消息，
+/// 别写成图里说一套、群里发另一套。
+fn shell(
+    accent: Accent,
+    kicker: &str,
+    title: &str,
+    subtitle: &str,
+    body: &str,
+    foot_note: &str,
+) -> String {
     let css = CSS.replace("__ACCENT__", accent.hex).replace("__RGB__", accent.rgb);
     let subtitle = if subtitle.is_empty() {
         String::new()
@@ -149,7 +193,7 @@ fn shell(accent: Accent, kicker: &str, title: &str, subtitle: &str, body: &str) 
 <div class="title">{title}</div>{subtitle}
 <div class="rule"></div>
 {body}
-<div class="foot"><div class="src"><span class="mark"></span>AIHOT · aihot.virxact.com</div><div>完整链接见下方合并转发</div></div>
+<div class="foot"><div class="src"><span class="mark"></span>AIHOT · aihot.virxact.com</div><div>{foot_note}</div></div>
 </div></div></body></html>"#,
         css = css,
         kicker = esc(kicker),
@@ -157,8 +201,12 @@ fn shell(accent: Accent, kicker: &str, title: &str, subtitle: &str, body: &str) 
         title = esc(title),
         subtitle = subtitle,
         body = body,
+        foot_note = esc(foot_note),
     )
 }
+
+/// 图后必定跟一条带链接的文本，页脚据此措辞
+const FOOT_LINKS: &str = "完整链接见下方合并转发";
 
 /// 一条资讯的元信息行：来源 · 分类 · 时间
 fn meta_html(item: &Item) -> String {
@@ -218,15 +266,16 @@ pub fn items_card(title: &str, subtitle: &str, items: &[Item], opts: &RenderOpti
         if let Some(summary) = item.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             body.push_str(&format!(
                 r#"<div class="sum">{}</div>"#,
-                esc(&truncate(summary, 160))
+                esc(&truncate(summary, 100))
             ));
         }
         if opts.show_reason
             && let Some(reason) = item.reason.as_deref().map(str::trim).filter(|s| !s.is_empty())
         {
+            // 给「推荐理由」一个主色小标签：这是全卡最该被先看见的一句
             body.push_str(&format!(
-                r#"<div class="why">{}</div>"#,
-                esc(&truncate(reason, 120))
+                r#"<div class="why"><b>推荐理由</b> {}</div>"#,
+                esc(&truncate(reason, 80))
             ));
         }
         body.push_str("</div></div>");
@@ -236,7 +285,7 @@ pub fn items_card(title: &str, subtitle: &str, items: &[Item], opts: &RenderOpti
         true => format!("共 {} 条", items.len()),
         false => format!("{} · 共 {} 条", subtitle, items.len()),
     };
-    shell(BRIEF, "AI NEWS", title, &subtitle, &body)
+    shell(BRIEF, "AI NEWS", title, &subtitle, &body, FOOT_LINKS)
 }
 
 /// 热点榜卡片：前三名用实心序号牌，其余描边，一眼看出梯队
@@ -279,14 +328,108 @@ pub fn hot_topics_card(topics: &[HotTopic]) -> String {
         if let Some(summary) = topic.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             body.push_str(&format!(
                 r#"<div class="sum">{}</div>"#,
-                esc(&truncate(summary, 140))
+                esc(&truncate(summary, 100))
             ));
         }
         body.push_str("</div></div>");
     }
 
     let subtitle = format!("跨信源聚合 · TOP {}", topics.len());
-    shell(HOT, "AI HOTLIST", "当前热点榜", &subtitle, &body)
+    shell(HOT, "AI HOTLIST", "当前热点榜", &subtitle, &body, FOOT_LINKS)
+}
+
+/// 模型榜卡片：一行一个模型，左名次、中模型与价格、右共识分。
+///
+/// 共识分是这张图唯一需要「一眼看到」的数字，所以给到 34px 主色 + 一条同色进度条；
+/// 其余信息（厂商、上线日期、价格）压到 15px 的灰阶里，不与之争。
+pub fn models_card(board: &Board, max_items: usize) -> String {
+    let shown = &board.entries[..board.entries.len().min(max_items.max(1))];
+    let mut body = String::new();
+
+    for (idx, model) in shown.iter().enumerate() {
+        let rank = model.rank.unwrap_or((idx + 1) as u32);
+        let rank_cls = if rank <= 3 { "rank top" } else { "rank" };
+
+        body.push_str(&format!(
+            r#"<div class="mrow"><div><div class="{}">{}</div></div><div>"#,
+            rank_cls, rank
+        ));
+
+        let trend = model.trend();
+        let trend_html = match trend {
+            Trend::Flat => String::new(),
+            Trend::Up(_) => format!(r#"<span class="trend up">{}</span>"#, esc(&trend.marker())),
+            Trend::Down(_) => format!(r#"<span class="trend down">{}</span>"#, esc(&trend.marker())),
+            Trend::New => format!(r#"<span class="trend new">{}</span>"#, esc(&trend.marker())),
+        };
+        body.push_str(&format!(
+            r#"<div class="mname">{}{}</div>"#,
+            esc(model.display_name()),
+            trend_html
+        ));
+
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(provider) = model.provider_name() {
+            meta.push(format!(r#"<span class="chip">{}</span>"#, esc(provider)));
+        }
+        if let Some(date) = model.released_date() {
+            meta.push(format!(r#"<span>上线 {}</span>"#, esc(date)));
+        }
+        if let Some(ctx_len) = model.context_text() {
+            meta.push(format!(r#"<span>上下文 {}</span>"#, esc(&ctx_len)));
+        }
+        if let Some(price) = model.price_text() {
+            meta.push(format!(r#"<span>{}</span>"#, esc(&price)));
+        }
+        if !meta.is_empty() {
+            body.push_str(&format!(r#"<div class="meta">{}</div>"#, meta.join("")));
+        }
+
+        // 分数条按 0—100 直接映射，长度即分数，不做二次拉伸
+        if let Some(score) = model.score {
+            body.push_str(&format!(
+                r#"<div class="meter"><i style="width:{:.1}%"></i></div>"#,
+                score.clamp(0.0, 100.0)
+            ));
+        }
+        body.push_str("</div>");
+
+        // 完整度与可信度各占一行：右栏窄，挤在一行会在「可信度」和「高」之间折行
+        let mut note = String::new();
+        if let Some(coverage) = model.coverage_text() {
+            note.push_str(&format!("<small>完整度 {}</small>", esc(&coverage)));
+        }
+        if let Some(level) = model.confidence_label() {
+            note.push_str(&format!("<small>可信度 {}</small>", level));
+        }
+        body.push_str(&format!(
+            r#"<div class="mscore"><strong>{}</strong>{}</div></div>"#,
+            esc(&model.score_text().unwrap_or_else(|| "—".to_string())),
+            note
+        ));
+    }
+
+    body.push_str(
+        r#"<div class="note">共识分由多家公开评测榜单统一折算，只反映公开评测的汇总结果；价格为厂商官网参考价，人民币／百万 Token。</div>"#,
+    );
+
+    let mut subtitle: Vec<String> = Vec::new();
+    if let Some(count) = board.source_count {
+        subtitle.push(format!("综合 {} 家公开榜单", count));
+    }
+    if let Some(updated) = board.updated_at.as_deref().filter(|s| !s.is_empty()) {
+        subtitle.push(format!("更新于 {}", updated));
+    }
+    subtitle.push(format!("TOP {}", shown.len()));
+
+    shell(
+        MODELS,
+        "MODEL CONSENSUS",
+        "AIHOT 大模型排行榜",
+        &subtitle.join(" · "),
+        &body,
+        "完整榜单见下方链接",
+    )
 }
 
 /// 日报里的一个条目（含其子条目），扁平成带圆点的列表行
@@ -374,19 +517,27 @@ pub fn daily_card(report: &DailyReport, max_blocks: usize) -> String {
     };
     let subtitle = report.date.as_deref().unwrap_or_default();
 
-    shell(DAILY, "AI DAILY", &title, subtitle, &body)
+    shell(DAILY, "AI DAILY", &title, subtitle, &body, FOOT_LINKS)
 }
 
 /// 把卡片 HTML 截成图，返回 base64（PNG/JPEG 由截图端决定）。
 ///
 /// 先按固定宽度定版，量出实际高度后再放大视口重截，
 /// 保证长卡片一次出完，不会被视口截断。
-pub async fn capture(html: &str) -> Result<String> {
+///
+/// `scale` 是设备像素比：版心宽度不变、出图分辨率翻倍，字形边缘更实，
+/// 群里放大看不至于发虚。取值过大只会把图撑肥，这里限制在 1—4 倍。
+pub async fn capture(html: &str, scale: f64) -> Result<String> {
+    let scale = if scale.is_finite() {
+        scale.clamp(1.0, 4.0)
+    } else {
+        3.0
+    };
     let browser = Browser::instance().await;
     let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?;
 
     let result = async {
-        tab.set_viewport(&Viewport::new(WIDTH, 600).with_device_scale_factor(2.0))
+        tab.set_viewport(&Viewport::new(WIDTH, 600).with_device_scale_factor(scale))
             .await?;
         tab.set_content(html).await?;
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -397,7 +548,7 @@ pub async fn capture(html: &str) -> Result<String> {
             .as_f64()
             .unwrap_or(1200.0) as u32;
         let viewport =
-            Viewport::new(WIDTH, (height + 40).clamp(400, 12000)).with_device_scale_factor(2.0);
+            Viewport::new(WIDTH, (height + 40).clamp(400, 12000)).with_device_scale_factor(scale);
         tab.set_viewport(&viewport).await?;
         tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -502,10 +653,44 @@ mod tests {
             flashes: vec![leaf("多家云厂商同步下调推理单价", "降幅集中在 15%—30% 区间。")],
         };
 
+        let models = [
+            ("Claude Fable 5", "Anthropic", 89.4, 0.88, "HIGH", Some(1), 67.206, 336.03),
+            ("Claude Opus 5", "Anthropic", 86.2, 0.845, "HIGH", Some(0), 33.603, 168.015),
+            ("GPT-5.6 Sol", "OpenAI", 83.3, 0.845, "HIGH", Some(-1), 33.603, 201.62),
+            ("Kimi K3", "Moonshot AI", 79.9, 0.845, "MEDIUM", None, 8.0, 32.0),
+            ("GLM-5.3", "Z.ai", 76.9, 0.60, "LOW", Some(2), 4.0, 12.0),
+        ];
+        let board = Board {
+            updated_at: Some("8月21日 20:00".into()),
+            source_count: Some(7),
+            entries: models
+                .iter()
+                .enumerate()
+                .map(|(i, (name, provider, score, coverage, confidence, change, input, output))| {
+                    crate::plugins::ai_news::leaderboard::ModelEntry {
+                        rank: Some(i as u32 + 1),
+                        previous_rank: change.map(|_| i as u32 + 1),
+                        rank_change: *change,
+                        name: Some((*name).into()),
+                        provider: Some((*provider).into()),
+                        released_at: Some("2026-06-09T00:00:00.000Z".into()),
+                        context_window_tokens: Some(1_000_000),
+                        input_price_per_million_cny: Some(*input),
+                        output_price_per_million_cny: Some(*output),
+                        score: Some(*score),
+                        coverage: Some(*coverage),
+                        confidence: Some((*confidence).into()),
+                        ..Default::default()
+                    }
+                })
+                .collect(),
+        };
+
         for (name, html) in [
             ("brief.html", items_card("AI 资讯速递", "过去 24 小时", &items, &opts)),
             ("hot.html", hot_topics_card(&topics)),
             ("daily.html", daily_card(&report, 12)),
+            ("models.html", models_card(&board, 12)),
         ] {
             std::fs::write(format!("{}/{}", dir, name), html).unwrap();
         }
@@ -522,7 +707,7 @@ mod tests {
         dump_sample_cards();
         let html = std::fs::read_to_string(format!("{}/brief.html", dir)).unwrap();
 
-        let b64 = capture(&html).await.expect("截图应当成功");
+        let b64 = capture(&html, 3.0).await.expect("截图应当成功");
         assert!(!b64.is_empty());
 
         use base64::{Engine, engine::general_purpose::STANDARD};

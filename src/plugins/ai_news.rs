@@ -5,14 +5,30 @@
 //! 筛选；每条带稳定 `id` 便于跨次推送去重；另有 RSS 没有的热点榜与日报端点。
 //! 详见 `api.rs` 顶部说明。
 //!
-//! 默认排期（可在配置或 `/设置` 中调整）：
-//!   - 08:30 AI 日报（AIHOT 当期日报，同一期只推一次）
-//!   - 12:30 / 20:30 精选速递（过去 24 小时精选，按群去重，只推新条目）
-//!   - 21:30 当前热点榜（Top 10 快照）
+//! 默认排期（可在配置或 `/设置` 中调整）。时间点与 `stats` 插件的统计推送
+//! 整体错峰，任何一档都不与发言排行榜 / 数据分析撞在同一分钟：
+//!
+//! | 时间 | 插件 | 内容 |
+//! | --- | --- | --- |
+//! | 08:20 | ai_news | AI 日报（当期日报，同一期只推一次） |
+//! | 09:00 | stats | 早安回顾（昨日） |
+//! | 10:00 周一 | stats | 上周回顾 |
+//! | 10:20 每月 1 日 | stats | 上月回顾 |
+//! | 12:30 | stats | 午间速览 |
+//! | 12:50 | ai_news | 精选速递（过去 24 小时精选，按群去重，只推新条目） |
+//! | 20:10 | ai_news | 精选速递 |
+//! | 21:00 周日 | stats | 周末轻松榜 |
+//! | 21:40 | ai_news | 当前热点榜（Top 10 快照） |
+//! | 23:30 | stats | 当日总结 |
+//!
+//! 同一档推送要发给多个群时，群与群之间等待一段随机间隔
+//! （`send_interval_seconds` — `send_interval_max_seconds`），
+//! 不会所有群在同一秒收到同一张图。
 //!
 //! 呈现方式：定时推送与指令回复共用一套投递逻辑，先图后文——
-//!   1. 先发一张排版好的卡片图（见 `card.rs`），负责好看、好读、好转发；
-//!   2. 再补一条文本，带上每条的 AIHOT 阅读链接，能点能搜能复制。
+//! 先发一张排版好的卡片图（见 `card.rs`），负责好看、好读、好转发；
+//! 图片确认发出后再补一条文本，带上每条的 AIHOT 阅读链接，能点能搜能复制。
+//!
 //! 文本部分超过 `forward_threshold_chars`（默认 500 字）、或前面已经发过图，
 //! 就折叠成合并转发，群里只留一个卡片，不刷屏。
 //! 卡片渲染失败（浏览器不可用等）会自动退回纯文本，不影响推送。
@@ -21,6 +37,7 @@
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
 //!   /ai热点             当前热点榜
 //!   /ai日报             最新一期 AI 日报
+//!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
 //!   /ai推送开启 · /ai推送关闭 · /ai推送状态 · /ai推送重置
 //!
@@ -43,6 +60,7 @@ use toml::Value;
 
 pub mod api;
 mod card;
+pub mod leaderboard;
 mod pusher;
 mod render;
 mod state;
@@ -114,9 +132,25 @@ pub struct AiNewsConfig {
     /// 合并转发时单个节点的字符软上限，单条超长的资讯不会被切断
     #[serde(default = "default_forward_node_chars")]
     pub forward_node_chars: usize,
-    /// 多个群之间的发送间隔（秒），防风控
+    /// 卡片图的渲染倍率（1.0—4.0）。倍率越高出图越清晰，字也越"实"；
+    /// 2.0 是勉强能看，3.0 在手机上放大也不糊
+    #[serde(default = "default_image_scale")]
+    pub image_scale: f64,
+    /// 多个群之间的最小发送间隔（秒），防风控
     #[serde(default = "default_send_interval")]
     pub send_interval_seconds: u64,
+    /// 多个群之间的最大发送间隔（秒）；实际间隔在 min—max 间随机，
+    /// 避免所有群在同一秒收到推送
+    #[serde(default = "default_send_interval_max")]
+    pub send_interval_max_seconds: u64,
+
+    // —— 模型榜 ——
+    /// `/ai模型榜` 单次展示的模型条数（1—30）
+    #[serde(default = "default_leaderboard_items")]
+    pub leaderboard_max_items: usize,
+    /// 模型榜数据的本地缓存时长（分钟）；榜单每天只更新几次，不必每次指令都抓一遍
+    #[serde(default = "default_leaderboard_cache_minutes")]
+    pub leaderboard_cache_minutes: u64,
 
     // —— 排期 ——
     #[serde(default = "default_true")]
@@ -175,17 +209,30 @@ fn default_forward_threshold() -> usize {
 fn default_forward_node_chars() -> usize {
     300
 }
-fn default_send_interval() -> u64 {
-    3
+fn default_image_scale() -> f64 {
+    3.0
 }
+fn default_send_interval() -> u64 {
+    8
+}
+fn default_send_interval_max() -> u64 {
+    35
+}
+fn default_leaderboard_items() -> usize {
+    12
+}
+fn default_leaderboard_cache_minutes() -> u64 {
+    30
+}
+// 以下时间点与 stats 插件的统计推送错峰，详见模块文档的时间表
 fn default_brief_times() -> Vec<String> {
-    vec!["12:30:00".to_string(), "20:30:00".to_string()]
+    vec!["12:50:00".to_string(), "20:10:00".to_string()]
 }
 fn default_daily_time() -> String {
-    "08:30:00".to_string()
+    "08:20:00".to_string()
 }
 fn default_hot_topics_time() -> String {
-    "21:30:00".to_string()
+    "21:40:00".to_string()
 }
 
 impl Default for AiNewsConfig {
@@ -208,7 +255,11 @@ impl Default for AiNewsConfig {
             image_max_items: default_image_max_items(),
             forward_threshold_chars: default_forward_threshold(),
             forward_node_chars: default_forward_node_chars(),
+            image_scale: default_image_scale(),
             send_interval_seconds: default_send_interval(),
+            send_interval_max_seconds: default_send_interval_max(),
+            leaderboard_max_items: default_leaderboard_items(),
+            leaderboard_cache_minutes: default_leaderboard_cache_minutes(),
             brief_enabled: true,
             brief_times: default_brief_times(),
             daily_enabled: true,
@@ -255,6 +306,7 @@ pub fn on_connected(
         }
 
         let config = load_config(&ctx);
+        warn_on_schedule_conflicts(&ctx, &config);
 
         if config.daily_enabled {
             schedule(
@@ -327,6 +379,63 @@ fn schedule(ctx: &Context, writer: &LockedWriter, time_str: &str, label: &str, r
     });
 }
 
+/// 启动时检查本插件的排期是否与 `stats` 的统计推送撞在同一分钟。
+///
+/// 新装机器用的是错开后的默认值，但老配置文件里的旧时间不会被自动改写
+/// （主程序只补新字段、不动既有值）。撞车时给一条明确的提示，
+/// 说清是哪两档、改哪个键，而不是让人自己去比对两份配置。
+fn warn_on_schedule_conflicts(ctx: &Context, cfg: &AiNewsConfig) {
+    let Some(stats) = get_config::<crate::plugins::stats::StatsConfig>(ctx, "stats") else {
+        return;
+    };
+    if !stats.enabled {
+        return;
+    }
+
+    // 只比到分钟：同分钟内两个插件一起发图，就是用户说的"撞车"
+    fn hhmm(raw: &str) -> String {
+        let (h, m, _) = parse_time(raw);
+        format!("{:02}:{:02}", h, m)
+    }
+
+    let occupied: Vec<(String, &str)> = [
+        (stats.morning_recap_enabled, &stats.morning_recap_time, "统计 · 早安回顾"),
+        (stats.noon_brief_enabled, &stats.noon_brief_time, "统计 · 午间速览"),
+        (stats.daily_push_enabled, &stats.daily_push_time, "统计 · 当日总结"),
+        (stats.weekly_recap_enabled, &stats.weekly_recap_time, "统计 · 上周回顾"),
+        (stats.weekend_fun_enabled, &stats.weekend_fun_time, "统计 · 周末轻松榜"),
+        (stats.monthly_recap_enabled, &stats.monthly_recap_time, "统计 · 上月回顾"),
+    ]
+    .into_iter()
+    .filter(|(enabled, _, _)| *enabled)
+    .map(|(_, time, label)| (hhmm(time), label))
+    .collect();
+
+    let mut mine: Vec<(String, &str, &str)> = Vec::new();
+    if cfg.daily_enabled {
+        mine.push((hhmm(&cfg.daily_time), "AI 日报", "daily_time"));
+    }
+    if cfg.brief_enabled {
+        for time in &cfg.brief_times {
+            mine.push((hhmm(time), "精选速递", "brief_times"));
+        }
+    }
+    if cfg.hot_topics_enabled {
+        mine.push((hhmm(&cfg.hot_topics_time), "热点榜", "hot_topics_time"));
+    }
+
+    for (time, label, key) in mine {
+        if let Some((_, other)) = occupied.iter().find(|(t, _)| *t == time) {
+            warn!(
+                target: LOG_TARGET,
+                "[{}] 的推送时间 {} 与 [{}] 相同，两份图会挤在一起。\
+                 可修改配置 ai_news.{}（或用 /设置 ai_news {}）错开几分钟。",
+                label, time, other, key, key
+            );
+        }
+    }
+}
+
 /// 解析 `HH:MM[:SS]`，非法输入退回 09:00:00
 fn parse_time(input: &str) -> (u32, u32, u32) {
     let parts: Vec<&str> = input.trim().split(':').collect();
@@ -370,9 +479,10 @@ pub fn handle(
         let Some(msg) = ctx.as_message() else {
             return Ok(Some(ctx));
         };
-        // 快速预判：本插件所有指令都含 "ai" 字面量，绝大多数群聊消息可在此直接放行，
-        // 免去逐条指令重复取前缀、遍历消息段的开销
-        if !msg.text().contains("ai") {
+        // 快速预判：本插件的指令要么含 "ai"，要么含"模型"（模型榜的免前缀别名），
+        // 绝大多数群聊消息可在此直接放行，免去逐条指令重复取前缀、遍历消息段的开销
+        let text = msg.text();
+        if !text.contains("ai") && !text.contains("模型") {
             return Ok(Some(ctx));
         }
 
@@ -391,7 +501,19 @@ pub fn handle(
             return Ok(None);
         }
 
-        for trigger in ["ai搜索", "ai资讯", "ai新闻", "ai热点", "ai日报"] {
+        // "模型榜" 系列放在前面：它们与资讯类指令不共享前缀，顺序只影响可读性
+        for trigger in [
+            "ai模型排行榜",
+            "ai模型榜",
+            "ai大模型排行榜",
+            "模型排行榜",
+            "模型榜",
+            "ai搜索",
+            "ai资讯",
+            "ai新闻",
+            "ai热点",
+            "ai日报",
+        ] {
             let Some(matched) = match_command(&ctx, trigger) else {
                 continue;
             };
@@ -402,6 +524,9 @@ pub fn handle(
                 "ai搜索" => query_search(&config, &arg).await,
                 "ai热点" => query_hot_topics(&config).await,
                 "ai日报" => query_daily(&config).await,
+                "ai模型排行榜" | "ai模型榜" | "ai大模型排行榜" | "模型排行榜" | "模型榜" => {
+                    query_models(&config).await
+                }
                 _ => query_brief(&config).await,
             };
 
@@ -477,6 +602,28 @@ async fn query_daily(config: &AiNewsConfig) -> Payload {
         Err(e) => {
             warn!(target: LOG_TARGET, "查询日报失败: {}", e);
             notice(format!("❌ 获取 AI 日报失败：{}", e))
+        }
+    }
+}
+
+/// 模型榜：AIHOT 汇总多家公开评测榜单后的共识分排名
+async fn query_models(config: &AiNewsConfig) -> Payload {
+    let max_items = config.leaderboard_max_items.clamp(1, 30);
+    match leaderboard::fetch_cached(
+        config.request_timeout_seconds,
+        config.leaderboard_cache_minutes,
+    )
+    .await
+    {
+        Ok(board) if !board.entries.is_empty() => {
+            let rendered = render::render_models(&board, max_items);
+            let html = card::models_card(&board, max_items);
+            Payload::build(config, rendered, Some(html)).await
+        }
+        Ok(_) => notice("📭 AIHOT 模型榜当前没有可展示的条目。"),
+        Err(e) => {
+            warn!(target: LOG_TARGET, "查询模型榜失败: {}", e);
+            notice(format!("❌ 获取 AI 模型排行榜失败：{}", e))
         }
     }
 }
@@ -577,9 +724,12 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
         .cloned()
         .unwrap_or_else(|| "/".into());
 
+    let switch = |on: bool| if on { "✅" } else { "⬜" };
+
     let mut out = String::from("🤖 AI 资讯推送状态\n———————————————\n");
     out.push_str(&format!(
-        "总开关：{}\n",
+        "总开关：{} {}\n",
+        switch(config.enabled),
         if config.enabled { "已启用" } else { "已禁用" }
     ));
 
@@ -595,23 +745,28 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
         ));
     }
 
-    out.push_str(&format!("推送群数：{}\n", config.groups.len()));
+    out.push_str(&format!("推送群数：{} 个\n", config.groups.len()));
+    out.push_str("———————————————\n📅 排期\n");
     out.push_str(&format!(
-        "AI 日报：{} {}\n",
-        if config.daily_enabled { "开" } else { "关" },
+        "{} AI 日报　{}\n",
+        switch(config.daily_enabled),
         config.daily_time
     ));
     out.push_str(&format!(
-        "精选速递：{} {}（{}，每次至多 {} 条）\n",
-        if config.brief_enabled { "开" } else { "关" },
+        "{} 精选速递　{}\n   {} · 每次至多 {} 条\n",
+        switch(config.brief_enabled),
         config.brief_times.join(" / "),
         pusher::window_label(&config.window),
         config.limit
     ));
     out.push_str(&format!(
-        "热点榜：{} {}\n",
-        if config.hot_topics_enabled { "开" } else { "关" },
+        "{} 热点榜　{}\n",
+        switch(config.hot_topics_enabled),
         config.hot_topics_time
+    ));
+    out.push_str(&format!(
+        "多群间隔 {}—{} 秒随机，不会同一秒齐发\n",
+        config.send_interval_seconds, config.send_interval_max_seconds
     ));
     if !config.category.trim().is_empty() {
         out.push_str(&format!(
@@ -621,7 +776,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
     }
     out.push_str("———————————————\n");
     out.push_str(&format!(
-        "指令：{p}ai资讯 · {p}ai热点 · {p}ai日报 · {p}ai搜索 <关键词>\n",
+        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);

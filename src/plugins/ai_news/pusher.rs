@@ -8,9 +8,10 @@ use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET};
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::onebot::{LockedWriter, send_msg, send_msg_ack};
 use crate::event::Context;
 use crate::message::Message;
+use rand::RngExt;
 use std::time::Duration;
 
 pub fn render_options(cfg: &AiNewsConfig) -> RenderOptions {
@@ -48,7 +49,7 @@ impl Payload {
     /// 文本 + 卡片：卡片渲染失败不影响推送，退回纯文本继续
     pub async fn build(cfg: &AiNewsConfig, rendered: Rendered, card_html: Option<String>) -> Self {
         let image = match card_html {
-            Some(html) if cfg.image_enabled => match card::capture(&html).await {
+            Some(html) if cfg.image_enabled => match card::capture(&html, cfg.image_scale).await {
                 Ok(b64) => Some(b64),
                 Err(e) => {
                     warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
@@ -113,6 +114,9 @@ pub fn build_message(
 
 /// 先图后文地投递一次推送：卡片图负责好看，随后的合并转发负责链接与检索。
 ///
+/// 「先图后文」是真的先后——图片发出后等 OneBot 回执再发文本，
+/// 不靠运气赌两条消息的落地顺序。
+///
 /// 返回「对方是否收到了内容」——两条都没发出去才算失败，
 /// 失败的条目不记入去重，留待下一轮补推。
 pub async fn deliver(
@@ -133,8 +137,13 @@ pub async fn deliver(
         };
         msg = msg.image(format!("base64://{}", b64));
 
-        match send_msg(ctx, writer.clone(), group_id, user_id, msg).await {
-            Ok(_) => image_sent = true,
+        // 等回执再发文本：图片要先上传，即发即忘会让文本抢在图片前面落地，
+        // 卡片上「完整链接见下方合并转发」的指引就成了假话
+        match send_msg_ack(ctx, writer.clone(), group_id, user_id, msg).await {
+            Ok(true) => image_sent = true,
+            Ok(false) => {
+                warn!(target: LOG_TARGET, "卡片图未收到发送回执，文本改回独立成条。")
+            }
             Err(e) => warn!(target: LOG_TARGET, "卡片图发送失败，改由文本兜底: {}", e),
         }
     }
@@ -164,9 +173,21 @@ pub fn card_slice<'a, T>(items: &'a [T], cfg: &AiNewsConfig) -> &'a [T] {
     &items[..items.len().min(max)]
 }
 
-/// 目标群之间的间隔，防止短时间内连发触发风控
+/// 目标群之间的间隔：在配置的 min—max 之间随机取值。
+///
+/// 用随机而非固定间隔，一是不让所有群在同一秒收到同一张图，
+/// 二是避免整齐的节拍撞上风控阈值。
 async fn pace(cfg: &AiNewsConfig) {
-    tokio::time::sleep(Duration::from_secs(cfg.send_interval_seconds.clamp(1, 60))).await;
+    tokio::time::sleep(Duration::from_secs(pace_seconds(cfg))).await;
+}
+
+fn pace_seconds(cfg: &AiNewsConfig) -> u64 {
+    let min = cfg.send_interval_seconds.clamp(1, 600);
+    let max = cfg.send_interval_max_seconds.clamp(min, 600);
+    if min == max {
+        return min;
+    }
+    rand::rng().random_range(min..=max)
 }
 
 // ================= 抓取 =================

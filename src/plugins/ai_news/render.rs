@@ -12,6 +12,7 @@
 //! 群里只占一个折叠卡片，不会刷屏。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
+use super::leaderboard::{self, Board};
 use chrono::{DateTime, FixedOffset};
 
 const DIVIDER: &str = "———————————————";
@@ -260,6 +261,83 @@ pub fn render_hot_topics(topics: &[HotTopic]) -> Rendered {
     }
 }
 
+/// 模型榜：一条一段，先名次与模型名，再共识分与证据情况，最后上线日期与价格
+pub fn render_models(board: &Board, max_items: usize) -> Rendered {
+    let shown = &board.entries[..board.entries.len().min(max_items.max(1))];
+    let mut entries = Vec::with_capacity(shown.len());
+
+    for (idx, model) in shown.iter().enumerate() {
+        let rank = model.rank.unwrap_or((idx + 1) as u32);
+        let mut out = String::new();
+
+        let trend = model.trend().marker();
+        let head = match model.provider_name() {
+            Some(provider) => format!("第 {} 名 {}（{}）", rank, model.display_name(), provider),
+            None => format!("第 {} 名 {}", rank, model.display_name()),
+        };
+        out.push_str(&head);
+        if !trend.is_empty() {
+            out.push_str(&format!(" {}", trend));
+        }
+
+        let mut score_line: Vec<String> = Vec::new();
+        if let Some(score) = model.score_text() {
+            score_line.push(format!("共识分 {}", score));
+        }
+        if let Some(coverage) = model.coverage_text() {
+            score_line.push(format!("完整度 {}", coverage));
+        }
+        if let Some(level) = model.confidence_label() {
+            score_line.push(format!("可信度{}", level));
+        }
+        if !score_line.is_empty() {
+            out.push_str(&format!("\n   {}", score_line.join(" · ")));
+        }
+
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(date) = model.released_date() {
+            meta.push(format!("上线 {}", date));
+        }
+        if let Some(ctx_len) = model.context_text() {
+            meta.push(format!("上下文 {}", ctx_len));
+        }
+        if let Some(price) = model.price_text() {
+            meta.push(price);
+        }
+        if !meta.is_empty() {
+            out.push_str(&format!("\n   {}", meta.join(" · ")));
+        }
+
+        entries.push(out);
+    }
+
+    let mut footer = String::from(leaderboard::ATTRIBUTION);
+    footer.push_str(&format!("\n🔗 {}", leaderboard::PAGE_URL));
+    footer.push_str("\n价格为厂商官网参考价，人民币／百万 Token；共识分只反映公开评测的汇总结果。");
+
+    Rendered {
+        header: models_header(board),
+        entries,
+        footer,
+    }
+}
+
+/// 模型榜标题行：带上「汇总几家榜单」与站点标注的更新时间
+pub(super) fn models_header(board: &Board) -> String {
+    let mut header = String::from("🏆 AIHOT 大模型排行榜");
+    let mut meta: Vec<String> = Vec::new();
+    if let Some(count) = board.source_count {
+        meta.push(format!("综合 {} 家公开榜单", count));
+    }
+    if let Some(updated) = board.updated_at.as_deref().filter(|s| !s.is_empty()) {
+        meta.push(format!("更新于 {}", updated));
+    }
+    if !meta.is_empty() {
+        header.push_str(&format!("\n{}", meta.join(" · ")));
+    }
+    header
+}
+
 fn render_block(out: &mut String, block: &DailyBlock, depth: usize, budget: &mut usize) {
     if *budget == 0 {
         return;
@@ -440,6 +518,70 @@ mod tests {
         let rendered = Rendered::plain("📭 暂无资讯");
         assert_eq!(rendered.to_text(), "📭 暂无资讯");
         assert_eq!(rendered.nodes(10), vec!["📭 暂无资讯".to_string()]);
+    }
+
+    #[test]
+    fn renders_models_and_omits_missing_fields() {
+        use crate::plugins::ai_news::leaderboard::ModelEntry;
+
+        let board = Board {
+            updated_at: Some("8月21日 20:00".into()),
+            source_count: Some(7),
+            entries: vec![
+                ModelEntry {
+                    rank: Some(1),
+                    rank_change: Some(1),
+                    previous_rank: Some(2),
+                    name: Some("Model A".into()),
+                    provider: Some("Vendor".into()),
+                    released_at: Some("2026-06-09T00:00:00.000Z".into()),
+                    input_price_per_million_cny: Some(67.206),
+                    output_price_per_million_cny: Some(336.03),
+                    score: Some(89.4),
+                    coverage: Some(0.88),
+                    confidence: Some("HIGH".into()),
+                    ..Default::default()
+                },
+                // 只有名字和分数：其余字段一概不显示，也不填 0
+                ModelEntry {
+                    rank: Some(2),
+                    name: Some("Model B".into()),
+                    score: Some(70.0),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let text = render_models(&board, 12).to_text();
+        assert!(text.contains("综合 7 家公开榜单 · 更新于 8月21日 20:00"));
+        assert!(text.contains("第 1 名 Model A（Vendor） ↑1"));
+        assert!(text.contains("共识分 89.4 · 完整度 88% · 可信度高"));
+        assert!(text.contains("上线 2026-06-09 · 入 ¥67.21 / 出 ¥336"));
+        assert!(text.contains("第 2 名 Model B"));
+        assert!(text.contains(leaderboard::PAGE_URL));
+        // 缺失字段不编造
+        assert!(!text.contains("¥0"));
+        assert!(!text.contains("完整度 0%"));
+    }
+
+    #[test]
+    fn model_list_respects_the_display_cap() {
+        use crate::plugins::ai_news::leaderboard::ModelEntry;
+
+        let board = Board {
+            entries: (1..=30)
+                .map(|i| ModelEntry {
+                    rank: Some(i),
+                    name: Some(format!("Model {}", i)),
+                    score: Some(50.0),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let rendered = render_models(&board, 5);
+        assert_eq!(rendered.entries.len(), 5);
+        assert!(rendered.entries[4].starts_with("第 5 名"));
     }
 
     #[test]

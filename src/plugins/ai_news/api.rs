@@ -51,7 +51,7 @@ static ETAGS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 /// 全局复用一个客户端以复用连接池；超时取首次调用时的配置值，
 /// 改动 `request_timeout_seconds` 需重启后生效。
-fn client(timeout_secs: u64) -> Result<&'static reqwest::Client, ApiError> {
+pub(super) fn client(timeout_secs: u64) -> Result<&'static reqwest::Client, ApiError> {
     if let Some(c) = CLIENT.get() {
         return Ok(c);
     }
