@@ -1,20 +1,32 @@
+//! 词意：每日一个两字词，全群一起用「语义排名」把它逼出来。
+//!
+//! 呈现方式：盘面、揭晓、排行榜、玩法说明都排版成一张宣纸风的卡片图
+//! （见 `card.rs`），一局下来翻回去看历次提示不必在聊天记录里大海捞针；
+//! 「不在词库中」这类即时纠错仍走纯文本——它要的是快，不是好看。
+//! 截图失败（浏览器不可用等）自动退回文本，功能不受影响。
+
+pub mod card;
 pub mod config;
 pub mod data;
 pub mod engine;
 pub mod entity;
+pub mod view;
 
 use crate::adapters::onebot::{LockedWriter, send_msg};
-use crate::command::match_command;
+use crate::command::{get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::ciyi::config::CiYiConfig;
 use crate::plugins::ciyi::entity::{record as record_entity, state as state_entity};
+use crate::plugins::ciyi::view::Reply;
 use crate::plugins::{PluginError, get_config};
 use futures_util::future::BoxFuture;
 use sea_orm::{ConnectionTrait, Schema};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
+
+pub const LOG_TARGET: &str = "Plugin/CiYi";
 
 pub fn default_config() -> Value {
     build_config(CiYiConfig::default())
@@ -98,7 +110,7 @@ pub fn handle(
                 let reply =
                     engine::guess_word(&ctx.db, group_id, user_id, &username, text, &config).await;
 
-                send_response(&ctx, writer, group_id, user_id, &reply, &config).await?;
+                send_response(&ctx, writer, group_id, user_id, reply, &config).await?;
                 return Ok(None); // 阻止后续处理
             }
         }
@@ -120,8 +132,8 @@ pub fn handle(
             for alias in aliases {
                 if let Some(cmd) = match_command(&ctx, alias) {
                     let response = match action {
-                        "help" => show_commands(),
-                        "rules" => show_rules(),
+                        "help" => Reply::Help,
+                        "rules" => Reply::Rules,
                         "guess" => {
                             let arg = cmd
                                 .args
@@ -131,7 +143,7 @@ pub fn handle(
                                 .unwrap_or("")
                                 .trim();
                             if arg.chars().count() != 2 {
-                                "无效输入，请发送两个字的词语。".to_string()
+                                Reply::Notice("无效输入，请发送两个字的词语。".to_string())
                             } else {
                                 let username = msg_event.sender_name().to_string();
                                 engine::guess_word(
@@ -152,19 +164,19 @@ pub fn handle(
                             engine::get_global_leaderboard(&ctx.db, config.plugin.rank_display)
                                 .await
                         }
-                        "toggle_mode" => {
+                        "toggle_mode" => Reply::Notice(
                             engine::toggle_direct_guess_mode(
                                 &ctx.db,
                                 group_id,
                                 config.plugin.direct_guess,
                             )
-                            .await
-                        }
-                        _ => String::new(),
+                            .await,
+                        ),
+                        _ => Reply::Notice(String::new()),
                     };
 
-                    if !response.is_empty() {
-                        send_response(&ctx, writer, group_id, user_id, &response, &config).await?;
+                    if !response.to_text().is_empty() {
+                        send_response(&ctx, writer, group_id, user_id, response, &config).await?;
                     }
                     return Ok(None);
                 }
@@ -175,13 +187,16 @@ pub fn handle(
     })
 }
 
-// 辅助函数：构建并发送回复
+/// 构建并发送回复：能出图的出图，出不来就发文本。
+///
+/// 引用与 @ 的行为对图文一致——群里回的还是「你刚才那条」，
+/// 只是内容从一段文本换成了一张卡片。
 async fn send_response(
     ctx: &Context,
     writer: LockedWriter,
     group_id: i64,
     user_id: i64,
-    text: &str,
+    reply: Reply,
     config: &CiYiConfig,
 ) -> Result<(), PluginError> {
     let mut msg = Message::new();
@@ -195,55 +210,28 @@ async fn send_response(
         msg = msg.at(user_id).text("\n");
     }
 
-    msg = msg.text(text);
+    msg = match render_card(ctx, &reply, config).await {
+        Some(b64) => msg.image(format!("base64://{b64}")),
+        None => msg.text(reply.to_text()),
+    };
 
-    let msg_segments: Vec<simd_json::owned::Value> = msg
-        .0
-        .into_iter()
-        .map(|seg| {
-            let mut obj = simd_json::owned::Object::new();
-            obj.insert("type".into(), seg.type_.into());
-            obj.insert("data".into(), seg.data.into());
-            simd_json::owned::Value::from(obj)
-        })
-        .collect();
-
-    send_msg(ctx, writer, Some(group_id), None, msg_segments).await?;
+    send_msg(ctx, writer, Some(group_id), None, msg).await?;
     Ok(())
 }
 
-fn show_commands() -> String {
-    let list = [
-        "词意帮助/词意指令 - 查看插件指令列表",
-        "词意玩法/词意规则 - 查看词意游戏规则",
-        "词意猜测 [词语] - 猜测两字词语",
-        "词意榜 - 查看当前频道的词意排行榜",
-        "词意全榜 - 查看所有人的词意排行榜",
-        "切换猜测模式 - 切换是否可以直接发送词语猜测",
-    ];
-    list.join("\n")
-}
+/// 排版并截图；关掉图片、内容不值得出图、或浏览器不可用时返回 None
+async fn render_card(ctx: &Context, reply: &Reply, config: &CiYiConfig) -> Option<String> {
+    if !config.plugin.image_enabled || !reply.wants_card() {
+        return None;
+    }
 
-fn show_rules() -> String {
-    "\
-目标
-    猜出系统选择的两字词语
-
-反馈
-    每次猜测后，获得：
-    - 与目标词语的相似度排名
-    - 相邻词提示
-
-示例
-    1. ？器 ) 镯子 ( 玉？   #14
-    2. ？子 ) 玉佩 ( 东？   #15
-    3. ？佩 ) 东西 ( 冥？   #16
-
-    #14   → 相似度排名（越小越近）
-    玉？   → 相邻词提示（？为“佩”）
-
-周期
-    每日一词，猜对则次日刷新
-    系统记录猜对次数，可查排行"
-        .to_string()
+    let prefix = get_prefixes(ctx).first().cloned().unwrap_or_default();
+    let html = card::render(reply, &prefix)?;
+    match card::capture(&html, config.plugin.image_scale).await {
+        Ok(b64) => Some(b64),
+        Err(e) => {
+            crate::warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
+            None
+        }
+    }
 }
