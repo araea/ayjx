@@ -1,21 +1,65 @@
+//! 帮助中心：插件总览与单插件详情。
+//!
+//! 两条展示线并存：
+//!   - **卡片图**（默认）：把清单排版成一张图发出去，长内容不再刷屏，
+//!     版式见 [`card`]；
+//!   - **纯文本**：`image_enabled = false` 或截图失败时自动接管，
+//!     内容与图一致，绝不出现「图里一套、文字另一套」。
+//!
+//! 清单本身只有一份来源：[`describe`] 给出每个插件的说明与指令，
+//! [`SECTIONS`] 给出总览的分区顺序。新插件若忘了写进分区表，
+//! 会被兜底归入「其他」而不是从帮助里消失——单元测试也会盯着这件事。
+
+mod card;
+
 use crate::adapters::onebot::{LockedWriter, send_msg};
 use crate::command::{get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_plugins};
+use crate::plugins::{PluginError, get_config, get_plugins};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
-#[derive(Serialize, Deserialize)]
+const LOG_TARGET: &str = "Plugin/Help";
+
+#[derive(Serialize, Deserialize, Clone)]
 struct Config {
     enabled: bool,
+    /// 是否把帮助排版成卡片图；关掉或渲染失败时退回纯文本
+    #[serde(default = "default_true")]
+    image_enabled: bool,
+    /// 卡片图渲染倍率（1.0—4.0）。倍率越高出图越清晰，3.0 在手机上放大也不糊
+    #[serde(default = "default_image_scale")]
+    image_scale: f64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_image_scale() -> f64 {
+    3.0
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            image_enabled: true,
+            image_scale: default_image_scale(),
+        }
+    }
 }
 
 pub fn default_config() -> Value {
-    build_config(Config { enabled: true })
+    build_config(Config::default())
+}
+
+fn load_config(ctx: &Context) -> Config {
+    get_config::<Config>(ctx, "help").unwrap_or_default()
 }
 
 const TRIGGERS: &[&str] = &["help", "帮助", "插件列表"];
@@ -32,6 +76,61 @@ macro_rules! cmds {
         &[ $( Cmd { cmd: $c, note: $n } ),* ]
     };
 }
+
+/// 总览里的一个插件条目
+struct Entry {
+    display: &'static str,
+    name: &'static str,
+    desc: &'static str,
+    enabled: bool,
+}
+
+/// 总览的一个分区（按用途分组，而不是把二十来个插件堆成一长串）
+struct Group {
+    title: &'static str,
+    /// 英文代号，只作版式上的次要标识
+    en: &'static str,
+    items: Vec<Entry>,
+}
+
+/// 分区表：决定总览的分组与顺序。未列出的插件统一落到「其他」，不会丢。
+struct Section {
+    title: &'static str,
+    en: &'static str,
+    members: &'static [&'static str],
+}
+
+const SECTIONS: &[Section] = &[
+    Section {
+        title: "消息 · 媒体",
+        en: "MESSAGE",
+        members: &[
+            "media",
+            "sticker",
+            "card",
+            "image_split",
+            "gif",
+            "echo",
+            "recall",
+            "webshot",
+        ],
+    },
+    Section {
+        title: "互动 · 娱乐",
+        en: "PLAY",
+        members: &["repeater", "ping", "group_title", "shindan", "ciyi", "oai"],
+    },
+    Section {
+        title: "统计 · 资讯",
+        en: "INSIGHT",
+        members: &["recorder", "wordcloud", "stats", "ai_news"],
+    },
+    Section {
+        title: "系统 · 运维",
+        en: "SYSTEM",
+        members: &["settings", "help", "restart", "logger", "meta_filter"],
+    },
+];
 
 /// 每个插件的完整指令清单。仅作展示用，与各插件实际指令保持同步。
 fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
@@ -206,33 +305,86 @@ fn is_enabled(ctx: &Context, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 符号指令（`/#`、`~名`、`##`、`-#` 等）本身就是完整指令，不再拼接前缀
+fn needs_prefix(cmd: &str) -> bool {
+    !cmd.starts_with(['/', '#', '~', '-'])
+}
+
+fn prefix_of(ctx: &Context) -> String {
+    get_prefixes(ctx)
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "/".into())
+}
+
+/// 按 [`SECTIONS`] 把已注册插件分组；漏配的插件归入「其他」，不会从帮助里消失。
+fn grouped(ctx: &Context) -> Vec<Group> {
+    let plugins = get_plugins();
+    let entry = |name: &str| -> Option<Entry> {
+        plugins.iter().find(|p| p.name == name).map(|p| Entry {
+            display: p.display_name,
+            name: p.name,
+            desc: describe(p.name).0,
+            enabled: is_enabled(ctx, p.name),
+        })
+    };
+
+    let mut groups: Vec<Group> = SECTIONS
+        .iter()
+        .map(|sec| Group {
+            title: sec.title,
+            en: sec.en,
+            items: sec.members.iter().filter_map(|n| entry(n)).collect(),
+        })
+        .filter(|g| !g.items.is_empty())
+        .collect();
+
+    let rest: Vec<Entry> = plugins
+        .iter()
+        .filter(|p| !SECTIONS.iter().any(|s| s.members.contains(&p.name)))
+        .filter_map(|p| entry(p.name))
+        .collect();
+    if !rest.is_empty() {
+        groups.push(Group {
+            title: "其他",
+            en: "MISC",
+            items: rest,
+        });
+    }
+    groups
+}
+
 /// 与其他插件保持一致的分隔线
 const DIVIDER: &str = "———————————————";
 
-fn render_overview(ctx: &Context) -> String {
-    let prefix = get_prefixes(ctx)
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "/".into());
+/// 纯文本总览：分区与卡片图一致，只是把版式换成缩进
+fn render_overview(ctx: &Context, groups: &[Group]) -> String {
+    let prefix = prefix_of(ctx);
+    let total: usize = groups.iter().map(|g| g.items.len()).sum();
+    let enabled = groups
+        .iter()
+        .flat_map(|g| g.items.iter())
+        .filter(|e| e.enabled)
+        .count();
 
-    let plugins = get_plugins();
-    let total = plugins.len();
-    let enabled_count = plugins.iter().filter(|p| is_enabled(ctx, p.name)).count();
-
-    let mut out = String::new();
-    out.push_str(&format!(
-        "🧩 ayjx 插件总览\n已启用 {} / {} 个插件\n{}\n",
-        enabled_count, total, DIVIDER
-    ));
+    let mut out = format!(
+        "🧩 ayjx 插件总览\n已启用 {} / {} 个插件 · 指令前缀 {}\n{}\n",
+        enabled, total, prefix, DIVIDER
+    );
 
     // 一条两行：首行是身份与开关，次行是它到底做什么，扫读时不必在长句里找边界
-    for p in plugins {
-        let (desc, _) = describe(p.name);
-        let mark = if is_enabled(ctx, p.name) { "✅" } else { "⬜" };
-        out.push_str(&format!("{} {}（{}）\n   {}\n", mark, p.display_name, p.name, desc));
+    for group in groups {
+        out.push_str(&format!("\n▍{}（{} 项）\n", group.title, group.items.len()));
+        for item in &group.items {
+            let mark = if item.enabled { "✅" } else { "⬜" };
+            out.push_str(&format!(
+                "{} {}（{}）\n   {}\n",
+                mark, item.display, item.name, item.desc
+            ));
+        }
     }
 
-    out.push_str(DIVIDER);
+    out.push_str(&format!("\n{}", DIVIDER));
     out.push_str(&format!(
         "\n💡 看某个插件的全部指令：{p}help <插件名>\n   例：{p}help ai_news",
         p = prefix
@@ -240,32 +392,19 @@ fn render_overview(ctx: &Context) -> String {
     out
 }
 
-fn render_detail(ctx: &Context, name: &str) -> String {
-    let prefix = get_prefixes(ctx)
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "/".into());
-
-    let plugins = get_plugins();
-    let Some(plugin) = plugins.iter().find(|p| p.name == name) else {
-        return format!(
-            "🔍 没有找到插件「{}」\n{}\n发送 {}help 可以查看全部插件。",
-            name, DIVIDER, prefix
-        );
-    };
-
-    let (desc, cmds) = describe(plugin.name);
-    let status = if is_enabled(ctx, plugin.name) {
+/// 纯文本详情
+fn render_detail(ctx: &Context, entry: &Entry, cmds: &[Cmd]) -> String {
+    let prefix = prefix_of(ctx);
+    let status = if entry.enabled {
         "✅ 已启用"
     } else {
         "⬜ 已禁用"
     };
 
-    let mut out = String::new();
-    out.push_str(&format!(
+    let mut out = format!(
         "🧩 {}（{}）\n状态：{}\n{}\n📖 {}\n{}\n",
-        plugin.display_name, plugin.name, status, DIVIDER, desc, DIVIDER
-    ));
+        entry.display, entry.name, status, DIVIDER, entry.desc, DIVIDER
+    );
 
     if cmds.is_empty() {
         out.push_str("该插件在后台自动工作，没有需要手动触发的指令。");
@@ -274,11 +413,10 @@ fn render_detail(ctx: &Context, name: &str) -> String {
 
     out.push_str("⌨️ 指令\n");
     for c in cmds {
-        // 符号指令（/#、~名、##、-# 等）本身是完整指令，不再拼接前缀
-        let full = if c.cmd.starts_with(['/', '#', '~', '-']) {
-            c.cmd.to_string()
-        } else {
+        let full = if needs_prefix(c.cmd) {
             format!("{}{}", prefix, c.cmd)
+        } else {
+            c.cmd.to_string()
         };
         if c.note.is_empty() {
             out.push_str(&format!("· {}\n", full));
@@ -288,6 +426,29 @@ fn render_detail(ctx: &Context, name: &str) -> String {
     }
     out.pop();
     out
+}
+
+fn not_found(ctx: &Context, name: &str) -> String {
+    format!(
+        "🔍 没有找到插件「{}」\n{}\n发送 {}help 可以查看全部插件。",
+        name,
+        DIVIDER,
+        prefix_of(ctx)
+    )
+}
+
+/// 按配置键或中文显示名查插件——图上两个名字都印着，用哪个都该找得到
+fn lookup(ctx: &Context, arg: &str) -> Option<Entry> {
+    let arg = arg.trim();
+    get_plugins()
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(arg) || p.display_name == arg)
+        .map(|p| Entry {
+            display: p.display_name,
+            name: p.name,
+            desc: describe(p.name).0,
+            enabled: is_enabled(ctx, p.name),
+        })
 }
 
 fn extract_text_arg(args: &[simd_json::OwnedValue]) -> String {
@@ -304,6 +465,39 @@ fn extract_text_arg(args: &[simd_json::OwnedValue]) -> String {
     buf.trim().to_string()
 }
 
+/// 一次回复的内容：文本必备，卡片可选（渲染失败时就靠文本兜底）
+struct Reply {
+    text: String,
+    card: Option<card::Card>,
+}
+
+fn build_reply(ctx: &Context, arg: &str) -> Reply {
+    let prefix = prefix_of(ctx);
+
+    if arg.is_empty() {
+        let groups = grouped(ctx);
+        return Reply {
+            text: render_overview(ctx, &groups),
+            card: Some(card::overview(&groups, &prefix)),
+        };
+    }
+
+    match lookup(ctx, arg) {
+        Some(entry) => {
+            let cmds = describe(entry.name).1;
+            Reply {
+                text: render_detail(ctx, &entry, cmds),
+                card: Some(card::detail(&entry, cmds, &prefix)),
+            }
+        }
+        // 找不到时只回一行提示，没必要为一句话专门出图
+        None => Reply {
+            text: not_found(ctx, arg),
+            card: None,
+        },
+    }
+}
+
 pub fn handle(
     ctx: Context,
     writer: LockedWriter,
@@ -316,19 +510,83 @@ pub fn handle(
 
         for trigger in TRIGGERS {
             if let Some(matched) = match_command(&ctx, trigger) {
+                let config = load_config(&ctx);
                 let arg = extract_text_arg(&matched.args);
-                let body = if arg.is_empty() {
-                    render_overview(&ctx)
-                } else {
-                    render_detail(&ctx, &arg)
+                let reply = build_reply(&ctx, &arg);
+
+                let mut out = Message::new().reply(msg.message_id());
+                let image = match (&reply.card, config.image_enabled) {
+                    (Some(c), true) => match c.capture(config.image_scale).await {
+                        Ok(b64) => Some(b64),
+                        Err(e) => {
+                            warn!(target: LOG_TARGET, "帮助卡片渲染失败，改发纯文本: {}", e);
+                            None
+                        }
+                    },
+                    _ => None,
+                };
+                out = match image {
+                    Some(b64) => out.image(format!("base64://{}", b64)),
+                    None => out.text(reply.text),
                 };
 
-                let reply = Message::new().reply(msg.message_id()).text(body);
-                send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
+                send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), out).await?;
                 return Ok(None);
             }
         }
 
         Ok(Some(ctx))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_plugin_belongs_to_a_section() {
+        for plugin in get_plugins() {
+            assert!(
+                SECTIONS.iter().any(|s| s.members.contains(&plugin.name)),
+                "插件 {} 没有写进 SECTIONS，总览里会被归到「其他」",
+                plugin.name
+            );
+        }
+    }
+
+    #[test]
+    fn sections_only_reference_registered_plugins() {
+        for section in SECTIONS {
+            for name in section.members {
+                assert!(
+                    get_plugins().iter().any(|p| &p.name == name),
+                    "分区 {} 里的 {} 已不在插件注册表中",
+                    section.title,
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_plugin_has_a_description() {
+        for plugin in get_plugins() {
+            assert_ne!(
+                describe(plugin.name).0,
+                "(暂无说明)",
+                "插件 {} 缺少说明",
+                plugin.name
+            );
+        }
+    }
+
+    #[test]
+    fn symbol_commands_keep_their_own_prefix() {
+        assert!(needs_prefix("help"));
+        assert!(needs_prefix("词意榜"));
+        assert!(!needs_prefix("/#"));
+        assert!(!needs_prefix("~<名称> <内容>"));
+        assert!(!needs_prefix("##<名称>"));
+        assert!(!needs_prefix("-*"));
+    }
 }
