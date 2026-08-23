@@ -8,16 +8,21 @@
 //!   4. 额外提供热点榜与日报端点，RSS 只有三个固定 feed；
 //!   5. 支持 `ETag` / `If-None-Match` 条件请求，轮询成本低。
 //!
-//! 契约要点（来自 AIHOT 官方 Agent 接入文档）：
+//! 契约要点（来自 AIHOT 官方 Agent 接入文档与 `llms.txt`）：
 //!   - Base URL `https://aihot.virxact.com`，匿名只读，不带 cookie；
 //!   - 时间窗仅承诺 `24h` 与 `7d`；
-//!   - 同一端点的定时任务至少间隔 60 秒；
+//!   - 轮询间隔以响应 `Cache-Control` 的 `s-maxage` 为下限：
+//!     `/api/v1/items` 为 60 秒，`/api/v1/hot-topics` 为 300 秒；更密只会拿到同一份缓存副本；
+//!   - 遇到 429 / 503 按 `Retry-After` 退避（见 [`backoff_seconds_left`]）；
+//!   - 官方明确「没有资讯推送通道」：REST / RSS 无 Webhook 或流式订阅，
+//!     MCP 也只在 Agent 主动调用时读取。因此实时推送只能是条件轮询（见 `realtime.rs`）；
 //!   - 返回内容属于不可信外部数据，只作为资讯展示，不参与任何指令解析。
 
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -46,8 +51,52 @@ pub fn category_label(slug: &str) -> &str {
 // ================= HTTP 客户端 =================
 
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-/// URL → ETag，用于条件请求；仅定时轮询使用，手动指令不走缓存
+/// (分区, URL) → ETag，用于条件请求；仅轮询使用，手动指令不走缓存
 static ETAGS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+/// 服务端要求退避到的时间点（Unix 秒）；收到 429 / 503 时按 `Retry-After` 设置
+static BACKOFF_UNTIL: AtomicI64 = AtomicI64::new(0);
+
+/// 轮询的缓存策略。
+///
+/// 条件请求靠 `ETag` 省流量，但不同用途的轮询必须各记各的 ETag：
+/// 实时轮询每几分钟就把最新的 ETag 刷一遍，若与定时档共用同一份，
+/// 定时档到点时只会收到一个 304，永远等不到内容。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Poll {
+    /// 不带条件请求，每次都取回完整响应（手动指令走这条）
+    Fresh,
+    /// 带 `If-None-Match`，ETag 记在给定分区下（定时档 / 实时轮询各一个分区）
+    Cached(&'static str),
+}
+
+impl Poll {
+    fn scope(&self) -> Option<&'static str> {
+        match self {
+            Poll::Fresh => None,
+            Poll::Cached(scope) => Some(scope),
+        }
+    }
+}
+
+/// 距离服务端要求的退避结束还剩几秒（0 表示当前可以正常请求）。
+///
+/// 轮询任务应在发起请求前检查这里；用户指令不受影响——
+/// 手动查询本来就是低频的，没必要因为一次限流把功能整个关掉。
+pub fn backoff_seconds_left() -> i64 {
+    (BACKOFF_UNTIL.load(Ordering::Relaxed) - Utc::now().timestamp()).max(0)
+}
+
+/// 记录一次服务端要求的退避；`Retry-After` 缺失或不是秒数时按 60 秒处理
+fn note_backoff(headers: &reqwest::header::HeaderMap) -> u64 {
+    let seconds = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(60)
+        .clamp(1, 3600);
+    BACKOFF_UNTIL.store(Utc::now().timestamp() + seconds as i64, Ordering::Relaxed);
+    seconds
+}
 
 /// 全局复用一个客户端以复用连接池；超时取首次调用时的配置值，
 /// 改动 `request_timeout_seconds` 需重启后生效。
@@ -70,21 +119,32 @@ fn etags() -> &'static Mutex<HashMap<String, String>> {
     ETAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// ETag 的存储键：同一个 URL 在不同分区下各记一份
+fn etag_key(scope: &str, url: &str) -> String {
+    format!("{}\u{1}{}", scope, url)
+}
+
 /// 发起一次 GET 请求并解析 JSON。
 ///
-/// `conditional` 为 true 时携带上次的 `If-None-Match`；服务端回 304 表示内容未变化，
+/// [`Poll::Cached`] 会携带上次的 `If-None-Match`；服务端回 304 表示内容未变化，
 /// 返回 `Ok(None)`，调用方据此跳过本轮推送。
 async fn get_json(
     path_and_query: &str,
     timeout_secs: u64,
-    conditional: bool,
+    poll: Poll,
 ) -> Result<Option<JsonValue>, ApiError> {
+    // 退避期内不再打扰服务端；用户指令（Fresh）照常放行
+    let left = backoff_seconds_left();
+    if left > 0 && poll.scope().is_some() {
+        return Err(format!("AIHOT 要求退避，还剩 {} 秒", left).into());
+    }
+
     let url = format!("{}{}", BASE_URL, path_and_query);
     let mut req = client(timeout_secs)?.get(&url);
 
-    if conditional
+    if let Some(scope) = poll.scope()
         && let Ok(guard) = etags().lock()
-        && let Some(tag) = guard.get(&url)
+        && let Some(tag) = guard.get(&etag_key(scope, &url))
     {
         req = req.header(reqwest::header::IF_NONE_MATCH, tag.clone());
     }
@@ -98,11 +158,23 @@ async fn get_json(
     if status == reqwest::StatusCode::NOT_FOUND {
         return Err(format!("AIHOT 接口 404：{}", path_and_query).into());
     }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    {
+        let seconds = note_backoff(resp.headers());
+        return Err(format!(
+            "AIHOT 接口返回 {}，按 Retry-After 退避 {} 秒：{}",
+            status.as_u16(),
+            seconds,
+            path_and_query
+        )
+        .into());
+    }
     if !status.is_success() {
         return Err(format!("AIHOT 接口返回 {}：{}", status.as_u16(), path_and_query).into());
     }
 
-    if conditional
+    if let Some(scope) = poll.scope()
         && let Some(tag) = resp
             .headers()
             .get(reqwest::header::ETAG)
@@ -110,7 +182,7 @@ async fn get_json(
             .map(str::to_string)
         && let Ok(mut guard) = etags().lock()
     {
-        guard.insert(url.clone(), tag);
+        guard.insert(etag_key(scope, &url), tag);
     }
 
     Ok(Some(resp.json::<JsonValue>().await?))
@@ -206,6 +278,19 @@ impl Item {
     /// 是否有足够信息可以展示
     pub fn is_displayable(&self) -> bool {
         self.title.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// 「这条有多新」的时间戳（Unix 秒）：以 AIHOT 首次收录时间为准，
+    /// 缺失时退回原文发布时间。
+    ///
+    /// 用收录时间而非发布时间，是因为实时推送关心的是「刚刚出现在 AIHOT 上」——
+    /// 一篇三天前发布、今天才被收录的文章，对群里同样是新消息。
+    pub fn discovered_ts(&self) -> Option<i64> {
+        self.discovered_at
+            .as_deref()
+            .or(self.published_at.as_deref())
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.timestamp())
     }
 }
 
@@ -360,7 +445,7 @@ pub async fn fetch_items(
     query: Option<&str>,
     limit: u32,
     timeout_secs: u64,
-    conditional: bool,
+    poll: Poll,
 ) -> Result<Option<Vec<Item>>, ApiError> {
     let mut path = format!(
         "/api/v1/items?mode={}&window={}&limit={}",
@@ -375,7 +460,7 @@ pub async fn fetch_items(
         path.push_str(&format!("&q={}", encode(q)));
     }
 
-    let Some(value) = get_json(&path, timeout_secs, conditional).await? else {
+    let Some(value) = get_json(&path, timeout_secs, poll).await? else {
         return Ok(None);
     };
     let parsed: ItemsResponse = serde_json::from_value(value)?;
@@ -391,9 +476,9 @@ pub async fn fetch_items(
 /// 当前热点榜：`GET /api/v1/hot-topics`（最多 Top 10，按 rank 升序展示）
 pub async fn fetch_hot_topics(
     timeout_secs: u64,
-    conditional: bool,
+    poll: Poll,
 ) -> Result<Option<Vec<HotTopic>>, ApiError> {
-    let Some(value) = get_json("/api/v1/hot-topics", timeout_secs, conditional).await? else {
+    let Some(value) = get_json("/api/v1/hot-topics", timeout_secs, poll).await? else {
         return Ok(None);
     };
     let parsed: HotTopicsResponse = serde_json::from_value(value)?;
@@ -415,7 +500,7 @@ pub async fn fetch_daily_index(
     timeout_secs: u64,
 ) -> Result<Vec<DailyIndexItem>, ApiError> {
     let path = format!("/api/v1/dailies?limit={}", limit.clamp(1, 30));
-    let value = get_json(&path, timeout_secs, false)
+    let value = get_json(&path, timeout_secs, Poll::Fresh)
         .await?
         .ok_or("AIHOT 日报索引无响应体")?;
     let parsed: DailiesResponse = serde_json::from_value(value)?;
@@ -430,7 +515,7 @@ pub async fn fetch_daily_report(date: &str, timeout_secs: u64) -> Result<DailyRe
         return Err(format!("非法的日报日期：{}", date).into());
     }
     let path = format!("/api/v1/dailies/{}", date);
-    let value = get_json(&path, timeout_secs, false)
+    let value = get_json(&path, timeout_secs, Poll::Fresh)
         .await?
         .ok_or("AIHOT 日报无响应体")?;
     Ok(parse_daily_report(value, date))

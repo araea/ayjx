@@ -23,7 +23,7 @@ pub fn render_options(cfg: &AiNewsConfig) -> RenderOptions {
 }
 
 /// 全局过滤：白名单模式下只发白名单群，否则跳过黑名单群
-fn is_allowed(ctx: &Context, group_id: i64) -> bool {
+pub(super) fn is_allowed(ctx: &Context, group_id: i64) -> bool {
     let guard = ctx.config.read().unwrap();
     let filter = &guard.global_filter;
     if filter.enable_whitelist {
@@ -167,6 +167,40 @@ pub async fn deliver(
     image_sent || text_sent
 }
 
+/// 一次推送的标题组：文本消息的头一行，以及卡片图的主副标题
+pub(super) struct Headline<'a> {
+    pub text: &'a str,
+    pub card_title: &'a str,
+    pub card_subtitle: &'a str,
+}
+
+/// 把一批资讯渲染成卡片图 + 文本，投递给某一个群。
+///
+/// 定时速递与实时快报都走这里：两者的差别只在标题与挑选条目的规则，
+/// 排版、截图、先图后文的投递顺序完全一致。
+///
+/// 每个群去重后的条目各不相同，卡片只能逐群渲染，无法像日报那样共用一张图。
+pub(super) async fn deliver_items(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: i64,
+    cfg: &AiNewsConfig,
+    headline: Headline<'_>,
+    items: &[Item],
+) -> bool {
+    let opts = render_options(cfg);
+    let rendered = render::render_items(headline.text, items, &opts);
+    let card_html = card::items_card(
+        headline.card_title,
+        headline.card_subtitle,
+        card_slice(items, cfg),
+        &opts,
+    );
+    let payload = Payload::build(cfg, rendered, Some(card_html)).await;
+
+    deliver(ctx, writer, Some(group_id), None, cfg, &payload, None).await
+}
+
 /// 卡片图只画前 `image_max_items` 条，剩下的交给文本；图太长反而不好读
 pub fn card_slice<'a, T>(items: &'a [T], cfg: &AiNewsConfig) -> &'a [T] {
     let max = cfg.image_max_items.clamp(1, 30);
@@ -177,7 +211,7 @@ pub fn card_slice<'a, T>(items: &'a [T], cfg: &AiNewsConfig) -> &'a [T] {
 ///
 /// 用随机而非固定间隔，一是不让所有群在同一秒收到同一张图，
 /// 二是避免整齐的节拍撞上风控阈值。
-async fn pace(cfg: &AiNewsConfig) {
+pub(super) async fn pace(cfg: &AiNewsConfig) {
     tokio::time::sleep(Duration::from_secs(pace_seconds(cfg))).await;
 }
 
@@ -192,11 +226,11 @@ fn pace_seconds(cfg: &AiNewsConfig) -> u64 {
 
 // ================= 抓取 =================
 
-/// 拉取精选资讯。`conditional` 为 true 时启用 ETag 条件请求，
+/// 拉取精选资讯。`poll` 为 [`api::Poll::Cached`] 时启用 ETag 条件请求，
 /// 返回 `Ok(None)` 表示服务端回了 304（内容没变），本轮无需推送。
 pub async fn fetch_brief(
     cfg: &AiNewsConfig,
-    conditional: bool,
+    poll: api::Poll,
 ) -> Result<Option<Vec<Item>>, api::ApiError> {
     let category = cfg.category.trim();
     api::fetch_items(
@@ -210,7 +244,7 @@ pub async fn fetch_brief(
         None,
         cfg.limit,
         cfg.request_timeout_seconds,
-        conditional,
+        poll,
     )
     .await
 }
@@ -228,7 +262,7 @@ pub async fn search(
         Some(query),
         cfg.limit,
         cfg.request_timeout_seconds,
-        false,
+        api::Poll::Fresh,
     )
     .await?
     .unwrap_or_default();
@@ -244,7 +278,7 @@ pub async fn search(
         Some(query),
         cfg.limit,
         cfg.request_timeout_seconds,
-        false,
+        api::Poll::Fresh,
     )
     .await?
     .unwrap_or_default();
@@ -256,7 +290,7 @@ pub async fn search(
 
 /// 精选速递：只推该群没见过的条目
 pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, groups: Vec<i64>) {
-    let items = match fetch_brief(&cfg, true).await {
+    let items = match fetch_brief(&cfg, api::Poll::Cached("brief")).await {
         Ok(Some(items)) => items,
         Ok(None) => {
             info!(target: LOG_TARGET, "精选速递：服务端返回 304，无新内容，跳过。");
@@ -277,8 +311,8 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         .into_iter()
         .filter_map(|item| item.dedupe_key().map(|key| (key, item)))
         .collect();
-    let opts = render_options(&cfg);
     let subtitle = window_label(&cfg.window);
+    let header = format!("🤖 AI 资讯速递 · {}", subtitle);
 
     for (idx, group_id) in groups.iter().enumerate() {
         if !is_allowed(&ctx, *group_id) {
@@ -303,24 +337,17 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             .map(|(_, item)| item.clone())
             .collect();
 
-        // 每个群去重后的条目各不相同，卡片只能逐群渲染
-        let header = format!("🤖 AI 资讯速递 · {}", subtitle);
-        let rendered = render::render_items(&header, &picked, &opts);
-        let card_html = Some(card::items_card(
-            "AI 资讯速递",
-            subtitle,
-            card_slice(&picked, &cfg),
-            &opts,
-        ));
-        let payload = Payload::build(&cfg, rendered, card_html).await;
-        let sent = deliver(
+        let sent = deliver_items(
             &ctx,
             writer.clone(),
-            Some(*group_id),
-            None,
+            *group_id,
             &cfg,
-            &payload,
-            None,
+            Headline {
+                text: &header,
+                card_title: "AI 资讯速递",
+                card_subtitle: subtitle,
+            },
+            &picked,
         )
         .await;
 
@@ -394,7 +421,8 @@ pub async fn push_hot_topics(
     cfg: AiNewsConfig,
     groups: Vec<i64>,
 ) {
-    let topics = match api::fetch_hot_topics(cfg.request_timeout_seconds, true).await {
+    let poll = api::Poll::Cached("hot");
+    let topics = match api::fetch_hot_topics(cfg.request_timeout_seconds, poll).await {
         Ok(Some(topics)) => topics,
         Ok(None) => {
             info!(target: LOG_TARGET, "热点榜：服务端返回 304，无变化，跳过。");

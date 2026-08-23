@@ -1,15 +1,30 @@
-//! ai_news 插件：定时向指定群聊推送 AI 新资讯（数据源 AIHOT）。
+//! ai_news 插件：向指定群聊推送 AI 新资讯（数据源 AIHOT）。
 //!
 //! 数据源选型：AIHOT 同时提供 RSS 与 v1 REST API，这里选用 **API**——
 //! 返回结构化 JSON，无需引入 XML 解析依赖；支持服务端按 `window` / `category` / `q`
 //! 筛选；每条带稳定 `id` 便于跨次推送去重；另有 RSS 没有的热点榜与日报端点。
 //! 详见 `api.rs` 顶部说明。
 //!
+//! ## 两条推送线并行
+//!
+//! **实时快报**（`realtime.rs`）：每 3 分钟条件轮询一次精选池，
+//! 新资讯进池就发，延迟通常在 3 分钟以内——新闻的即时性由这条线负责。
+//! AIHOT 没有 Webhook / 流式订阅，「实时」只能靠带 `ETag` 的条件轮询逼近，
+//! 没有新内容的轮次服务端只回一个 304，几乎不产生流量。
+//! 为免变成刷屏，实时推送有基线、保鲜期、单次条数与每小时频次四道闸，
+//! 外加深夜静默时段，详见 `realtime.rs` 顶部说明。
+//!
+//! **定时档**：日报、精选速递、热点榜按固定排期推送，负责节奏与总结。
+//! 两条线共用同一张去重表——实时推过的条目定时档不会再推一遍，
+//! 所以开着实时推送时，定时速递自然退化成「补漏」：
+//! 只发静默时段积压的、以及实时线因频次上限没能发出的那些。
+//!
 //! 默认排期（可在配置或 `/设置` 中调整）。时间点与 `stats` 插件的统计推送
 //! 整体错峰，任何一档都不与发言排行榜 / 数据分析撞在同一分钟：
 //!
 //! | 时间 | 插件 | 内容 |
 //! | --- | --- | --- |
+//! | 全天 | ai_news | 实时快报（精选池有新条目就推，深夜静默） |
 //! | 08:20 | ai_news | AI 日报（当期日报，同一期只推一次） |
 //! | 09:00 | stats | 早安回顾（昨日） |
 //! | 10:00 周一 | stats | 上周回顾 |
@@ -40,6 +55,7 @@
 //!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
 //!   /ai推送开启 · /ai推送关闭 · /ai推送状态 · /ai推送重置
+//!   /ai实时开启 · /ai实时关闭   本群只收定时档还是也收实时快报
 //!
 //! 使用边界：AIHOT 的匿名接口可用于个人非商业、公益非商业及组织内部使用；
 //! 面向外部的商业产品、数据转售、公开镜像等须先取得 AIHOT 书面授权
@@ -62,6 +78,7 @@ pub mod api;
 mod card;
 pub mod leaderboard;
 mod pusher;
+mod realtime;
 mod render;
 mod state;
 
@@ -152,6 +169,34 @@ pub struct AiNewsConfig {
     #[serde(default = "default_leaderboard_cache_minutes")]
     pub leaderboard_cache_minutes: u64,
 
+    // —— 实时推送 ——
+    /// 实时快报总开关：精选池一有新资讯就推，不必等下一个定时档
+    #[serde(default = "default_true")]
+    pub realtime_enabled: bool,
+    /// 轮询间隔（秒）。低于 60 秒无意义：AIHOT 的 CDN 缓存就是 60 秒，
+    /// 更密只会拿到同一份副本
+    #[serde(default = "default_realtime_interval")]
+    pub realtime_interval_seconds: u64,
+    /// 保鲜期（分钟）：只推收录时间在此之内的条目。
+    /// Bot 离线一天再上线时，不会把这一天的旧闻当成「刚刚发生」补发一遍
+    #[serde(default = "default_realtime_max_age")]
+    pub realtime_max_age_minutes: i64,
+    /// 单次实时推送最多几条，多出来的留到下一轮
+    #[serde(default = "default_realtime_max_items")]
+    pub realtime_max_items: usize,
+    /// 每个群每小时最多实时推送几次，防止爆发日刷屏
+    #[serde(default = "default_realtime_max_per_hour")]
+    pub realtime_max_per_hour: u32,
+    /// 静默时段起点（HH:MM）；与终点相同或留空表示不设静默
+    #[serde(default = "default_quiet_start")]
+    pub realtime_quiet_start: String,
+    /// 静默时段终点（HH:MM）。跨午夜按跨天处理
+    #[serde(default = "default_quiet_end")]
+    pub realtime_quiet_end: String,
+    /// 只收定时档、不收实时快报的群；可用 `/ai实时关闭` 在群内增删
+    #[serde(default)]
+    pub realtime_muted_groups: Vec<i64>,
+
     // —— 排期 ——
     #[serde(default = "default_true")]
     pub brief_enabled: bool,
@@ -224,6 +269,24 @@ fn default_leaderboard_items() -> usize {
 fn default_leaderboard_cache_minutes() -> u64 {
     30
 }
+fn default_realtime_interval() -> u64 {
+    180
+}
+fn default_realtime_max_age() -> i64 {
+    240
+}
+fn default_realtime_max_items() -> usize {
+    5
+}
+fn default_realtime_max_per_hour() -> u32 {
+    4
+}
+fn default_quiet_start() -> String {
+    "23:30".to_string()
+}
+fn default_quiet_end() -> String {
+    "07:30".to_string()
+}
 // 以下时间点与 stats 插件的统计推送错峰，详见模块文档的时间表
 fn default_brief_times() -> Vec<String> {
     vec!["12:50:00".to_string(), "20:10:00".to_string()]
@@ -260,6 +323,14 @@ impl Default for AiNewsConfig {
             send_interval_max_seconds: default_send_interval_max(),
             leaderboard_max_items: default_leaderboard_items(),
             leaderboard_cache_minutes: default_leaderboard_cache_minutes(),
+            realtime_enabled: true,
+            realtime_interval_seconds: default_realtime_interval(),
+            realtime_max_age_minutes: default_realtime_max_age(),
+            realtime_max_items: default_realtime_max_items(),
+            realtime_max_per_hour: default_realtime_max_per_hour(),
+            realtime_quiet_start: default_quiet_start(),
+            realtime_quiet_end: default_quiet_end(),
+            realtime_muted_groups: Vec::new(),
             brief_enabled: true,
             brief_times: default_brief_times(),
             daily_enabled: true,
@@ -335,6 +406,10 @@ pub fn on_connected(
                 |c, w, cfg, groups| Box::pin(pusher::push_hot_topics(c, w, cfg, groups)),
             );
         }
+
+        // 实时快报：轮询任务常驻，开关与参数在每次节拍时重新读取，
+        // 所以这里不看 realtime_enabled——关掉再打开无需重启
+        realtime::spawn(&ctx, &writer);
 
         Ok(Some(ctx))
     })
@@ -491,7 +566,14 @@ pub fn handle(
         let message_id = msg.message_id();
 
         // 先匹配更长的「推送管理」类指令，避免与查询指令混淆
-        for trigger in ["ai推送开启", "ai推送关闭", "ai推送状态", "ai推送重置"] {
+        for trigger in [
+            "ai推送开启",
+            "ai推送关闭",
+            "ai推送状态",
+            "ai推送重置",
+            "ai实时开启",
+            "ai实时关闭",
+        ] {
             if match_command(&ctx, trigger).is_none() {
                 continue;
             }
@@ -555,7 +637,7 @@ fn notice(text: impl Into<String>) -> Payload {
 
 async fn query_brief(config: &AiNewsConfig) -> Payload {
     let window = pusher::window_label(&config.window);
-    match pusher::fetch_brief(config, false).await {
+    match pusher::fetch_brief(config, api::Poll::Fresh).await {
         Ok(Some(items)) if !items.is_empty() => {
             let opts = pusher::render_options(config);
             let rendered =
@@ -577,7 +659,7 @@ async fn query_brief(config: &AiNewsConfig) -> Payload {
 }
 
 async fn query_hot_topics(config: &AiNewsConfig) -> Payload {
-    match api::fetch_hot_topics(config.request_timeout_seconds, false).await {
+    match api::fetch_hot_topics(config.request_timeout_seconds, api::Poll::Fresh).await {
         Ok(Some(topics)) if !topics.is_empty() => {
             let rendered = render::render_hot_topics(&topics);
             let html = card::hot_topics_card(pusher::card_slice(&topics, config));
@@ -712,7 +794,59 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
         }
         "ai推送重置" => {
             state::reset_group(gid).await;
-            "✅ 已清空本群的推送去重记录，下次推送会重新发送近期资讯。".to_string()
+            "✅ 已清空本群的推送去重记录，下次推送会重新发送近期资讯。\
+             实时快报会重新建立基线，只推此刻之后的新资讯。"
+                .to_string()
+        }
+        "ai实时开启" => {
+            if !config.realtime_enabled {
+                let prefix = get_prefixes(ctx)
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "/".into());
+                return format!(
+                    "⚠️ 实时推送的总开关当前是关闭的。\
+                     可用 {}设置 ai_news realtime_enabled true 打开，本群随即生效。",
+                    prefix
+                );
+            }
+            if !config.groups.contains(&gid) {
+                return format!(
+                    "本群（{}）还没有开启 AI 资讯推送，先用「ai推送开启」把本群加进来。",
+                    gid
+                );
+            }
+            if !config.realtime_muted_groups.contains(&gid) {
+                return format!("本群（{}）已经在接收实时快报了。", gid);
+            }
+            let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
+                cfg.realtime_muted_groups.retain(|g| *g != gid);
+                cfg
+            })
+            .await;
+            match result {
+                Ok(_) => format!("⚡ 已为本群（{}）开启实时快报，新资讯进池即推。", gid),
+                Err(e) => format!("❌ 保存配置失败：{}", e),
+            }
+        }
+        "ai实时关闭" => {
+            if config.realtime_muted_groups.contains(&gid) {
+                return format!("本群（{}）当前只接收定时推送。", gid);
+            }
+            let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
+                if !cfg.realtime_muted_groups.contains(&gid) {
+                    cfg.realtime_muted_groups.push(gid);
+                }
+                cfg
+            })
+            .await;
+            match result {
+                Ok(_) => format!(
+                    "✅ 已关闭本群（{}）的实时快报，定时档（日报 / 精选速递 / 热点榜）照常。",
+                    gid
+                ),
+                Err(e) => format!("❌ 保存配置失败：{}", e),
+            }
         }
         _ => String::new(),
     }
@@ -746,6 +880,35 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
     }
 
     out.push_str(&format!("推送群数：{} 个\n", config.groups.len()));
+
+    out.push_str("———————————————\n⚡ 实时快报\n");
+    if config.realtime_enabled {
+        let muted = group_id.is_some_and(|gid| config.realtime_muted_groups.contains(&gid));
+        out.push_str(&format!(
+            "{} {}\n",
+            switch(!muted),
+            if muted {
+                "本群已关闭，只收定时档"
+            } else {
+                "新资讯进池即推"
+            }
+        ));
+        out.push_str(&format!(
+            "   每{}查一次 · 保鲜 {} 分钟\n   单次至多 {} 条 · 每小时至多 {} 次\n   静默时段：{}\n",
+            interval_label(
+                config
+                    .realtime_interval_seconds
+                    .max(realtime::MIN_INTERVAL_SECONDS)
+            ),
+            config.realtime_max_age_minutes.max(1),
+            config.realtime_max_items.max(1),
+            config.realtime_max_per_hour.max(1),
+            quiet_label(config)
+        ));
+    } else {
+        out.push_str("⬜ 已关闭（只按下方排期推送）\n");
+    }
+
     out.push_str("———————————————\n📅 排期\n");
     out.push_str(&format!(
         "{} AI 日报　{}\n",
@@ -759,6 +922,9 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
         pusher::window_label(&config.window),
         config.limit
     ));
+    if config.realtime_enabled && config.brief_enabled {
+        out.push_str("   （实时开启时它只补漏：静默时段与超限的条目）\n");
+    }
     out.push_str(&format!(
         "{} 热点榜　{}\n",
         switch(config.hot_topics_enabled),
@@ -776,11 +942,30 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
     }
     out.push_str("———————————————\n");
     out.push_str(&format!(
-        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n",
+        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai实时开启 · {p}ai实时关闭\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);
     out
+}
+
+/// 轮询间隔的展示文案：整分钟就说分钟，读起来比「每 180 秒」直观
+fn interval_label(seconds: u64) -> String {
+    if seconds % 60 == 0 {
+        format!(" {} 分钟", seconds / 60)
+    } else {
+        format!(" {} 秒", seconds)
+    }
+}
+
+/// 静默时段的展示文案：起止相同或留空都表示「不设静默」
+fn quiet_label(config: &AiNewsConfig) -> String {
+    let start = config.realtime_quiet_start.trim();
+    let end = config.realtime_quiet_end.trim();
+    if start.is_empty() || end.is_empty() || start == end {
+        return "不设（全天推送）".to_string();
+    }
+    format!("{}—{}", start, end)
 }
 
 #[cfg(test)]
@@ -810,6 +995,43 @@ mod tests {
         let parsed: AiNewsConfig = value.try_into().expect("默认配置应能反序列化");
         assert_eq!(parsed.groups, vec![DEFAULT_GROUP]);
         assert_eq!(parsed.brief_times.len(), 2);
+        // 实时快报默认开启，且轮询间隔不低于 AIHOT 的缓存时长
+        assert!(parsed.realtime_enabled);
+        assert!(parsed.realtime_interval_seconds >= realtime::MIN_INTERVAL_SECONDS);
+        assert!(parsed.realtime_muted_groups.is_empty());
+    }
+
+    /// 老配置文件里没有实时相关的键，反序列化必须能落回默认值——
+    /// 主程序补全字段前，插件已经会读一次配置
+    #[test]
+    fn legacy_config_without_realtime_keys_still_parses() {
+        let legacy: Value = toml::from_str(
+            r#"
+            enabled = true
+            groups = [123]
+            brief_times = ["12:50:00"]
+            "#,
+        )
+        .expect("片段应是合法 TOML");
+
+        let parsed: AiNewsConfig = legacy.try_into().expect("缺字段时应退回默认值");
+        assert_eq!(parsed.groups, vec![123]);
+        assert!(parsed.realtime_enabled);
+        assert_eq!(parsed.realtime_max_items, default_realtime_max_items());
+        assert_eq!(parsed.realtime_quiet_start, default_quiet_start());
+    }
+
+    #[test]
+    fn quiet_label_reads_as_off_when_bounds_are_empty_or_equal() {
+        let mut cfg = AiNewsConfig::default();
+        assert_eq!(quiet_label(&cfg), "23:30—07:30");
+
+        cfg.realtime_quiet_start = String::new();
+        assert!(quiet_label(&cfg).contains("不设"));
+
+        cfg.realtime_quiet_start = "08:00".into();
+        cfg.realtime_quiet_end = "08:00".into();
+        assert!(quiet_label(&cfg).contains("不设"));
     }
 
     /// 联网冒烟测试：默认 `#[ignore]`，不参与常规 `cargo test`。
@@ -827,7 +1049,7 @@ mod tests {
         #[ignore = "需要访问 aihot.virxact.com"]
         async fn brief_endpoint_is_renderable() {
             let cfg = config();
-            let items = pusher::fetch_brief(&cfg, false)
+            let items = pusher::fetch_brief(&cfg, api::Poll::Fresh)
                 .await
                 .expect("精选接口应可访问")
                 .expect("非条件请求必然带响应体");
@@ -848,7 +1070,7 @@ mod tests {
         #[tokio::test]
         #[ignore = "需要访问 aihot.virxact.com"]
         async fn hot_topics_endpoint_is_renderable() {
-            let topics = api::fetch_hot_topics(config().request_timeout_seconds, false)
+            let topics = api::fetch_hot_topics(config().request_timeout_seconds, api::Poll::Fresh)
                 .await
                 .expect("热点榜接口应可访问")
                 .expect("非条件请求必然带响应体");

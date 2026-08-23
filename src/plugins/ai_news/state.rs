@@ -28,6 +28,15 @@ pub struct GroupState {
     /// 已推送过的最新日报日期，防止同一期日报重复推送
     #[serde(default)]
     pub last_daily_date: Option<String>,
+    /// 实时推送的基线时间（Unix 秒）：只有收录时间晚于它的资讯才会被实时推送。
+    ///
+    /// 第一次轮询到本群时建立，之后不再变动——没有它，新装机器或刚开启推送的群
+    /// 会把时间窗内的存量资讯当成「新消息」一次性倒出来。
+    #[serde(default)]
+    pub realtime_since: Option<i64>,
+    /// 最近若干次实时推送的时间戳（Unix 秒），用于每小时频次上限；只保留最近一小时
+    #[serde(default)]
+    pub realtime_pushes: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -118,13 +127,58 @@ pub async fn unseen_keys(group_id: i64, keys: Vec<String>, retain_days: i64) -> 
 pub async fn mark_seen(group_id: i64, keys: Vec<String>) {
     let now = Utc::now().timestamp();
     with_state(move |state| {
-        let entry = state.groups.entry(group_id.to_string()).or_default();
-        for key in keys {
-            if entry.seen.iter().any(|s| s.key == key) {
-                continue;
-            }
-            entry.seen.push(SeenEntry { key, ts: now });
+        remember(state.groups.entry(group_id.to_string()).or_default(), keys, now);
+    })
+    .await
+}
+
+/// 把条目计入去重表（已在表内的不重复记）
+fn remember(entry: &mut GroupState, keys: Vec<String>, now: i64) {
+    for key in keys {
+        if entry.seen.iter().any(|s| s.key == key) {
+            continue;
         }
+        entry.seen.push(SeenEntry { key, ts: now });
+    }
+}
+
+/// 某个群的实时推送状态（一次加锁取齐，避免逐项读写反复落盘）
+#[derive(Debug, Clone, Copy)]
+pub struct RealtimeStatus {
+    /// 实时推送基线：只推收录时间晚于它的资讯
+    pub since: i64,
+    /// 本次调用刚刚建立基线——说明这是该群的第一轮，只对齐时间线，不推送
+    pub just_primed: bool,
+    /// 最近一小时内已经实时推送过几次
+    pub pushes_last_hour: u32,
+}
+
+/// 读取该群的实时推送状态；首次调用会以当前时刻建立基线
+pub async fn realtime_status(group_id: i64) -> RealtimeStatus {
+    let now = Utc::now().timestamp();
+    with_state(move |state| {
+        let entry = state.groups.entry(group_id.to_string()).or_default();
+        entry.realtime_pushes.retain(|ts| *ts > now - 3_600);
+
+        let just_primed = entry.realtime_since.is_none();
+        let since = *entry.realtime_since.get_or_insert(now);
+
+        RealtimeStatus {
+            since,
+            just_primed,
+            pushes_last_hour: entry.realtime_pushes.len() as u32,
+        }
+    })
+    .await
+}
+
+/// 记录一次实时推送：条目计入去重，同时留下一个时间戳供频次上限统计
+pub async fn mark_realtime_sent(group_id: i64, keys: Vec<String>) {
+    let now = Utc::now().timestamp();
+    with_state(move |state| {
+        let entry = state.groups.entry(group_id.to_string()).or_default();
+        remember(entry, keys, now);
+        entry.realtime_pushes.push(now);
     })
     .await
 }
