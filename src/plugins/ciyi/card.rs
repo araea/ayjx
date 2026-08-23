@@ -190,7 +190,9 @@ const CSS: &str = r#"
 
 /* —— 数字卡 —— */
 .stats{display:flex;gap:13px;margin-top:24px}
-.stat{flex:1;padding:15px 10px 14px;border-radius:10px;text-align:center;
+/* min-width:0 不能省：flex 子项默认 min-width:auto，
+   里面 nowrap 的长昵称会把整行撑出卡片再被裁掉，省略号永远等不到 */
+.stat{flex:1;min-width:0;padding:15px 10px 14px;border-radius:10px;text-align:center;
   background:rgba(255,255,255,.55);border:1px solid var(--line)}
 .stat b{display:block;font-size:26px;font-weight:800;line-height:1.15;letter-spacing:-.01em;
   color:var(--ink);font-variant-numeric:tabular-nums}
@@ -199,6 +201,14 @@ const CSS: &str = r#"
 .stat span{display:block;margin-top:8px;font-size:12px;letter-spacing:.16em;color:var(--ink3)}
 
 /* —— 揭晓 —— */
+/* 昵称通栏放，最多两行；超长的（含一长串不换行字符）就断行后省略，
+   overflow-wrap:anywhere 保证没有空格的长串也能断 */
+.winner{display:flex;align-items:baseline;gap:14px;margin-top:13px;padding:15px 20px;
+  border-radius:10px;background:rgba(176,52,42,.055);border:1px solid rgba(176,52,42,.16)}
+.winner span{flex:none;font-size:12px;letter-spacing:.16em;color:var(--ink3)}
+.winner b{min-width:0;font-family:var(--serif);font-size:22px;font-weight:700;letter-spacing:.04em;
+  line-height:1.45;color:var(--ink);overflow-wrap:anywhere;overflow:hidden;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .reveal{display:flex;align-items:center;justify-content:center;gap:34px;
   margin:30px 0 6px;padding:30px 0}
 .mark{width:104px;height:104px;flex:none;border-radius:50%;
@@ -213,6 +223,7 @@ const CSS: &str = r#"
 .lrow::after{content:"";position:absolute;left:12px;right:12px;bottom:0;
   border-bottom:1px dotted var(--line)}
 .lrow:last-child::after{display:none}
+.lmid{min-width:0}
 .lrk{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;
   font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--red);
   background:rgba(176,52,42,.09);border:1px solid rgba(176,52,42,.22)}
@@ -415,8 +426,14 @@ pub fn win_card(win: &Win) -> String {
     if let Some(elapsed) = win.elapsed() {
         stats.push_str(&stat(&elapsed, "本局历时", true));
     }
-    stats.push_str(&stat(&win.winner, "猜中者", true));
     body.push_str(&format!(r#"<div class="stats">{stats}</div>"#));
+
+    // 猜中者独占一行：昵称长短不受控，塞进四分之一宽的数字卡里
+    // 六个字就到头了，通栏才放得下一个正常的群昵称
+    body.push_str(&format!(
+        r#"<div class="winner"><span>猜中者</span><b>{}</b></div>"#,
+        esc(&win.winner)
+    ));
 
     shell(
         "猜对了",
@@ -442,7 +459,7 @@ pub fn rank_card(rank: &RankBoard) -> String {
         body.push_str(&format!(
             r#"<div class="lrow" style="--c:var(--red);--w:{width:.1}%">
 <div class="lrk{top_cls}">{place}</div>
-<div><div class="lname">{name}</div><div class="bar"><span></span></div></div>
+<div class="lmid"><div class="lname">{name}</div><div class="bar"><span></span></div></div>
 <div class="lsc"><b>{score}</b><span>胜</span></div></div>"#,
             width = (item.score as f64 / top as f64) * 100.0,
             top_cls = if place <= 3 { " top" } else { "" },
@@ -676,8 +693,29 @@ mod tests {
                 .collect(),
         };
 
+        // 群昵称长度不受控，长名字单独出一版校对
+        let long = "✿ 今天也要元气满满地猜词哦超级无敌长的群昵称 ✿ QwQ";
+        let long_win = Win {
+            answer: "东西".into(),
+            winner: long.into(),
+            guesses: 7,
+            hits: 3,
+            started_at: Utc::now() - ChronoDuration::minutes(41),
+        };
+        let long_rank = RankBoard {
+            title: "词意全榜".into(),
+            subtitle: "全部群聊 · 猜中次数前 3 名".into(),
+            items: vec![
+                RankItem { name: long.into(), score: 12 },
+                RankItem { name: "无空格的超长英文名".repeat(4), score: 9 },
+                RankItem { name: "短名".into(), score: 1 },
+            ],
+        };
+
         for (name, html) in [
             ("board.html", board_card(&sample_board(4, None))),
+            ("win_long_name.html", win_card(&long_win)),
+            ("rank_long_name.html", rank_card(&long_rank)),
             (
                 "board_notice.html",
                 board_card(&sample_board(0, Some("「玉佩」已经猜过了"))),
@@ -710,7 +748,9 @@ mod tests {
             "board_notice",
             "board_empty",
             "win",
+            "win_long_name",
             "rank",
+            "rank_long_name",
             "help",
             "rules",
         ] {
@@ -794,6 +834,47 @@ mod tests {
         for label in ["咫尺", "相邻", "相近", "相关", "天涯"] {
             assert!(html.contains(label), "图例缺少「{label}」档");
         }
+    }
+
+    /// 长昵称不能把版面撑破。
+    ///
+    /// 关键在 `min-width:0`：flex / grid 子项默认 `min-width:auto`，
+    /// 里面 nowrap 的长名字会成为子项的最小宽度，把整行顶出卡片再被
+    /// `.card{overflow:hidden}` 裁掉——省略号根本轮不到生效。
+    #[test]
+    fn long_names_are_bounded_not_overflowing() {
+        let long = "✿ 今天也要元气满满地猜词哦超级无敌长的群昵称 ✿ QwQ".repeat(3);
+
+        let win = win_card(&Win {
+            answer: "东西".into(),
+            winner: long.clone(),
+            guesses: 7,
+            hits: 3,
+            started_at: Utc::now(),
+        });
+        assert!(win.contains(&esc(&long)), "名字要完整写进 HTML，由 CSS 决定截断");
+        assert!(win.contains(".winner b{min-width:0"), "通栏昵称需要 min-width:0");
+        assert!(win.contains("-webkit-line-clamp:2"), "超长昵称最多两行");
+        assert!(win.contains("overflow-wrap:anywhere"), "无空格长串也要能断行");
+
+        let rank = rank_card(&RankBoard {
+            title: "词意榜".into(),
+            subtitle: String::new(),
+            items: vec![RankItem { name: long, score: 4 }],
+        });
+        assert!(rank.contains(".lmid{min-width:0}"), "榜单中间列需要 min-width:0");
+        assert!(rank.contains(r#"class="lmid""#), "中间列要真的用上这个类");
+        assert!(
+            rank.contains("text-overflow:ellipsis"),
+            "单行名字超宽时以省略号收尾"
+        );
+    }
+
+    /// 数字卡也在 flex 里，同样会被长内容顶破
+    #[test]
+    fn stat_tiles_clamp_their_content() {
+        assert!(CSS.contains(".stat{flex:1;min-width:0"));
+        assert!(CSS.contains(".stat b.w{"));
     }
 
     #[test]
