@@ -61,10 +61,6 @@ register_plugins!(
     webshot {
         display_name: "网页截图"
     },
-    shindan {
-        display_name: "神断占卜",
-        on_init: Some(shindan::init)
-    },
     oai {
         display_name: "智能对话",
         on_init: Some(oai::init)

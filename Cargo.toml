@@ -28,7 +28,6 @@ http = "1.4"
 url = "2.5"
 tokio-tungstenite = "0.28"  # WebSocket
 async-openai = { version = "0.31", features = ["_api", "model", "chat-completion-types", "chat-completion"] }  # OpenAI API
-shindan-maker = { version = "0.1", features = ["full"] }  # 诊断生成器
 
 # 异步运行时与工具
 tokio = { version = "1", features = ["full"] }

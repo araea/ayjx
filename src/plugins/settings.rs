@@ -74,10 +74,6 @@ const SETTINGS: &[SettingSpec] = &[
     s("ciyi", "plugin.direct_guess", "直接猜词模式", "开启后可直接发送答案猜测", Kind::Bool, "false"),
     s("ciyi", "plugin.history_display", "历史显示条数", "猜词历史记录显示的条数", Kind::Int, "10"),
     s("ciyi", "plugin.rank_display", "排行显示条数", "猜词排行榜显示的条数", Kind::Int, "10"),
-    // 神断占卜
-    s("shindan", "domain", "占卜源站", "占卜数据源：Jp 或 Cn", Kind::Str, "Jp"),
-    s("shindan", "random_return_command", "随机触发", "群聊中是否随机触发占卜", Kind::Bool, "true"),
-    s("shindan", "rank_max", "排行显示条数", "占卜排行榜显示的条数", Kind::Int, "20"),
     // 统计图表
     s("stats", "push_min_messages", "推送最低消息数", "统计区间消息数低于此值时跳过推送", Kind::Int, "20"),
     s("stats", "daily_push_enabled", "每日总结推送", "每天 23:30 推送当日总结", Kind::Bool, "true"),
