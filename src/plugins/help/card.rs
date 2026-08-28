@@ -604,10 +604,10 @@ mod tests {
             })
             .collect();
 
-        let (desc, cmds) = super::super::describe("shindan");
+        let (desc, cmds) = super::super::describe("ciyi");
         let entry = Entry {
-            display: display_of("shindan"),
-            name: "shindan",
+            display: display_of("ciyi"),
+            name: "ciyi",
             desc,
             enabled: true,
         };

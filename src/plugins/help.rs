@@ -118,7 +118,7 @@ const SECTIONS: &[Section] = &[
     Section {
         title: "互动 · 娱乐",
         en: "PLAY",
-        members: &["repeater", "ping", "group_title", "shindan", "ciyi", "oai"],
+        members: &["repeater", "ping", "group_title", "ciyi", "oai"],
     },
     Section {
         title: "统计 · 资讯",
