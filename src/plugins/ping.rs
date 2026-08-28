@@ -56,7 +56,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         let stmt = builder.build(&create_table_stmt);
 
-        db.execute(stmt)
+        db.execute_raw(stmt)
             .await
             .map_err(|e| format!("PingPong Plugin Init DB Error: {}", e))?;
 

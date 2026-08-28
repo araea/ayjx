@@ -8,15 +8,15 @@ edition = "2024"
 anyhow = "1.0"
 
 # 文本处理
-jieba-rs = "0.8"      # 中文分词
+jieba-rs = "0.10"     # 中文分词
 regex = "1.12"        # 正则表达式
 pulldown-cmark = "0.13" # Markdown 解析
 
 # 序列化与反序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-simd-json = "0.17"
-toml = "0.9"
+simd-json = "0.18"
+toml = "1.1"
 
 # 加密与哈希
 md5 = "0.8"
@@ -26,20 +26,20 @@ base64 = "0.23"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "charset", "json"] }
 http = "1.4"
 url = "2.5"
-tokio-tungstenite = "0.28"  # WebSocket
-async-openai = { version = "0.31", features = ["_api", "model", "chat-completion-types", "chat-completion"] }  # OpenAI API
+tokio-tungstenite = "0.30"  # WebSocket
+async-openai = { version = "0.41", features = ["_api", "model", "chat-completion-types", "chat-completion"] }  # OpenAI API
 
 # 异步运行时与工具
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 
 # 数据库
-sea-orm = { version = "1.1", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
+sea-orm = { version = "2.0", features = [ "sqlx-sqlite", "runtime-tokio-rustls", "macros" ] }
 
 # 图像处理与生成
 image = "0.25"
 plotters = { version = "0.3", default-features = false, features = ["all_elements", "all_series", "bitmap_backend", "bitmap_encoder", "bitmap_gif", "chrono", "colormaps", "deprecated_items", "full_palette", "image", "svg_backend", "ab_glyph"] }         # 图表绘制
-fontdb = "0.23"       # 字体处理
+fontdb = "0.24"       # 字体处理
 araea-wordcloud = "0.1"   # 词云生成
 cdp-html-shot = "0.2.8"     # HTML 截图
 

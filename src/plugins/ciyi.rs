@@ -41,7 +41,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         // 1. 创建 State 表
         let mut create_state_table = schema.create_table_from_entity(state_entity::Entity);
         if let Err(e) = db
-            .execute(builder.build(create_state_table.if_not_exists()))
+            .execute_raw(builder.build(create_state_table.if_not_exists()))
             .await
         {
             crate::warn!(target: "Plugin/CiYi", "Init state table error: {}", e);
@@ -50,7 +50,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         // 2. 创建 Record 表
         let mut create_record_table = schema.create_table_from_entity(record_entity::Entity);
         if let Err(e) = db
-            .execute(builder.build(create_record_table.if_not_exists()))
+            .execute_raw(builder.build(create_record_table.if_not_exists()))
             .await
         {
             crate::warn!(target: "Plugin/CiYi", "Init record table error: {}", e);
@@ -66,7 +66,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             .if_not_exists()
             .to_owned();
 
-        if let Err(e) = db.execute(builder.build(&idx_group_user)).await {
+        if let Err(e) = db.execute_raw(builder.build(&idx_group_user)).await {
             crate::warn!(target: "Plugin/CiYi", "Init index error: {}", e);
         }
 

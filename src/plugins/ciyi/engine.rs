@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use rand::RngExt;
-use sea_orm::sea_query::{Alias, Expr, OnConflict};
+use sea_orm::sea_query::{Alias, Expr, Func, OnConflict};
 use sea_orm::{
     ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, QueryFilter, QueryOrder,
     QuerySelect, Set,
@@ -480,8 +480,14 @@ pub async fn get_global_leaderboard(db: &DatabaseConnection, limit: usize) -> Re
     let results: Vec<LeaderboardItem> = match record::Entity::find()
         .select_only()
         .column(record::Column::UserId)
-        .column_as(Expr::col(record::Column::Username).max(), "username")
-        .column_as(Expr::col(record::Column::Id).count(), "score")
+        .column_as(
+            Expr::from(Func::max(Expr::col(record::Column::Username))),
+            "username",
+        )
+        .column_as(
+            Expr::from(Func::count(Expr::col(record::Column::Id))),
+            "score",
+        )
         .group_by(record::Column::UserId)
         .order_by_desc(Expr::custom_keyword(Alias::new("score")))
         .limit(limit as u64)
@@ -504,8 +510,14 @@ pub async fn get_channel_leaderboard(
     let results: Vec<LeaderboardItem> = match record::Entity::find()
         .select_only()
         .column(record::Column::UserId)
-        .column_as(Expr::col(record::Column::Username).max(), "username")
-        .column_as(Expr::col(record::Column::Id).count(), "score")
+        .column_as(
+            Expr::from(Func::max(Expr::col(record::Column::Username))),
+            "username",
+        )
+        .column_as(
+            Expr::from(Func::count(Expr::col(record::Column::Id))),
+            "score",
+        )
         .filter(record::Column::GroupId.eq(group_id))
         .group_by(record::Column::UserId)
         .order_by_desc(Expr::custom_keyword(Alias::new("score")))

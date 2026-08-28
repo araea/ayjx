@@ -90,7 +90,7 @@ async fn create_tables(db: &DatabaseConnection) -> Result<(), DbErr> {
     ];
 
     for sql in stmts {
-        db.execute(Statement::from_string(backend, sql.to_owned()))
+        db.execute_raw(Statement::from_string(backend, sql.to_owned()))
             .await?;
     }
     Ok(())
@@ -100,7 +100,7 @@ async fn create_tables(db: &DatabaseConnection) -> Result<(), DbErr> {
 async fn backfill_all(db: &DatabaseConnection) -> Result<(), DbErr> {
     let backend = db.get_database_backend();
 
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         r#"INSERT INTO message_stats_daily
            (group_id, stat_date, group_name, msg_count, text_count, image_count,
@@ -121,7 +121,7 @@ async fn backfill_all(db: &DatabaseConnection) -> Result<(), DbErr> {
     ))
     .await?;
 
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         r#"INSERT INTO message_user_stats_daily
            (group_id, stat_date, user_id, nick, group_name, msg_count, anim_emoji_count)
@@ -189,18 +189,18 @@ async fn rebuild_range(db: &DatabaseConnection, from: NaiveDate, to: NaiveDate) 
     let t_from = midnight_of(eff_from);
     let t_to = midnight_of(to) + 86_400;
 
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!("DELETE FROM message_stats_daily WHERE stat_date >= '{f}' AND stat_date <= '{t}'"),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!("DELETE FROM message_user_stats_daily WHERE stat_date >= '{f}' AND stat_date <= '{t}'"),
     ))
     .await?;
 
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"INSERT INTO message_stats_daily
@@ -219,7 +219,7 @@ async fn rebuild_range(db: &DatabaseConnection, from: NaiveDate, to: NaiveDate) 
     ))
     .await?;
 
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         format!(
             r#"INSERT INTO message_user_stats_daily
@@ -298,7 +298,7 @@ where
             face.into(),
         ],
     );
-    db.execute(stmt).await?;
+    db.execute_raw(stmt).await?;
 
     let stmt = Statement::from_sql_and_values(
         backend,
@@ -319,7 +319,7 @@ where
             anim.into(),
         ],
     );
-    db.execute(stmt).await?;
+    db.execute_raw(stmt).await?;
 
     Ok(())
 }
@@ -387,7 +387,7 @@ where
     C: ConnectionTrait,
 {
     let stmt = Statement::from_string(db.get_database_backend(), sql.to_owned());
-    let row = db.query_one(stmt).await?;
+    let row = db.query_one_raw(stmt).await?;
     match row {
         Some(r) => Ok(r.try_get::<i64>("", "c")?),
         None => Ok(0),

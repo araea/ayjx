@@ -135,7 +135,7 @@ fn group_cond_sql(group_id: Option<i64>) -> String {
 
 async fn scalar_from_sql(db: &DatabaseConnection, sql: String) -> Result<i64, DbErr> {
     let stmt = Statement::from_string(db.get_database_backend(), sql);
-    let row = db.query_one(stmt).await?;
+    let row = db.query_one_raw(stmt).await?;
     match row {
         Some(r) => Ok(r.try_get::<i64>("", "c")?),
         None => Ok(0),
@@ -699,8 +699,14 @@ async fn raw_user_ranking(
     let mut query = MessageLogs::find()
         .select_only()
         .column(entity::Column::UserId)
-        .column_as(Expr::col(entity::Column::SenderNick).max(), "nickname")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::max(Expr::col(entity::Column::SenderNick))),
+            "nickname",
+        )
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
 
@@ -726,8 +732,14 @@ async fn raw_group_ranking(
     MessageLogs::find()
         .select_only()
         .column(entity::Column::GroupId)
-        .column_as(Expr::col(entity::Column::GroupName).max(), "group_name")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::max(Expr::col(entity::Column::GroupName))),
+            "group_name",
+        )
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time))
         .filter(entity::Column::GroupId.ne(0))
@@ -749,8 +761,14 @@ async fn raw_user_group_participation_ranking(
     MessageLogs::find()
         .select_only()
         .column(entity::Column::GroupId)
-        .column_as(Expr::col(entity::Column::GroupName).max(), "group_name")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::max(Expr::col(entity::Column::GroupName))),
+            "group_name",
+        )
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time))
         .filter(entity::Column::UserId.eq(user_id))
@@ -779,7 +797,10 @@ async fn raw_user_emoji_ranking(
     let mut query = MessageLogs::find()
         .select_only()
         .column(entity::Column::UserId)
-        .column_as(Expr::col(entity::Column::SenderNick).max(), "nickname")
+        .column_as(
+            Expr::from(Func::max(Expr::col(entity::Column::SenderNick))),
+            "nickname",
+        )
         .column_as(sum_expr, "count")
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
@@ -809,7 +830,10 @@ async fn raw_daily_trend(
     let mut query = MessageLogs::find()
         .select_only()
         .column_as(date_expr.clone(), "date")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
 
@@ -845,7 +869,10 @@ async fn raw_daily_trend_by_group(
         .select_only()
         .column_as(time_expr.clone(), "date")
         .column(entity::Column::GroupName)
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time))
         .filter(entity::Column::GroupId.ne(0))
@@ -877,15 +904,15 @@ async fn raw_message_type_trend(
     // 1. 文本: length > 0
     let text_expr = Expr::cust("SUM(CASE WHEN length > 0 THEN 1 ELSE 0 END)");
     // 2. 动画表情: is_anim_emoji = true
-    let anim_expr = Expr::col(entity::Column::IsAnimEmoji).sum();
+    let anim_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsAnimEmoji)));
     // 3. 图片: image_count - is_anim_emoji
     let image_expr = Expr::cust("SUM(image_count) - SUM(is_anim_emoji)");
     // 4. 语音: is_voice
-    let voice_expr = Expr::col(entity::Column::IsVoice).sum();
+    let voice_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsVoice)));
     // 5. 视频: is_video
-    let video_expr = Expr::col(entity::Column::IsVideo).sum();
+    let video_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsVideo)));
     // 6. 表情 (Face): face_count
-    let face_expr = Expr::col(entity::Column::FaceCount).sum();
+    let face_expr = Expr::from(Func::sum(Expr::col(entity::Column::FaceCount)));
 
     let mut query = MessageLogs::find()
         .select_only()
@@ -925,7 +952,10 @@ async fn raw_hourly_activity(
     let mut query = MessageLogs::find()
         .select_only()
         .column_as(entity::Column::TimeHour, "hour")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
 
@@ -953,7 +983,10 @@ async fn raw_weekday_activity(
     let mut query = MessageLogs::find()
         .select_only()
         .column_as(entity::Column::TimeWeekday, "weekday")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
 
@@ -979,7 +1012,10 @@ async fn raw_heatmap_data(
         .select_only()
         .column_as(entity::Column::TimeWeekday, "weekday")
         .column_as(entity::Column::TimeHour, "hour")
-        .column_as(Expr::col(entity::Column::Id).count(), "count")
+        .column_as(
+            Expr::from(Func::count(Expr::col(entity::Column::Id))),
+            "count",
+        )
         .filter(entity::Column::Time.gte(start_time))
         .filter(entity::Column::Time.lt(end_time));
 
@@ -1003,11 +1039,11 @@ async fn raw_message_type_stats(
     end_time: i64,
 ) -> Result<MessageTypeStats, DbErr> {
     let text_expr = Expr::cust("SUM(CASE WHEN length > 0 THEN 1 ELSE 0 END)");
-    let anim_expr = Expr::col(entity::Column::IsAnimEmoji).sum();
+    let anim_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsAnimEmoji)));
     let image_expr = Expr::cust("SUM(image_count) - SUM(is_anim_emoji)");
-    let voice_expr = Expr::col(entity::Column::IsVoice).sum();
-    let video_expr = Expr::col(entity::Column::IsVideo).sum();
-    let face_expr = Expr::col(entity::Column::FaceCount).sum();
+    let voice_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsVoice)));
+    let video_expr = Expr::from(Func::sum(Expr::col(entity::Column::IsVideo)));
+    let face_expr = Expr::from(Func::sum(Expr::col(entity::Column::FaceCount)));
 
     let mut query = MessageLogs::find()
         .select_only()

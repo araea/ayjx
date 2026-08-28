@@ -40,14 +40,14 @@ pub async fn init() -> Result<DatabaseConnection, DbErr> {
 
     // 开启 WAL 模式 (Write-Ahead Logging) 以提高并发性能
     let backend = db.get_database_backend();
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "PRAGMA journal_mode=WAL;".to_owned(),
     ))
     .await?;
 
     // 关闭过于严格的安全检查 (Synchronous NORMAL 足够安全且快)
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "PRAGMA synchronous=NORMAL;".to_owned(),
     ))
@@ -56,7 +56,7 @@ pub async fn init() -> Result<DatabaseConnection, DbErr> {
     // 启用增量自动回收: 删除行后页面进入 freelist，配合每日 incremental_vacuum 回收，
     // 避免全量 VACUUM 需要约 2× 文件大小的临时空间和长时间锁库。
     // (首次从 NONE 切换会对现有库隐式执行一次 VACUUM，之后便为增量模式)
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         backend,
         "PRAGMA auto_vacuum=INCREMENTAL;".to_owned(),
     ))

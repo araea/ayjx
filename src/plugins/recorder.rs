@@ -117,7 +117,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         create_table_stmt.if_not_exists();
 
         let stmt = builder.build(&create_table_stmt);
-        if let Err(e) = db.execute(stmt).await {
+        if let Err(e) = db.execute_raw(stmt).await {
             warn!(target: "Plugin/Recorder", "Init table error (ignore if exists): {}", e);
         }
 
@@ -155,7 +155,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         for idx in indexes {
             let stmt = builder.build(&idx);
-            let _ = db.execute(stmt).await;
+            let _ = db.execute_raw(stmt).await;
         }
 
         // 3. 初始化统计聚合表（建表；若有历史数据则一次性回填，否则自愈近 7 天）
@@ -201,7 +201,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 // message_user_stats_daily) 中对应日期的聚合行保留——历史统计
                 // （如"去年消息数"）在原始数据过期后依然可查。
                 let delete_sql = format!("DELETE FROM message_records WHERE time < {}", timestamp);
-                let res = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, delete_sql)).await;
+                let res = db.execute_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, delete_sql)).await;
 
                 match res {
                     Ok(exec_res) => {
@@ -211,7 +211,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                             // 增量回收 freelist 页(依赖 db.rs 的 auto_vacuum=INCREMENTAL)，
                             // 避免全量 VACUUM 需要约 2× 文件大小的临时空间且长时间锁库。
                             info!(target: "Plugin/Recorder", "正在增量回收数据库空间 (incremental_vacuum)...");
-                            if let Err(e) = db.execute(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "PRAGMA incremental_vacuum;".to_owned())).await {
+                            if let Err(e) = db.execute_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "PRAGMA incremental_vacuum;".to_owned())).await {
                                 warn!(target: "Plugin/Recorder", "incremental_vacuum 执行失败: {}", e);
                             } else {
                                 info!(target: "Plugin/Recorder", "数据库空间回收完成。");
@@ -376,7 +376,12 @@ pub fn handle(
             if !raw_text_for_tokens.is_empty() {
                 let tokens = tokio::task::spawn_blocking(move || {
                     let jieba = get_jieba();
-                    jieba.cut(&raw_text_for_tokens, false).join(" ")
+                    jieba
+                        .cut(&raw_text_for_tokens, false)
+                        .into_iter()
+                        .map(|t| t.word)
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 })
                 .await
                 .unwrap_or_default();
