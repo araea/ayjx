@@ -69,7 +69,7 @@ pub struct StatsConfig {
     #[serde(default = "default_weekly_recap_time")]
     pub weekly_recap_time: String,
 
-    // —— 每周日 21:00 周末轻松榜（表情/类型） ——
+    // —— 每周日 21:00 周末轻松榜（表情包） ——
     #[serde(default = "default_true")]
     pub weekend_fun_enabled: bool,
     #[serde(default = "default_weekend_fun_time")]

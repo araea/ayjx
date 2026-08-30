@@ -80,7 +80,7 @@ const SETTINGS: &[SettingSpec] = &[
     s("stats", "morning_recap_enabled", "早安回顾推送", "每天 09:00 推送昨日回顾", Kind::Bool, "true"),
     s("stats", "noon_brief_enabled", "午间速览推送", "每天 12:30 推送上午速览", Kind::Bool, "true"),
     s("stats", "weekly_recap_enabled", "上周回顾推送", "每周一推送上周回顾", Kind::Bool, "true"),
-    s("stats", "weekend_fun_enabled", "周末轻松榜推送", "每周日推送本周表情/类型榜", Kind::Bool, "true"),
+    s("stats", "weekend_fun_enabled", "周末轻松榜推送", "每周日推送本周表情包榜", Kind::Bool, "true"),
     s("stats", "monthly_recap_enabled", "月度回顾推送", "每月 1 日推送上月回顾", Kind::Bool, "true"),
     // AI 资讯推送
     s("ai_news", "limit", "资讯推送条数", "单次推送最多展示的资讯条数", Kind::Int, "8"),
