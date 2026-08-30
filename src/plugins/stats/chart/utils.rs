@@ -201,6 +201,92 @@ pub fn mix_with_white(color: RGBColor, opacity: f32) -> RGBColor {
     RGBColor(r, g, b)
 }
 
+/// 向白以外的底色混合：`opacity=1` 保留原色，`0` 变为 `base`。
+pub fn mix_with_color(color: RGBColor, base: RGBColor, opacity: f32) -> RGBColor {
+    let t = opacity.clamp(0.0, 1.0);
+    let r = (color.0 as f32 * t + base.0 as f32 * (1.0 - t)) as u8;
+    let g = (color.1 as f32 * t + base.1 as f32 * (1.0 - t)) as u8;
+    let b = (color.2 as f32 * t + base.2 as f32 * (1.0 - t)) as u8;
+    RGBColor(r, g, b)
+}
+
+/// 用矩形 + 四角圆近似填充圆角矩形（plotters 无原生圆角）。
+pub fn draw_rounded_rect<DB: DrawingBackend>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    radius: i32,
+    color: RGBColor,
+) -> Result<(), String> {
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(());
+    }
+    let max_r = ((x1 - x0).min(y1 - y0) / 2).max(0);
+    let r = radius.clamp(0, max_r);
+
+    if r == 0 {
+        root.draw(&Rectangle::new([(x0, y0), (x1, y1)], color.filled()))
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    root.draw(&Rectangle::new(
+        [(x0 + r, y0), (x1 - r, y1)],
+        color.filled(),
+    ))
+    .map_err(|e| e.to_string())?;
+    root.draw(&Rectangle::new(
+        [(x0, y0 + r), (x1, y1 - r)],
+        color.filled(),
+    ))
+    .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x0 + r, y0 + r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x1 - r, y0 + r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x0 + r, y1 - r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x1 - r, y1 - r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 左侧色条：左上/左下圆角，右侧平切，贴在圆角卡片内沿。
+pub fn draw_left_accent_bar<DB: DrawingBackend>(
+    root: &DrawingArea<DB, plotters::coord::Shift>,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    radius: i32,
+    color: RGBColor,
+) -> Result<(), String> {
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(());
+    }
+    let max_r = ((x1 - x0).min(y1 - y0) / 2).max(0);
+    let r = radius.clamp(0, max_r);
+
+    if r == 0 {
+        root.draw(&Rectangle::new([(x0, y0), (x1, y1)], color.filled()))
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // 主体：右侧平齐，不画右圆角
+    root.draw(&Rectangle::new([(x0 + r, y0), (x1, y1)], color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Rectangle::new([(x0, y0 + r), (x0 + r, y1 - r)], color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x0 + r, y0 + r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    root.draw(&Circle::new((x0 + r, y1 - r), r, color.filled()))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn save_rgba_to_base64(img: RgbaImage) -> Result<String, String> {
     let dynamic_image = DynamicImage::ImageRgba8(img);
     let mut cursor = std::io::Cursor::new(Vec::new());

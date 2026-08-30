@@ -2,8 +2,9 @@ use std::collections::HashMap;
 
 use super::data_loader::{BarData, SeriesData};
 use super::utils::{
-    ColorScheme, get_contrast_color, get_font, get_font_family, get_font_with_color,
-    mix_with_white, overlay_image, save_rgba_to_base64, truncate_text_to_fit,
+    ColorScheme, draw_left_accent_bar, draw_rounded_rect, get_contrast_color, get_font,
+    get_font_family, get_font_with_color, mix_with_white, overlay_image, save_rgba_to_base64,
+    truncate_text_to_fit,
 };
 use crate::plugins::stats::StatsConfig;
 use chrono::Local;
@@ -279,6 +280,230 @@ pub fn draw_bar_chart(
             let y_pos = top_area_height as i32 + (i as u32 * row_height) as i32;
             let x_pos = padding as i32;
             overlay_image(&mut rgba_image, avatar, x_pos, y_pos);
+        }
+    }
+
+    save_rgba_to_base64(rgba_image)
+}
+
+/// 消息类型排行榜：竖排信息卡（色条 + 圆角色块图标 + 名称/数量/占比 + 进度条）。
+/// 与发言/表情包的头像条形榜区分开，避免复用同一套「满色横条塞字」版式。
+pub fn draw_message_type_ranking(
+    config: &StatsConfig,
+    title: &str,
+    data: Vec<BarData>,
+) -> Result<String, String> {
+    if data.is_empty() {
+        return Err("暂无数据".to_string());
+    }
+
+    let s = 2u32;
+    let page_bg = RGBColor(248, 250, 252);
+    let card_border = RGBColor(226, 232, 240);
+    let text_primary = RGBColor(15, 23, 42);
+    let text_secondary = RGBColor(100, 116, 139);
+
+    let padding = 28 * s;
+    let card_gap = 16 * s;
+    let card_h = 100 * s;
+    let card_radius = 20 * s;
+    let accent_w = 10 * s;
+    let icon_size = 48 * s;
+    let icon_radius = 14 * s;
+    let inner_pad = 18 * s;
+    let progress_h = 6 * s;
+    let progress_radius = 3 * s;
+
+    let header_font_size = 20 * s;
+    let title_font_size = 32 * s;
+    let name_font_size = 28 * s;
+    let value_font_size = 32 * s;
+    let pct_font_size = 20 * s;
+    let header_margin = 10 * s;
+    let title_margin = 24 * s;
+    let top_area =
+        padding + header_font_size + header_margin + title_font_size + title_margin;
+
+    let canvas_width = 720 * s;
+    let canvas_height = top_area
+        + data.len() as u32 * card_h
+        + data.len().saturating_sub(1) as u32 * card_gap
+        + padding;
+
+    let total_val: i64 = data.iter().map(|d| d.value).sum();
+    let max_val = data.iter().map(|d| d.value).max().unwrap_or(1).max(1);
+
+    let font_family = get_font_family(config);
+    let name_font = (font_family, name_font_size).into_font();
+    let value_font = (font_family, value_font_size).into_font();
+    let pct_font = (font_family, pct_font_size).into_font();
+
+    let mut buffer = vec![0u8; (canvas_width * canvas_height * 3) as usize];
+    {
+        let root = BitMapBackend::with_buffer(&mut buffer, (canvas_width, canvas_height))
+            .into_drawing_area();
+        root.fill(&page_bg).map_err(|e| e.to_string())?;
+
+        let now_str = Local::now().format("%Y-%m-%d %H:%M").to_string();
+        let header_style = get_font_with_color(config, header_font_size, &text_secondary)
+            .pos(Pos::new(HPos::Center, VPos::Top));
+        root.draw_text(
+            &now_str,
+            &header_style,
+            (canvas_width as i32 / 2, padding as i32),
+        )
+        .map_err(|e| e.to_string())?;
+
+        let title_y = padding + header_font_size + header_margin;
+        let title_style = get_font_with_color(config, title_font_size, &text_primary)
+            .pos(Pos::new(HPos::Center, VPos::Top));
+        root.draw_text(title, &title_style, (canvas_width as i32 / 2, title_y as i32))
+            .map_err(|e| e.to_string())?;
+
+        let card_x0 = padding as i32;
+        let card_x1 = (canvas_width - padding) as i32;
+
+        for (i, item) in data.iter().enumerate() {
+            let y0 = (top_area + i as u32 * (card_h + card_gap)) as i32;
+            let y1 = y0 + card_h as i32;
+            let inner_x0 = card_x0 + (2 * s as i32);
+            let inner_y0 = y0 + (2 * s as i32);
+            let inner_x1 = card_x1 - (2 * s as i32);
+            let inner_y1 = y1 - (2 * s as i32);
+            let inner_r = (card_radius - 2 * s) as i32;
+            let accent = item.theme_color;
+            let wash = mix_with_white(accent, 0.07);
+
+            // 描边底 + 淡色卡面，类型色微染增强层次
+            draw_rounded_rect(
+                &root, card_x0, y0, card_x1, y1, card_radius as i32, card_border,
+            )?;
+            draw_rounded_rect(
+                &root, inner_x0, inner_y0, inner_x1, inner_y1, inner_r, wash,
+            )?;
+
+            // 左侧类型色条：仅左上/左下圆角，右侧平切
+            let ax0 = inner_x0;
+            let ax1 = ax0 + accent_w as i32;
+            draw_left_accent_bar(&root, ax0, inner_y0, ax1, inner_y1, inner_r, accent)?;
+
+            // 圆角色块图标（饱和底 + 对比色字）
+            let icon_x0 = ax1 + inner_pad as i32;
+            let icon_y0 = inner_y0 + (16 * s as i32);
+            let icon_x1 = icon_x0 + icon_size as i32;
+            let icon_y1 = icon_y0 + icon_size as i32;
+            let icon_fill = mix_with_white(accent, 0.90);
+            draw_rounded_rect(
+                &root,
+                icon_x0,
+                icon_y0,
+                icon_x1,
+                icon_y1,
+                icon_radius as i32,
+                icon_fill,
+            )?;
+            if let Some(icon_char) = item.icon_char.as_deref() {
+                let icon_fg = get_contrast_color(icon_fill);
+                let icon_style = get_font_with_color(config, 26 * s, &icon_fg)
+                    .pos(Pos::new(HPos::Center, VPos::Center));
+                root.draw_text(
+                    icon_char,
+                    &icon_style,
+                    (
+                        icon_x0 + (icon_size / 2) as i32,
+                        icon_y0 + (icon_size / 2) as i32 + (2 * s as i32),
+                    ),
+                )
+                .map_err(|e| e.to_string())?;
+            }
+
+            // 右侧：数量在上、占比在下
+            let pct = if total_val > 0 {
+                item.value as f64 / total_val as f64 * 100.0
+            } else {
+                0.0
+            };
+            let pct_text = if pct > 0.0 && pct < 1.0 {
+                format!("{:.1}%", pct)
+            } else {
+                format!("{:.0}%", pct)
+            };
+            let value_text = item.value.to_string();
+
+            let (vw, _) = value_font.box_size(&value_text).unwrap_or((0, 0));
+            let (pw, _) = pct_font.box_size(&pct_text).unwrap_or((0, 0));
+            let right_pad = inner_pad as i32;
+            let stats_right = inner_x1 - right_pad;
+            let stats_width = vw.max(pw);
+            let stats_left = stats_right - stats_width as i32;
+
+            let value_style = get_font_with_color(config, value_font_size, &text_primary)
+                .pos(Pos::new(HPos::Right, VPos::Center));
+            let pct_style = get_font_with_color(config, pct_font_size, &text_secondary)
+                .pos(Pos::new(HPos::Right, VPos::Center));
+            let value_y = icon_y0 + (18 * s as i32);
+            let pct_y = value_y + (28 * s as i32);
+            root.draw_text(&value_text, &value_style, (stats_right, value_y))
+                .map_err(|e| e.to_string())?;
+            root.draw_text(&pct_text, &pct_style, (stats_right, pct_y))
+                .map_err(|e| e.to_string())?;
+
+            // 类型名（图标与数值之间）
+            let name_x = icon_x1 + (14 * s as i32);
+            let name_max_w = (stats_left - name_x - (16 * s as i32)).max(0) as u32;
+            let display_name = truncate_text_to_fit(&name_font, &item.label, name_max_w);
+            let name_style = get_font_with_color(config, name_font_size, &text_primary)
+                .pos(Pos::new(HPos::Left, VPos::Center));
+            let name_y = icon_y0 + (icon_size / 2) as i32 + (2 * s as i32);
+            if !display_name.is_empty() {
+                root.draw_text(&display_name, &name_style, (name_x, name_y))
+                    .map_err(|e| e.to_string())?;
+            }
+
+            // 底部进度条：更细，长度相对第一名
+            let bar_x0 = icon_x0;
+            let bar_x1 = stats_right;
+            let bar_y1 = inner_y1 - (14 * s as i32);
+            let bar_y0 = bar_y1 - progress_h as i32;
+            let track = mix_with_white(accent, 0.12);
+            draw_rounded_rect(
+                &root,
+                bar_x0,
+                bar_y0,
+                bar_x1,
+                bar_y1,
+                progress_radius as i32,
+                track,
+            )?;
+
+            let ratio = item.value as f64 / max_val as f64;
+            let fill_w = ((bar_x1 - bar_x0) as f64 * ratio).round() as i32;
+            if fill_w > 0 {
+                let fill_x1 = (bar_x0 + fill_w).max(bar_x0 + progress_radius as i32);
+                draw_rounded_rect(
+                    &root,
+                    bar_x0,
+                    bar_y0,
+                    fill_x1.min(bar_x1),
+                    bar_y1,
+                    progress_radius as i32,
+                    accent,
+                )?;
+            }
+        }
+
+        root.present().map_err(|e| e.to_string())?;
+    }
+
+    let mut rgba_image = RgbaImage::new(canvas_width, canvas_height);
+    for y in 0..canvas_height {
+        for x in 0..canvas_width {
+            let idx = ((y * canvas_width + x) * 3) as usize;
+            rgba_image.put_pixel(
+                x,
+                y,
+                Rgba([buffer[idx], buffer[idx + 1], buffer[idx + 2], 255]),
+            );
         }
     }
 

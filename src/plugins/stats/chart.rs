@@ -9,7 +9,7 @@ use crate::plugins::stats::{StatsConfig, default_config};
 
 use self::avatar::prepare_avatars;
 use self::data_loader::{BarData, SeriesData, fetch_bar_data, fetch_line_data};
-use self::renderer::{draw_bar_chart, draw_line_chart};
+use self::renderer::{draw_bar_chart, draw_line_chart, draw_message_type_ranking};
 
 /// Guard against plotters panics when font glyphs are missing (e.g. CJK text with Latin-only font).
 fn draw_with_font_panic_guard<F>(config: &StatsConfig, f: F) -> Result<String, String>
@@ -83,8 +83,12 @@ pub async fn generate(
     // 3. 准备头像
     prepare_avatars(&mut bar_data).await;
 
-    // 4. 绘图
+    // 4. 绘图：消息类型用竖排信息卡，其余沿用头像条形榜
     draw_with_font_panic_guard(&config, || {
-        draw_bar_chart(&config, title, bar_data)
+        if data_type == "消息类型" {
+            draw_message_type_ranking(&config, title, bar_data)
+        } else {
+            draw_bar_chart(&config, title, bar_data)
+        }
     })
 }
