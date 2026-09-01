@@ -1,4 +1,4 @@
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::plugins::{PluginError, get_data_dir};
@@ -47,7 +47,7 @@ pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 // 提取纯文本内容，自动忽略头部的 At 和 Reply 消息段
 fn extract_clean_text(ctx: &Context) -> Option<String> {
     let event = match &ctx.event {
-        crate::event::EventType::Onebot(e) => e,
+        crate::event::EventType::Satori(e) => e,
         _ => return None,
     };
 

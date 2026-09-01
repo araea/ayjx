@@ -8,7 +8,7 @@
 //! 插件名与键均支持中文显示名或英文标识符。修改即时持久化到 config.toml，
 //! 但定时任务类配置（如重启时间）需重启后生效。
 
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;

@@ -1,4 +1,4 @@
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
@@ -35,14 +35,14 @@ pub fn handle(
         });
 
         match &ctx.event {
-            EventType::Onebot(ev) => {
+            EventType::Satori(ev) => {
                 if config.debug {
                     debug!(target: "Logger", "ev: {:?}", ev);
                 }
 
                 if let Some(msg) = ctx.as_message() {
                     let content = format_message(ev.get("message"));
-                    // 尝试获取群名 (部分 OneBot 实现或扩展字段，同 recorder 插件逻辑)
+                    // 尝试获取规范化事件携带的群名（同 recorder 插件逻辑）
                     let group_name = ev.get_str("group_name");
                     let sender = format!("{}({})", msg.sender_name(), msg.user_id());
 
@@ -77,7 +77,7 @@ pub fn handle(
                 if config.debug {
                     debug!(target: "Logger", "packet: {:?}", packet);
                 }
-                if packet.action == "send_msg" {
+                if packet.action == "message.create" {
                     let params = &packet.params;
                     let msg_type = params.get_str("message_type").unwrap_or("unknown");
                     let content = format_message(params.get("message"));
@@ -139,7 +139,7 @@ pub fn handle(
     })
 }
 
-/// 将 OneBot 消息链转换为人类可读的字符串
+/// 将内部消息链转换为人类可读的字符串
 fn format_message(msg_val: Option<&OwnedValue>) -> String {
     use std::fmt::Write as _;
 

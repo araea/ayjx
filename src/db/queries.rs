@@ -115,10 +115,7 @@ pub struct MessageTypeStats {
 ///
 /// `tmpl` 接收片段的 (start, end) 时间戳，返回一段完整的
 /// `UNION ALL SELECT ... FROM message_records WHERE time >= ? AND time < ? ...` 子查询。
-fn partial_union_subqueries(
-    partials: &[(i64, i64)],
-    tmpl: impl Fn(i64, i64) -> String,
-) -> String {
+fn partial_union_subqueries(partials: &[(i64, i64)], tmpl: impl Fn(i64, i64) -> String) -> String {
     partials
         .iter()
         .map(|(s, e)| tmpl(*s, *e))
@@ -190,12 +187,9 @@ pub async fn get_user_ranking(
            {partials} \
          ) GROUP BY user_id ORDER BY count DESC LIMIT {n}"
     );
-    UserRanking::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await
+    UserRanking::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
 }
 
 /// 获取群组活跃排行
@@ -227,12 +221,9 @@ pub async fn get_group_ranking(
            {partials} \
          ) GROUP BY group_id ORDER BY count DESC LIMIT {n}"
     );
-    GroupRanking::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await
+    GroupRanking::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
 }
 
 /// 获取用户参与的群组排行 ("我的...排行")
@@ -269,12 +260,9 @@ pub async fn get_user_group_participation_ranking(
            {partials} \
          ) GROUP BY group_id ORDER BY count DESC LIMIT {n}"
     );
-    GroupRanking::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await
+    GroupRanking::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
 }
 
 /// 获取用户表情包使用量排行
@@ -310,12 +298,9 @@ pub async fn get_user_emoji_ranking(
            {partials} \
          ) GROUP BY user_id ORDER BY count DESC LIMIT {n}"
     );
-    UserRanking::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await
+    UserRanking::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+        .all(db)
+        .await
 }
 
 /// 获取每日消息量走势 (总)
@@ -347,12 +332,10 @@ pub async fn get_daily_trend(
          WHERE stat_date >= '{from}' AND stat_date <= '{to}'{g} \
          GROUP BY stat_date ORDER BY stat_date"
     );
-    let rows: Vec<DailyTrend> = DailyTrend::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await?;
+    let rows: Vec<DailyTrend> =
+        DailyTrend::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+            .all(db)
+            .await?;
     for r in rows {
         merged.insert(r.date, r.count);
     }
@@ -400,12 +383,10 @@ pub async fn get_daily_trend_by_group(
          WHERE group_id != 0 AND stat_date >= '{from}' AND stat_date <= '{to}' \
          ORDER BY stat_date"
     );
-    let rows: Vec<GroupTrend> = GroupTrend::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .all(db)
-    .await?;
+    let rows: Vec<GroupTrend> =
+        GroupTrend::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+            .all(db)
+            .await?;
     for r in rows {
         merged.insert((r.group_name, r.date), r.count);
     }
@@ -466,12 +447,9 @@ pub async fn get_message_type_trend(
          GROUP BY stat_date ORDER BY stat_date"
     );
     let rows: Vec<MessageTypeTrend> =
-        MessageTypeTrend::find_by_statement(Statement::from_string(
-            db.get_database_backend(),
-            sql,
-        ))
-        .all(db)
-        .await?;
+        MessageTypeTrend::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+            .all(db)
+            .await?;
     for r in rows {
         merged.insert(
             r.date.clone(),
@@ -581,20 +559,18 @@ pub async fn get_message_type_stats(
          FROM message_stats_daily \
          WHERE stat_date >= '{from}' AND stat_date <= '{to}'{g}"
     );
-    let mut result = MessageTypeStats::find_by_statement(Statement::from_string(
-        db.get_database_backend(),
-        sql,
-    ))
-    .one(db)
-    .await?
-    .unwrap_or(MessageTypeStats {
-        text: 0,
-        image: 0,
-        voice: 0,
-        video: 0,
-        anim_emoji: 0,
-        face: 0,
-    });
+    let mut result =
+        MessageTypeStats::find_by_statement(Statement::from_string(db.get_database_backend(), sql))
+            .one(db)
+            .await?
+            .unwrap_or(MessageTypeStats {
+                text: 0,
+                image: 0,
+                voice: 0,
+                video: 0,
+                anim_emoji: 0,
+                face: 0,
+            });
 
     for (s, e) in &sr.partials {
         let p = raw_message_type_stats(db, group_id, None, *s, *e).await?;

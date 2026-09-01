@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::adapters::onebot::{LockedWriter, send_frame_raw};
+use crate::adapters::satori::{LockedWriter, dispatch_packet};
 use crate::event::{BotStatus, Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
@@ -238,10 +238,9 @@ pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginErr
 
     // 注意：ctx.event 现在是 EventType，可以直接 match 引用
     match &ctx.event {
-        EventType::Onebot(_) => {}
+        EventType::Satori(_) => {}
         EventType::BeforeSend(packet) => {
-            let json_str = simd_json::to_string(&packet)?;
-            send_frame_raw(writer, json_str).await?;
+            dispatch_packet(&ctx, writer, packet).await?;
         }
         EventType::Init => {}
     }
@@ -258,7 +257,7 @@ pub async fn send_fake_event(
     event: Event,
 ) -> Result<(), PluginError> {
     let new_ctx = Context {
-        event: EventType::Onebot(event),
+        event: EventType::Satori(event),
         config: ctx.config.clone(),
         config_save_lock: ctx.config_save_lock.clone(),
         db: ctx.db.clone(),

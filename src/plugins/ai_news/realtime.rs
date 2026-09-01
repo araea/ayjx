@@ -36,7 +36,7 @@ use super::api::{self, Item};
 use super::pusher;
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET, load_config, parse_time};
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::satori::LockedWriter;
 use crate::event::Context;
 use chrono::{Local, NaiveTime, Utc};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};

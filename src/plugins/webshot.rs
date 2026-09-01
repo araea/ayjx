@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
@@ -184,7 +184,7 @@ pub fn handle(
         }
 
         // 提取 URL
-        let url_candidate = if let crate::event::EventType::Onebot(event) = &ctx.event {
+        let url_candidate = if let crate::event::EventType::Satori(event) = &ctx.event {
             if let Some(arr) = event.get_array("message") {
                 arr.iter()
                     .filter(|seg| seg.get_str("type") == Some("text"))

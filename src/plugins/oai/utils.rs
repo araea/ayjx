@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api};
+use crate::adapters::satori::{LockedWriter, api};
 use crate::event::Context;
 use cdp_html_shot::{Browser, CaptureOptions, Viewport};
 use pulldown_cmark::{Options, Parser, html};
@@ -229,12 +229,12 @@ pub async fn get_full_content(
     let mut quote_text = String::new();
     let mut imgs = Vec::new();
 
-    let onebot_event = match &ctx.event {
-        crate::event::EventType::Onebot(e) => e,
+    let event = match &ctx.event {
+        crate::event::EventType::Satori(e) => e,
         _ => return (quote_text, imgs),
     };
 
-    let message_arr = match onebot_event.get_array("message") {
+    let message_arr = match event.get_array("message") {
         Some(arr) => arr,
         None => return (quote_text, imgs),
     };
@@ -250,7 +250,7 @@ pub async fn get_full_content(
             None => data.get_i64("id").map(|i| i.to_string()),
         };
         if let Some(id_str) = id_str_opt
-            && let Ok(id) = id_str.parse::<i32>()
+            && let Ok(id) = id_str.parse::<i64>()
             && let Ok(ret) = api::get_msg(ctx, writer.clone(), id).await
         {
             let mut temp_text = String::new();

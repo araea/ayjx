@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use tokio::sync::Mutex as AsyncMutex;
 
 pub mod console;
-pub mod onebot;
+pub mod satori;
 
 /// 适配器处理函数签名
 pub type AdapterHandler = fn(
@@ -20,7 +20,7 @@ pub type AdapterHandler = fn(
 
 /// 适配器定义
 pub struct Adapter {
-    /// 协议名称 (如 "onebot")，在配置文件中通过 protocol 字段指定
+    /// 协议名称 (如 "satori")，在配置文件中通过 protocol 字段指定
     pub protocol: &'static str,
     /// 启动处理函数
     pub handler: AdapterHandler,
@@ -32,10 +32,10 @@ static ADAPTERS: OnceLock<Vec<Adapter>> = OnceLock::new();
 pub fn get_adapters() -> &'static [Adapter] {
     ADAPTERS.get_or_init(|| {
         vec![
-            // 注册 OneBot 适配器
+            // 注册 Satori 适配器
             Adapter {
-                protocol: "onebot",
-                handler: onebot::entry,
+                protocol: "satori",
+                handler: satori::entry,
             },
             // 注册控制台适配器 (用于测试)
             Adapter {

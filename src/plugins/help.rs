@@ -12,7 +12,7 @@
 
 mod card;
 
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::{get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;

@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api};
+use crate::adapters::satori::{LockedWriter, api};
 use crate::event::Context;
 use regex::Regex;
 use simd_json::OwnedValue;
@@ -30,10 +30,7 @@ pub async fn get_image_url(
     // 2. 检查引用消息
     if let Some(rid_str) = reply_id {
         // 尝试解析 ID
-        let rid = rid_str
-            .parse::<i32>()
-            .ok()
-            .or_else(|| rid_str.parse::<i64>().map(|v| v as i32).ok())?;
+        let rid = rid_str.parse::<i64>().ok()?;
 
         // 调用 API 获取原消息
         if let Ok(resp) = api::get_msg(ctx, writer, rid).await {

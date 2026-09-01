@@ -1,5 +1,5 @@
-use crate::adapters::onebot::LockedWriter;
-use crate::adapters::onebot::api;
+use crate::adapters::satori::LockedWriter;
+use crate::adapters::satori::api;
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
@@ -38,7 +38,7 @@ pub fn handle(
             let user_id = msg.user_id();
 
             // 2. 获取 Bot 自身的 ID (self_id)
-            let self_id = if let EventType::Onebot(ev) = &ctx.event {
+            let self_id = if let EventType::Satori(ev) = &ctx.event {
                 ev.get_i64("self_id")
                     .or_else(|| ev.get_u64("self_id").map(|v| v as i64))
                     .unwrap_or(0)
@@ -47,7 +47,7 @@ pub fn handle(
             };
 
             // 3. 检查 Bot 是否为群主
-            // 只有群主才有权限设置群头衔 (OneBot 标准行为)
+            // 只有群主才有权限设置群头衔
             let bot_info =
                 match api::get_group_member_info(&ctx, writer.clone(), group_id, self_id, true)
                     .await

@@ -62,7 +62,7 @@
 //! （https://aihot.virxact.com/terms）。接口返回的标题、摘要等属外部内容，
 //! 本插件只作展示，不参与任何指令解析。
 
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::{get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;

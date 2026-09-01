@@ -13,7 +13,7 @@
 //! 1. **写入**：recorder 在消息入库的**同一事务**内 UPSERT 当日聚合行（计数 +1、分类计数累加），
 //!    两者要么同时成功要么同时回滚，不存在中间态；
 //! 2. **删除**：项目中对 message_records 的唯一删除路径是 recorder 每日保留期批量清理
-//!    （无逐条删除接口；消息撤回走 OneBot API，不删除本地记录）。聚合行**不随原始数据删除**，
+//!    （无逐条删除接口；消息撤回走 Satori API，不删除本地记录）。聚合行**不随原始数据删除**，
 //!    历史统计（如"去年消息数"）在原始消息过期后依然可查；
 //! 3. **自愈**：每日 4:00 清理任务开始前、以及每次进程启动时，重建近 7 天的聚合行，
 //!    修复异常场景（手工改库、旧版本数据、时钟回拨）导致的漂移。
@@ -163,7 +163,11 @@ pub async fn self_heal_recent(db: &DatabaseConnection) -> Result<(), DbErr> {
 /// 重建 [from, to] 闭区间内的聚合行（返回重建的天数）。
 /// 只重建原始数据仍完整覆盖的日期：保留期之外的聚合行是"冻结的历史"，
 /// 原始消息已删除，不能被重建，也不能被误删。
-async fn rebuild_range(db: &DatabaseConnection, from: NaiveDate, to: NaiveDate) -> Result<i64, DbErr> {
+async fn rebuild_range(
+    db: &DatabaseConnection,
+    from: NaiveDate,
+    to: NaiveDate,
+) -> Result<i64, DbErr> {
     let raw_rows = scalar_i64(db, "SELECT COUNT(*) AS c FROM message_records").await?;
     if raw_rows == 0 {
         return Ok(0);
@@ -196,7 +200,9 @@ async fn rebuild_range(db: &DatabaseConnection, from: NaiveDate, to: NaiveDate) 
     .await?;
     db.execute_raw(Statement::from_string(
         backend,
-        format!("DELETE FROM message_user_stats_daily WHERE stat_date >= '{f}' AND stat_date <= '{t}'"),
+        format!(
+            "DELETE FROM message_user_stats_daily WHERE stat_date >= '{f}' AND stat_date <= '{t}'"
+        ),
     ))
     .await?;
 
@@ -340,7 +346,10 @@ pub struct SplitRange {
 
 pub fn split_range(start: i64, end: i64) -> SplitRange {
     if end <= start {
-        return SplitRange { full_days: None, partials: Vec::new() };
+        return SplitRange {
+            full_days: None,
+            partials: Vec::new(),
+        };
     }
 
     let d0 = date_of_ts(start);
@@ -348,7 +357,11 @@ pub fn split_range(start: i64, end: i64) -> SplitRange {
     let m0 = midnight_of(d0);
 
     // start >= m0 恒成立；相等表示起点恰为零点，首日完整
-    let full_from = if start <= m0 { d0 } else { d0 + Duration::days(1) };
+    let full_from = if start <= m0 {
+        d0
+    } else {
+        d0 + Duration::days(1)
+    };
     // end 为右开边界；末日 d1 完整当且仅当 end 不早于次日零点
     let full_to = if end >= midnight_of(d1) + 86_400 {
         d1
@@ -358,7 +371,10 @@ pub fn split_range(start: i64, end: i64) -> SplitRange {
 
     if full_from > full_to {
         // 区间不足两个零点边界（如"今日"），整体回退原始表
-        return SplitRange { full_days: None, partials: vec![(start, end)] };
+        return SplitRange {
+            full_days: None,
+            partials: vec![(start, end)],
+        };
     }
 
     let mut partials = Vec::new();

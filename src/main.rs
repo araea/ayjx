@@ -155,30 +155,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     for bot_conf in app_config.bots {
         // 1. 检查是否启用
         if !bot_conf.enabled {
-            if bot_conf.protocol == "onebot" {
-                info!(
-                    "Bot (OneBot) 已禁用。若需启用请在配置文件中设置 enabled = true 并填写 access_token。"
-                );
+            if bot_conf.protocol == "satori" {
+                info!("Bot (Satori) 已禁用。若需启用请在配置文件中设置 enabled = true。");
             }
             continue;
         }
 
-        // 针对 OneBot 的特殊检查
-        if bot_conf.protocol == "onebot" {
-            let url = match &bot_conf.url {
+        // Satori 实现端地址为必填；token 可留空（取决于实现端配置）
+        if bot_conf.protocol == "satori" {
+            match &bot_conf.url {
                 Some(u) if !u.is_empty() => u,
                 _ => {
-                    error!("Bot 配置错误: OneBot 协议必须指定 url");
+                    error!("Bot 配置错误: Satori 协议必须指定 url");
                     continue;
                 }
             };
-
-            let token = bot_conf.access_token.as_deref().unwrap_or("");
-            // 检查 Token 是否为空或占位符
-            if token.trim().is_empty() || token == "YOUR_TOKEN_HERE" {
-                warn!("Bot [{}] 未配置有效的 access_token，跳过连接。", url);
-                continue;
-            }
         }
 
         let adapter = if let Some(a) = adapters::find_adapter(&bot_conf.protocol) {

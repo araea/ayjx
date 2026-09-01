@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::adapters::onebot::{LockedWriter, api};
+use crate::adapters::satori::{LockedWriter, api};
 use crate::event::Context;
 use chrono::{DateTime, Datelike, Local, TimeZone, Weekday};
 use rand::RngExt;

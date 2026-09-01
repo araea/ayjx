@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -129,7 +129,7 @@ pub fn handle(
                     let reply_id = matched
                         .reply_id
                         .as_deref()
-                        .and_then(|s| s.parse::<i32>().ok());
+                        .and_then(|s| s.parse::<i64>().ok());
 
                     if let Some(rid) = reply_id
                         && let Ok(reply_msg) = api::get_msg(&ctx, writer.clone(), rid).await

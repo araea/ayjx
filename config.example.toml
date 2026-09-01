@@ -1,0 +1,18 @@
+command_prefix = ["/"]
+
+[global_filter]
+enable_blacklist = false
+blacklist = []
+enable_whitelist = false
+whitelist = []
+
+[[bots]]
+enabled = false
+protocol = "console"
+
+[[bots]]
+enabled = true
+protocol = "satori"
+url = "http://127.0.0.1:3001"
+# 留空表示不鉴权；也可设置环境变量 AYJX_SATORI_TOKEN（优先级更高）。
+access_token = ""

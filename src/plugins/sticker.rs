@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -44,11 +44,7 @@ pub fn handle(
             if let Some(matched) = match_command(&ctx, cmd) {
                 // 必须通过引用回复
                 let reply_id = match matched.reply_id {
-                    Some(id_str) => id_str
-                        .parse::<i32>()
-                        .ok()
-                        .or_else(|| id_str.parse::<i64>().map(|v| v as i32).ok())
-                        .unwrap_or(0),
+                    Some(id_str) => id_str.parse::<i64>().unwrap_or(0),
                     None => {
                         let _ = send_msg(
                             &ctx,
@@ -109,8 +105,7 @@ pub fn handle(
                             .await;
 
                             if RECALL_AFTER_SAVE && msg.is_group() {
-                                let _ =
-                                    api::delete_msg(&ctx, writer, msg.message_id() as i32).await;
+                                let _ = api::delete_msg(&ctx, writer, msg.message_id()).await;
                             }
                         }
                     }

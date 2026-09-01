@@ -23,10 +23,11 @@ md5 = "0.8"
 base64 = "0.23"
 
 # 网络与 HTTP
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "charset", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "charset", "json", "multipart"] }
 http = "1.4"
 url = "2.5"
 tokio-tungstenite = "0.30"  # WebSocket
+quick-xml = "0.38"           # Satori 消息元素解析
 async-openai = { version = "0.41", features = ["_api", "model", "chat-completion-types", "chat-completion"] }  # OpenAI API
 
 # 异步运行时与工具

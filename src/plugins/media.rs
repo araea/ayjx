@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -82,37 +82,36 @@ async fn handle_to_url(
 
     // 2. 检查引用消息
     if let Some(reply_id_str) = matched.reply_id
-        && let Ok(reply_id) = reply_id_str.parse::<i32>()
-            && let Ok(res) = api::get_msg(&ctx, writer.clone(), reply_id).await {
-                for seg in res.message.0 {
-                    let type_ = seg.type_.as_str();
-                    if type_ == "image" {
-                        if let Some(url) = seg.data.get("url").and_then(|v| v.as_str()) {
-                            let reply = Message::new()
-                                .reply(msg.message_id())
-                                .text(format!("🔗 已提取图片：\n{}", url));
-                            send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply)
-                                .await?;
-                            return Ok(None);
-                        }
-                    } else if type_ == "video" {
-                        let url_opt = seg
-                            .data
-                            .get("url")
-                            .or_else(|| seg.data.get("file"))
-                            .and_then(|v| v.as_str());
+        && let Ok(reply_id) = reply_id_str.parse::<i64>()
+        && let Ok(res) = api::get_msg(&ctx, writer.clone(), reply_id).await
+    {
+        for seg in res.message.0 {
+            let type_ = seg.type_.as_str();
+            if type_ == "image" {
+                if let Some(url) = seg.data.get("url").and_then(|v| v.as_str()) {
+                    let reply = Message::new()
+                        .reply(msg.message_id())
+                        .text(format!("🔗 已提取图片：\n{}", url));
+                    send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
+                    return Ok(None);
+                }
+            } else if type_ == "video" {
+                let url_opt = seg
+                    .data
+                    .get("url")
+                    .or_else(|| seg.data.get("file"))
+                    .and_then(|v| v.as_str());
 
-                        if let Some(url) = url_opt {
-                            let reply = Message::new()
-                                .reply(msg.message_id())
-                                .text(format!("🔗 已提取视频：\n{}", url));
-                            send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply)
-                                .await?;
-                            return Ok(None);
-                        }
-                    }
+                if let Some(url) = url_opt {
+                    let reply = Message::new()
+                        .reply(msg.message_id())
+                        .text(format!("🔗 已提取视频：\n{}", url));
+                    send_msg(&ctx, writer, msg.group_id(), Some(msg.user_id()), reply).await?;
+                    return Ok(None);
                 }
             }
+        }
+    }
 
     send_msg(
         &ctx,
@@ -138,9 +137,10 @@ fn find_media_in_segments(segments: &[OwnedValue]) -> Option<(String, String)> {
                 return Some((url.to_string(), "图片".to_string()));
             }
         } else if type_ == "video"
-            && let Some(url) = data.and_then(|d| d.get_str("url").or(d.get_str("file"))) {
-                return Some((url.to_string(), "视频".to_string()));
-            }
+            && let Some(url) = data.and_then(|d| d.get_str("url").or(d.get_str("file")))
+        {
+            return Some((url.to_string(), "视频".to_string()));
+        }
     }
     None
 }
@@ -159,26 +159,29 @@ async fn handle_to_media(
     for seg in &matched.args {
         if seg.get_str("type") == Some("text")
             && let Some(text) = seg.get("data").and_then(|d| d.get_str("text"))
-                && let Some(m) = regex.find(text) {
-                    target_url = Some(m.as_str().to_string());
-                    break;
-                }
+            && let Some(m) = regex.find(text)
+        {
+            target_url = Some(m.as_str().to_string());
+            break;
+        }
     }
 
     // 2. 如果参数没有 URL，尝试从引用消息的文本中提取
     if target_url.is_none()
         && let Some(reply_id_str) = matched.reply_id
-            && let Ok(reply_id) = reply_id_str.parse::<i32>()
-                && let Ok(res) = api::get_msg(&ctx, writer.clone(), reply_id).await {
-                    for seg in &res.message.0 {
-                        if seg.type_ == "text"
-                            && let Some(text) = seg.data.get("text").and_then(|v| v.as_str())
-                                && let Some(m) = regex.find(text) {
-                                    target_url = Some(m.as_str().to_string());
-                                    break;
-                                }
-                    }
-                }
+        && let Ok(reply_id) = reply_id_str.parse::<i64>()
+        && let Ok(res) = api::get_msg(&ctx, writer.clone(), reply_id).await
+    {
+        for seg in &res.message.0 {
+            if seg.type_ == "text"
+                && let Some(text) = seg.data.get("text").and_then(|v| v.as_str())
+                && let Some(m) = regex.find(text)
+            {
+                target_url = Some(m.as_str().to_string());
+                break;
+            }
+        }
+    }
 
     if let Some(url) = target_url {
         // 判断是否发送为视频

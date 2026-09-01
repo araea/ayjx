@@ -8,7 +8,7 @@ use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET};
-use crate::adapters::onebot::{LockedWriter, send_msg, send_msg_ack};
+use crate::adapters::satori::{LockedWriter, send_msg, send_msg_ack};
 use crate::event::Context;
 use crate::message::Message;
 use rand::RngExt;
@@ -114,7 +114,7 @@ pub fn build_message(
 
 /// 先图后文地投递一次推送：卡片图负责好看，随后的合并转发负责链接与检索。
 ///
-/// 「先图后文」是真的先后——图片发出后等 OneBot 回执再发文本，
+/// 「先图后文」是真的先后——图片的 Satori HTTP 调用完成后再发文本，
 /// 不靠运气赌两条消息的落地顺序。
 ///
 /// 返回「对方是否收到了内容」——两条都没发出去才算失败，

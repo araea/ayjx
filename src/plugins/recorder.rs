@@ -1,4 +1,4 @@
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
@@ -252,7 +252,7 @@ pub fn handle(
 
         let should_insert = match &ctx.event {
             // === 接收消息 ===
-            EventType::Onebot(ev) => {
+            EventType::Satori(ev) => {
                 let post_type = ev.get_str("post_type").unwrap_or("");
                 if post_type != "message" {
                     return Ok(Some(ctx));

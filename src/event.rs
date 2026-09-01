@@ -47,9 +47,9 @@ pub struct Context {
 }
 
 impl Context {
-    /// 尝试将当前事件视为 OneBot 消息事件
+    /// 尝试将当前事件视为规范化后的 Satori 消息事件
     pub fn as_message(&self) -> Option<MessageEvent<'_>> {
-        if let EventType::Onebot(event) = &self.event {
+        if let EventType::Satori(event) = &self.event {
             let view = GeneralEventView(event);
             if view.post_type() == Some("message") {
                 return Some(MessageEvent(event));
@@ -58,9 +58,9 @@ impl Context {
         None
     }
 
-    /// 获取事件的 Post Type (如果是 OneBot 事件)
+    /// 获取规范化事件的 post_type
     pub fn post_type(&self) -> Option<&str> {
-        if let EventType::Onebot(event) = &self.event {
+        if let EventType::Satori(event) = &self.event {
             GeneralEventView(event).post_type()
         } else {
             None
@@ -158,8 +158,8 @@ impl<'a> MessageEvent<'a> {
 /// 事件类型
 #[derive(Debug, Clone)]
 pub enum EventType {
-    /// 来自 OneBot 的原始事件
-    Onebot(Event),
+    /// 来自 Satori 的规范化事件
+    Satori(Event),
     /// 插件准备发送消息前的拦截事件
     BeforeSend(SendPacket),
     /// 系统初始化事件 (用于插件 on_init 生命周期)
@@ -171,9 +171,6 @@ pub enum EventType {
 pub struct SendPacket {
     pub action: String,
     pub params: OwnedValue,
-    /// 需要等待 OneBot 回执时携带的标记；普通发送不带，保持即发即忘
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub echo: Option<String>,
     /// 原始触发事件（不参与序列化发送给 Bot）
     #[serde(skip)]
     pub original_event: Option<Event>,

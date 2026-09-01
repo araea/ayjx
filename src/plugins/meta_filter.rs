@@ -1,4 +1,4 @@
-use crate::adapters::onebot::LockedWriter;
+use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::plugins::PluginError;

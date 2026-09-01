@@ -1,10 +1,10 @@
 //! 主动推送任务集合：按"引言 → 关键数字 → 主榜 → 走势 → 副榜 → 词云"的顺序串行渲染。
 //! 每种推送配套独立的时机（早/午/晚/周/月），由 `on_connected` 注册到调度器。
 //!
-//! 每条消息都等 OneBot 回执再发下一条：图片要先上传，即发即忘的话
+//! 每条消息都等 Satori HTTP 回执再发下一条：图片要先上传，即发即忘的话
 //! 后一张小图会抢在前一张大图前面落地，群里看到的顺序就乱了。
 
-use crate::adapters::onebot::{LockedWriter, send_msg_ack};
+use crate::adapters::satori::{LockedWriter, send_msg_ack};
 use crate::db::queries;
 use crate::db::utils::get_time_range;
 use crate::event::Context;

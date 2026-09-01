@@ -2,7 +2,7 @@ use super::data::Manager;
 use super::parser::{Action, Command, Scope};
 use super::types::{Agent, ChatMessage};
 use super::utils::{escape_markdown_special, format_export_txt, format_history, render_md};
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
 use async_openai::{
@@ -218,14 +218,7 @@ async fn chat(
         return;
     }
 
-    let _ = api::set_msg_emoji_like(
-        ctx,
-        writer.clone(),
-        event.message_id().try_into().unwrap(),
-        124,
-        true,
-    )
-    .await;
+    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
 
     let mut hist = if temp_mode {
         Vec::new()
@@ -289,16 +282,15 @@ async fn chat(
         None
     };
 
-    if !force_user_role_for_system
-        && let Some(sp) = pending_sys_prompt.take() {
-            msgs.push(
-                ChatCompletionRequestSystemMessageArgs::default()
-                    .content(sp)
-                    .build()
-                    .unwrap()
-                    .into(),
-            );
-        }
+    if !force_user_role_for_system && let Some(sp) = pending_sys_prompt.take() {
+        msgs.push(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(sp)
+                .build()
+                .unwrap()
+                .into(),
+        );
+    }
 
     let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
     for m in &hist {

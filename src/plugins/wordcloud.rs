@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::get_prefixes;
 use crate::db::queries::get_text_corpus;
 use crate::db::utils::get_time_range;

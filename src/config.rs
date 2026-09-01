@@ -55,17 +55,17 @@ fn default_bots() -> Vec<BotConfig> {
     vec![
         // 控制台适配器：保持简洁，仅需启用
         BotConfig {
-            enabled: true,
+            enabled: false,
             protocol: "console".to_string(),
             url: None,
             access_token: None,
         },
-        // OneBot 适配器：生成配置占位符，默认禁用以防误连
+        // Satori 适配器：默认连接本机 satori-qq
         BotConfig {
-            enabled: false,
-            protocol: "onebot".to_string(),
-            url: Some("ws://127.0.0.1:3001".to_string()),
-            access_token: Some("YOUR_TOKEN_HERE".to_string()),
+            enabled: true,
+            protocol: "satori".to_string(),
+            url: Some("http://127.0.0.1:3001".to_string()),
+            access_token: None,
         },
     ]
 }
@@ -76,7 +76,7 @@ pub struct BotConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    // 协议类型 (例如 "onebot")
+    // 协议类型 (例如 "satori")
     #[serde(default = "default_protocol")]
     pub protocol: String,
 
@@ -92,7 +92,7 @@ fn default_true() -> bool {
 }
 
 fn default_protocol() -> String {
-    "onebot".to_string()
+    "satori".to_string()
 }
 
 impl Default for AppConfig {

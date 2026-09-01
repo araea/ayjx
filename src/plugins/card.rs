@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, api, send_msg};
+use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
@@ -56,10 +56,7 @@ async fn get_image_url(
 
     // 2. 检查引用回复
     if let Some(rid_str) = reply_id {
-        let rid = rid_str
-            .parse::<i32>()
-            .ok()
-            .or_else(|| rid_str.parse::<i64>().map(|v| v as i32).ok())?;
+        let rid = rid_str.parse::<i64>().ok()?;
 
         if let Ok(res) = api::get_msg(ctx, writer, rid).await {
             for seg in res.message.0 {

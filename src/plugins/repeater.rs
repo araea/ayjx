@@ -1,4 +1,4 @@
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::config::build_config;
 use crate::event::{Context, EventType};
 use crate::plugins::{PluginError, get_config};
@@ -93,7 +93,7 @@ pub fn handle(
     Box::pin(async move {
         let config: RepeaterConfig = get_config(&ctx, "repeater").unwrap_or_default();
 
-        // === 场景 A: 接收到新消息 (OneBot Message) ===
+        // === 场景 A: 接收到 Satori 消息 ===
         if let Some(msg) = ctx.as_message() {
             let channel_id = if let Some(gid) = msg.group_id() {
                 gid.to_string()
@@ -103,7 +103,7 @@ pub fn handle(
                 return Ok(Some(ctx));
             };
 
-            let content = if let EventType::Onebot(ev) = &ctx.event {
+            let content = if let EventType::Satori(ev) = &ctx.event {
                 ev.get("message")
                     .cloned()
                     .unwrap_or_else(|| OwnedValue::from(Vec::<OwnedValue>::new()))

@@ -3,7 +3,7 @@
 //! 解决长时间运行导致缓存累积、云服务器内存被撑爆的问题。
 //! 重启流程:先拉起新进程(失败则放弃、保证服务连续性) → 保存配置 → 关闭数据库 → 销毁浏览器 → 退出旧进程。
 
-use crate::adapters::onebot::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::match_command;
 use crate::config::build_config;
 use crate::event::Context;
