@@ -51,6 +51,14 @@ impl SatoriClient {
         }
     }
 
+    pub fn connection_key(&self) -> &str {
+        if self.console {
+            "console"
+        } else {
+            &self.endpoint
+        }
+    }
+
     pub async fn call<P, R>(&self, ctx: &Context, method: &str, params: P) -> Result<R, BotError>
     where
         P: Serialize,
@@ -558,7 +566,14 @@ fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
     let channel = body.get("channel").unwrap_or(&Value::Null);
     let user = body.get("user").unwrap_or(&Value::Null);
     let member = body.get("member").unwrap_or(&Value::Null);
-    let group_id = parse_id(guild.get("id"));
+    let guild_id = parse_id(guild.get("id"));
+    let group_id = if guild_id != 0 {
+        guild_id
+    } else if channel.get("type").and_then(Value::as_i64) == Some(0) {
+        parse_id(channel.get("id"))
+    } else {
+        0
+    };
     let mut user_id = parse_id(user.get("id"));
     if user_id == 0 {
         user_id = body
@@ -589,14 +604,16 @@ fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
         out["post_type"] = json!("message");
         out["message_type"] = json!(if group { "group" } else { "private" });
         out["sub_type"] = json!(if group { "normal" } else { "friend" });
-        out["group_id"] = json!(group_id);
-        out["group_name"] = json!(
-            guild
-                .get("name")
-                .or_else(|| channel.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or("")
-        );
+        if group {
+            out["group_id"] = json!(group_id);
+            out["group_name"] = json!(
+                guild
+                    .get("name")
+                    .or_else(|| channel.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            );
+        }
         out["user_id"] = json!(user_id);
         out["message_id"] = json!(message_id);
         out["message_id_str"] = json!(message_id_str);
@@ -629,13 +646,38 @@ fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
             }
             _ => ("satori", "", "", ""),
         };
+        // 禁言与解禁共用 guild-member-updated，靠 _data.duration 区分；实现端给的是毫秒。
+        let ban_duration = body
+            .pointer("/_data/duration")
+            .and_then(value_id)
+            .map(|value| value / 1000);
+        let sub_type = match (notice_type, ban_duration) {
+            ("group_ban", Some(0)) => "lift_ban",
+            _ => sub_type,
+        };
         out["post_type"] = json!(post_type);
         out["notice_type"] = json!(notice_type);
         out["request_type"] = json!(request_type);
         out["sub_type"] = json!(sub_type);
-        out["group_id"] = json!(group_id);
+        if group_id != 0 {
+            out["group_id"] = json!(group_id);
+        }
         out["user_id"] = json!(user_id);
-        out["message_id"] = json!(parse_id(body.pointer("/message/id")));
+        // 申请类事件的 message.id 是审批 flag（非数字），只能按字符串保留。
+        let message_id_str = raw_id(body.pointer("/message/id"));
+        out["message_id"] = json!(message_id_str.parse::<i64>().unwrap_or_default());
+        out["message_id_str"] = json!(message_id_str);
+        if post_type == "request" {
+            out["flag"] = json!(message_id_str);
+            out["comment"] = json!(
+                body.pointer("/message/content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+            );
+        }
+        if let Some(duration) = ban_duration {
+            out["duration"] = json!(duration);
+        }
         out["operator_id"] = json!(parse_id(body.pointer("/operator/id")));
         if let Some(data) = body.get("_data") {
             out["satori_data"] = data.clone();
@@ -659,6 +701,17 @@ fn string_id(value: Option<&Value>) -> String {
         .and_then(value_id)
         .map(|value| value.to_string())
         .unwrap_or_default()
+}
+
+/// 原样保留实现端给的 ID：申请类事件的 `message.id` 是审批 flag，不是数字。
+fn raw_id(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) => value.clone(),
+        Some(value) => value_id(value)
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        None => String::new(),
+    }
 }
 
 fn parse_id(value: Option<&Value>) -> i64 {
@@ -703,5 +756,111 @@ mod tests {
             Some(7_000_000_000_000_000_000)
         );
         assert_eq!(normalized.get_str("raw_message"), Some("hi "));
+    }
+
+    #[test]
+    fn private_message_has_no_group_id() {
+        let bot = BotStatus {
+            adapter: "satori-qq".to_string(),
+            platform: "red".to_string(),
+            login_user: LoginUser {
+                id: "10000".to_string(),
+                ..Default::default()
+            },
+        };
+        let event = json!({
+            "type": "message-created",
+            "timestamp": 1_700_000_000_000i64,
+            "channel": {"id": "private:42", "type": 1},
+            "user": {"id": "42", "name": "Alice"},
+            "message": {"id": "7000000000000000000", "content": "hello"}
+        });
+        let normalized = normalize_event(&event, &bot).unwrap();
+        let ctx_group = normalized
+            .get_i64("group_id")
+            .or_else(|| normalized.get_u64("group_id").map(|value| value as i64));
+        assert_eq!(normalized.get_str("message_type"), Some("private"));
+        assert_eq!(ctx_group, None);
+    }
+
+    /// QQ 客户端手发的消息带虚拟作者 `qq-client:{uin}`，真实身份在 satori_qq 扩展里。
+    #[test]
+    fn manual_self_message_keeps_the_real_author() {
+        let bot = test_bot();
+        let event = json!({
+            "type": "message-created",
+            "timestamp": 1_700_000_000_000i64,
+            "guild": {"id": "123", "name": "test"},
+            "channel": {"id": "123", "type": 0},
+            "user": {"id": "qq-client:10000", "name": "我"},
+            "satori_qq": {"manual_self": true, "actual_user_id": "10000"},
+            "message": {"id": "7000000000000000000", "content": "自己发的"}
+        });
+        let normalized = normalize_event(&event, &bot).unwrap();
+        assert_eq!(normalized.get_i64("user_id"), Some(10000));
+        assert_eq!(normalized.get_i64("group_id"), Some(123));
+    }
+
+    /// 加群申请的 `message.id` 是审批 flag，不是数字 ID，必须原样留住。
+    #[test]
+    fn group_request_keeps_the_approval_flag() {
+        let bot = test_bot();
+        let event = json!({
+            "type": "guild-member-request",
+            "timestamp": 1_700_000_000_000i64,
+            "guild": {"id": "123"},
+            "channel": {"id": "123", "type": 0},
+            "user": {"id": "42"},
+            "message": {"id": "flag-abc123", "content": "求进群"}
+        });
+        let normalized = normalize_event(&event, &bot).unwrap();
+        assert_eq!(normalized.get_str("post_type"), Some("request"));
+        assert_eq!(normalized.get_str("flag"), Some("flag-abc123"));
+        assert_eq!(normalized.get_str("comment"), Some("求进群"));
+    }
+
+    /// 禁言与解禁共用一个 Satori 事件，靠毫秒 duration 区分。
+    #[test]
+    fn lift_ban_is_told_apart_from_ban() {
+        let bot = test_bot();
+        let mute = json!({
+            "type": "guild-member-updated",
+            "timestamp": 1_700_000_000_000i64,
+            "guild": {"id": "123"},
+            "channel": {"id": "123", "type": 0},
+            "user": {"id": "42"},
+            "operator": {"id": "7"},
+            "_type": "satori-qq/mute",
+            "_data": {"duration": 600_000}
+        });
+        let normalized = normalize_event(&mute, &bot).unwrap();
+        assert_eq!(normalized.get_str("notice_type"), Some("group_ban"));
+        assert_eq!(normalized.get_str("sub_type"), Some("ban"));
+        assert_eq!(normalized.get_i64("duration"), Some(600));
+
+        let lift = json!({
+            "type": "guild-member-updated",
+            "timestamp": 1_700_000_000_000i64,
+            "guild": {"id": "123"},
+            "channel": {"id": "123", "type": 0},
+            "user": {"id": "42"},
+            "operator": {"id": "7"},
+            "_type": "satori-qq/mute",
+            "_data": {"duration": 0}
+        });
+        let normalized = normalize_event(&lift, &bot).unwrap();
+        assert_eq!(normalized.get_str("sub_type"), Some("lift_ban"));
+        assert_eq!(normalized.get_i64("duration"), Some(0));
+    }
+
+    fn test_bot() -> BotStatus {
+        BotStatus {
+            adapter: "satori-qq".to_string(),
+            platform: "red".to_string(),
+            login_user: LoginUser {
+                id: "10000".to_string(),
+                ..Default::default()
+            },
+        }
     }
 }

@@ -406,16 +406,18 @@ pub fn handle(
             };
 
             // 消息插入 + 聚合 UPSERT 在同一事务内：要么同时生效，要么同时回滚
-            let insert_res = ctx.db.transaction(|txn| {
-                let record = record;
-                let delta = delta;
-                Box::pin(async move {
-                    record.insert(txn).await?;
-                    crate::db::stats::upsert_message_stats(txn, &delta).await?;
-                    Ok::<(), sea_orm::DbErr>(())
+            let insert_res = ctx
+                .db
+                .transaction(|txn| {
+                    let record = record;
+                    let delta = delta;
+                    Box::pin(async move {
+                        record.insert(txn).await?;
+                        crate::db::stats::upsert_message_stats(txn, &delta).await?;
+                        Ok::<(), sea_orm::DbErr>(())
+                    })
                 })
-            })
-            .await;
+                .await;
 
             if let Err(e) = insert_res {
                 error!(target: "Plugin/Recorder", "消息记录失败: {}", e);
@@ -521,6 +523,11 @@ fn parse_message_content(
                         face_count += 1;
                         rich_text.push_str("[表情]");
                     }
+                    "mface" => {
+                        image_count += 1;
+                        is_anim_emoji = true;
+                        rich_text.push_str("[动画表情]");
+                    }
                     "image" => {
                         image_count += 1;
                         // 检查是否为动画表情
@@ -597,4 +604,23 @@ fn parse_message_content(
     record.is_forward = Set(is_forward);
 
     (text_char_count as i32, joined_text)
+}
+
+#[cfg(test)]
+mod satori_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn market_face_is_recorded_as_animated_emoji() {
+        let message = simd_json::serde::to_owned_value(json!([
+            {"type": "mface", "data": {"emoji_id": "1", "summary": "商城表情"}}
+        ]))
+        .unwrap();
+        let mut record = <RecordActiveModel as Default>::default();
+        parse_message_content(Some(&message), &mut record);
+        assert_eq!(record.is_anim_emoji, Set(true));
+        assert_eq!(record.image_count, Set(1));
+        assert_eq!(record.content_rich, Set("[动画表情]".to_string()));
+    }
 }

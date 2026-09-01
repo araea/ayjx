@@ -185,6 +185,7 @@ fn format_message(msg_val: Option<&OwnedValue>) -> String {
                     result.push_str("] ");
                 }
                 "face" => result.push_str(" [表情] "),
+                "mface" => result.push_str(" [动画表情] "),
                 "image" => {
                     let is_anim = data
                         .map(|d| {

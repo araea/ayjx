@@ -5,8 +5,9 @@ use crate::event::{BotStatus, Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
 use serde::{Serialize, de::DeserializeOwned};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::fs;
 use toml::Value;
 
@@ -29,6 +30,15 @@ pub struct Plugin {
 }
 
 static PLUGINS: OnceLock<Vec<Plugin>> = OnceLock::new();
+static CONNECTED_BOTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn mark_connected(connection_key: String) -> bool {
+    CONNECTED_BOTS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(connection_key)
+}
 
 /// 插件注册宏
 macro_rules! register_plugins {
@@ -191,6 +201,26 @@ impl std::ops::Index<&str> for EnabledSet {
 
 /// 当 Bot 连接建立后触发（用于注册定时任务或主动操作）
 pub async fn do_connected(ctx: Context, writer: LockedWriter) -> Result<(), PluginError> {
+    // Satori 的 API 走 HTTP，不依赖事件 WS：重连后已注册的定时任务仍能照常发送。
+    // 因此同一登录只跑一次 connected，否则每次断线重连都会再叠一份推送任务。
+    let connection_key = format!(
+        "{}|{}|{}|{}",
+        writer.connection_key(),
+        ctx.bot.adapter,
+        ctx.bot.platform,
+        ctx.bot.login_user.id
+    );
+    if !mark_connected(connection_key) {
+        info!(
+            target: "System",
+            "Bot {}/{} ({}) 已完成 connected 生命周期，重连不重复注册任务。",
+            ctx.bot.adapter,
+            ctx.bot.platform,
+            ctx.bot.login_user.id
+        );
+        return Ok(());
+    }
+
     let plugins = get_plugins();
 
     // 一次性快照启用集合
@@ -321,4 +351,106 @@ where
     latest_config_snapshot.save(&ctx.config_path).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod satori_compat_tests {
+    use super::*;
+    use crate::adapters::satori::SatoriClient;
+    use crate::config::AppConfig;
+    use crate::event::{BotStatus, LoginUser};
+    use crate::scheduler::Scheduler;
+    use sea_orm::Database;
+    use serde_json::json;
+    use std::sync::RwLock;
+    use tokio::sync::Mutex as AsyncMutex;
+
+    /// 一条规范化 Satori 群消息必须能无副作用地走完全部 22 个插件。
+    #[tokio::test]
+    async fn every_plugin_accepts_a_normalized_satori_message() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        for plugin in get_plugins() {
+            config
+                .plugins
+                .insert(plugin.name.to_string(), (plugin.default_config)());
+        }
+        let config = Arc::new(RwLock::new(config));
+        let scheduler = Arc::new(Scheduler::new());
+        let matcher = Arc::new(Matcher::new());
+        let bot = Arc::new(BotStatus {
+            adapter: "satori-qq".to_string(),
+            platform: "red".to_string(),
+            login_user: LoginUser {
+                id: "10000".to_string(),
+                name: Some("AuditBot".to_string()),
+                ..Default::default()
+            },
+        });
+        let event = simd_json::serde::to_owned_value(json!({
+            "post_type": "message",
+            "satori_type": "message-created",
+            "message_type": "group",
+            "time": 1_700_000_000i64,
+            "self_id": 10000,
+            "group_id": 123,
+            "group_name": "兼容性测试群",
+            "user_id": 42,
+            "message_id": 7_000_000_000_000_000_000i64,
+            "message_id_str": "7000000000000000000",
+            "raw_message": "兼容性审计",
+            "sender": {"nickname": "Alice", "card": "A", "role": "member"},
+            "message": [
+                {"type": "text", "data": {"text": "兼容性审计"}},
+                {"type": "mface", "data": {"summary": "[动画表情]", "sub_type": "1"}}
+            ]
+        }))
+        .unwrap();
+        let ctx = Context {
+            event: EventType::Satori(event),
+            config,
+            config_save_lock: Arc::new(AsyncMutex::new(())),
+            db,
+            scheduler,
+            matcher,
+            config_path: Arc::from(
+                std::env::temp_dir()
+                    .join("ayjx-satori-plugin-audit.toml")
+                    .to_string_lossy()
+                    .as_ref(),
+            ),
+            bot,
+        };
+        recorder::init(ctx.clone()).await.unwrap();
+        let writer = Arc::new(SatoriClient::console());
+        run(ctx.clone(), writer.clone()).await.unwrap();
+
+        let private_event = simd_json::serde::to_owned_value(json!({
+            "post_type": "message",
+            "satori_type": "message-created",
+            "message_type": "private",
+            "time": 1_700_000_001i64,
+            "self_id": 10000,
+            "user_id": 42,
+            "message_id": 7_000_000_000_000_000_001i64,
+            "message_id_str": "7000000000000000001",
+            "raw_message": "私聊兼容性审计",
+            "sender": {"nickname": "Alice", "card": "", "role": "member"},
+            "message": [{"type": "text", "data": {"text": "私聊兼容性审计"}}]
+        }))
+        .unwrap();
+        let private_ctx = Context {
+            event: EventType::Satori(private_event),
+            ..ctx
+        };
+        assert!(private_ctx.as_message().unwrap().group_id().is_none());
+        run(private_ctx, writer).await.unwrap();
+    }
+
+    #[test]
+    fn reconnect_does_not_repeat_connected_lifecycle() {
+        let key = "satori-plugin-audit/reconnect".to_string();
+        assert!(mark_connected(key.clone()));
+        assert!(!mark_connected(key));
+    }
 }

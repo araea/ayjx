@@ -71,3 +71,5 @@ Satori/QQ NT 的消息 ID 可能超过 32 位范围，适配层和插件 API 均
 当前适配目标是本机 `satori-qq`，其默认配置为
 `http://127.0.0.1:3001`，平台名 `red`，适配器名 `satori-qq`。支持范围以
 该仓库的 `docs/SATORI_SUPPORT.md` 为准。
+
+全部插件的迁移后检查结果见 [插件兼容性审计](SATORI_PLUGIN_AUDIT.md)。
