@@ -30,6 +30,8 @@ pub struct SatoriClient {
     token: Option<String>,
     http: reqwest::Client,
     console: bool,
+    /// `READY` / `META` 下发的代理路由前缀，决定哪些平台链接要经 `/v1/proxy` 取。
+    proxy_urls: RwLock<Arc<Vec<String>>>,
 }
 
 impl SatoriClient {
@@ -39,6 +41,7 @@ impl SatoriClient {
             token: token.filter(|value| !value.trim().is_empty()),
             http: reqwest::Client::new(),
             console: false,
+            proxy_urls: RwLock::new(Arc::new(Vec::new())),
         }
     }
 
@@ -48,7 +51,20 @@ impl SatoriClient {
             token: None,
             http: reqwest::Client::new(),
             console: true,
+            proxy_urls: RwLock::new(Arc::new(Vec::new())),
         }
+    }
+
+    pub fn set_proxy_urls(&self, urls: Vec<String>) {
+        *self.proxy_urls.write().unwrap() = Arc::new(urls);
+    }
+
+    /// 解析消息元素里 `src` 的取件方式，交给 `message` 模块使用。
+    pub fn resources(&self) -> message::ResourceProxy {
+        message::ResourceProxy::new(
+            self.endpoint.clone(),
+            self.proxy_urls.read().unwrap().clone(),
+        )
     }
 
     pub fn connection_key(&self) -> &str {
@@ -179,6 +195,8 @@ pub async fn run_bot_loop(
 ) {
     let endpoint = bot_config.url.clone().unwrap_or_default();
     let mut backoff = Duration::from_secs(3);
+    // 最后一个收到的事件序列号。重连时带上它，实现端会补推断线期间的事件。
+    let mut session_sn: Option<i64> = None;
     loop {
         match connect_and_listen(
             &bot_config,
@@ -187,6 +205,7 @@ pub async fn run_bot_loop(
             scheduler.clone(),
             save_lock.clone(),
             config_path.clone(),
+            &mut session_sn,
         )
         .await
         {
@@ -202,6 +221,17 @@ pub async fn run_bot_loop(
     }
 }
 
+/// 协议规定应用每 10 秒发一次 `PING`，实现端回 `PONG`。
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+const OP_EVENT: i64 = 0;
+const OP_PING: i64 = 1;
+const OP_PONG: i64 = 2;
+const OP_IDENTIFY: i64 = 3;
+const OP_READY: i64 = 4;
+const OP_META: i64 = 5;
+
+#[allow(clippy::too_many_arguments)]
 async fn connect_and_listen(
     config: &BotConfig,
     global_config: Arc<RwLock<AppConfig>>,
@@ -209,6 +239,7 @@ async fn connect_and_listen(
     scheduler: Arc<Scheduler>,
     save_lock: Arc<AsyncMutex<()>>,
     config_path: Arc<str>,
+    session_sn: &mut Option<i64>,
 ) -> Result<(), BotError> {
     let endpoint = normalize_endpoint(config.url.as_deref().ok_or("Satori URL 未配置")?)?;
     let events_url = events_url(&endpoint)?;
@@ -216,22 +247,35 @@ async fn connect_and_listen(
     let (stream, _) = connect_async(request).await?;
     let (mut ws_write, mut ws_read) = stream.split();
 
+    // 出站帧统一走一条队列：心跳任务和事件循环都只是往队列里投递。
+    let (outbound, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let writer_task = tokio::spawn(async move {
+        while let Some(text) = outbound_rx.recv().await {
+            if ws_write.send(WsMessage::Text(text.into())).await.is_err() {
+                break;
+            }
+        }
+        let _ = ws_write.close().await;
+    });
+
     let token = effective_token(config);
-    let identify = if let Some(token) = token.as_deref() {
-        json!({"op": 3, "body": {"token": token}})
-    } else {
-        json!({"op": 3, "body": {}})
-    };
-    ws_write
-        .send(WsMessage::Text(identify.to_string().into()))
-        .await?;
+    let mut identify_body = json!({});
+    if let Some(token) = token.as_deref() {
+        identify_body["token"] = json!(token);
+    }
+    // 省略 sn 表示开新会话；带上 sn 则请求补推断线期间的事件。
+    if let Some(sn) = *session_sn {
+        identify_body["sn"] = json!(sn);
+        info!(target: "Bot", "Satori [{}] 尝试从 sn={} 恢复会话。", endpoint, sn);
+    }
+    outbound.send(json!({"op": OP_IDENTIFY, "body": identify_body}).to_string())?;
 
     let ready = tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(frame) = ws_read.next().await {
             let frame = frame?;
             if let WsMessage::Text(text) = frame {
                 let packet: Value = serde_json::from_str(&text)?;
-                if packet.get("op").and_then(Value::as_i64) == Some(4) {
+                if packet.get("op").and_then(Value::as_i64) == Some(OP_READY) {
                     return Ok::<Value, BotError>(packet);
                 }
             }
@@ -264,6 +308,7 @@ async fn connect_and_listen(
         },
     });
     let writer = Arc::new(SatoriClient::new(endpoint.clone(), token));
+    writer.set_proxy_urls(proxy_urls(&ready));
     let matcher = Arc::new(Matcher::new());
 
     info!(
@@ -287,6 +332,59 @@ async fn connect_and_listen(
     };
     plugins::do_connected(connected_ctx, writer.clone()).await?;
 
+    let heartbeat = tokio::spawn({
+        let outbound = outbound.clone();
+        async move {
+            let ping = json!({"op": OP_PING, "body": {}}).to_string();
+            loop {
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+                if outbound.send(ping.clone()).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let result = listen(
+        &mut ws_read,
+        &outbound,
+        &writer,
+        &bot_status,
+        &global_config,
+        &db,
+        &scheduler,
+        &save_lock,
+        &config_path,
+        &matcher,
+        session_sn,
+    )
+    .await;
+
+    heartbeat.abort();
+    drop(outbound);
+    let _ = writer_task.await;
+    result
+}
+
+/// 事件循环：`EVENT` 进插件流水线，`META` 刷新代理路由，`PING` 回 `PONG`。
+#[allow(clippy::too_many_arguments)]
+async fn listen(
+    ws_read: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    outbound: &tokio::sync::mpsc::UnboundedSender<String>,
+    writer: &LockedWriter,
+    bot_status: &Arc<BotStatus>,
+    global_config: &Arc<RwLock<AppConfig>>,
+    db: &DatabaseConnection,
+    scheduler: &Arc<Scheduler>,
+    save_lock: &Arc<AsyncMutex<()>>,
+    config_path: &Arc<str>,
+    matcher: &Arc<Matcher>,
+    session_sn: &mut Option<i64>,
+) -> Result<(), BotError> {
     while let Some(frame) = ws_read.next().await {
         match frame? {
             WsMessage::Text(text) => {
@@ -298,11 +396,14 @@ async fn connect_and_listen(
                     }
                 };
                 match packet.get("op").and_then(Value::as_i64) {
-                    Some(0) => {
+                    Some(OP_EVENT) => {
                         let Some(body) = packet.get("body") else {
                             continue;
                         };
-                        let event = match normalize_event(body, &bot_status) {
+                        if let Some(sn) = body.get("sn").and_then(Value::as_i64) {
+                            *session_sn = Some(sn);
+                        }
+                        let event = match normalize_event(body, bot_status, &writer.resources()) {
                             Ok(event) => event,
                             Err(err) => {
                                 warn!(target: "Bot", "Satori 事件转换失败: {}", err);
@@ -335,12 +436,14 @@ async fn connect_and_listen(
                             }
                         });
                     }
-                    Some(1) => {
-                        ws_write
-                            .send(WsMessage::Text(
-                                json!({"op": 2, "body": {}}).to_string().into(),
-                            ))
-                            .await?;
+                    // 协议里 PING 由应用发出，这里回 PONG 只是兼容反向心跳的实现端。
+                    Some(OP_PING) => {
+                        outbound.send(json!({"op": OP_PONG, "body": {}}).to_string())?;
+                    }
+                    Some(OP_META) => {
+                        if let Some(body) = packet.get("body") {
+                            writer.set_proxy_urls(proxy_urls(body));
+                        }
                     }
                     _ => {}
                 }
@@ -350,6 +453,22 @@ async fn connect_and_listen(
         }
     }
     Ok(())
+}
+
+/// `READY` 与 `META` 的 body 都带 `proxy_urls`，取值规则一致。
+fn proxy_urls(packet: &Value) -> Vec<String> {
+    packet
+        .pointer("/body/proxy_urls")
+        .or_else(|| packet.get("proxy_urls"))
+        .and_then(Value::as_array)
+        .map(|urls| {
+            urls.iter()
+                .filter_map(Value::as_str)
+                .filter(|url| !url.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn effective_token(config: &BotConfig) -> Option<String> {
@@ -555,7 +674,11 @@ pub async fn dispatch_packet(
     Ok(())
 }
 
-fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
+fn normalize_event(
+    body: &Value,
+    bot: &BotStatus,
+    proxy: &message::ResourceProxy,
+) -> Result<Event, BotError> {
     let event_type = body.get("type").and_then(Value::as_str).unwrap_or("");
     let timestamp = body
         .get("timestamp")
@@ -581,9 +704,17 @@ fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
             .and_then(value_id)
             .unwrap_or_default();
     }
+    // 协议规定每个事件都自带 login 资源，多登录场景下它才是这条事件的归属账号；
+    // 缺失时退回 READY 时记录的登录号。
+    let self_id = parse_id(body.pointer("/login/user/id"));
+    let self_id = if self_id != 0 {
+        self_id
+    } else {
+        bot.login_user.id.parse::<i64>().unwrap_or_default()
+    };
     let mut out = json!({
         "time": timestamp,
-        "self_id": bot.login_user.id.parse::<i64>().unwrap_or_default(),
+        "self_id": self_id,
         "satori_type": event_type,
         "_satori": body,
     });
@@ -591,7 +722,7 @@ fn normalize_event(body: &Value, bot: &BotStatus) -> Result<Event, BotError> {
     if event_type == "message-created" {
         let message = body.get("message").unwrap_or(&Value::Null);
         let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-        let chain = message::from_content(content);
+        let chain = message::from_content_with(content, proxy);
         let raw_message = chain
             .0
             .iter()
@@ -748,7 +879,7 @@ mod tests {
             "member": {"nick": "A", "roles": [{"id": "admin"}]},
             "message": {"id": "7000000000000000000", "content": "hi <at id=\"7\"/>"}
         });
-        let normalized = normalize_event(&event, &bot).unwrap();
+        let normalized = normalize_event(&event, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_str("post_type"), Some("message"));
         assert_eq!(normalized.get_i64("group_id"), Some(123));
         assert_eq!(
@@ -775,7 +906,7 @@ mod tests {
             "user": {"id": "42", "name": "Alice"},
             "message": {"id": "7000000000000000000", "content": "hello"}
         });
-        let normalized = normalize_event(&event, &bot).unwrap();
+        let normalized = normalize_event(&event, &bot, &Default::default()).unwrap();
         let ctx_group = normalized
             .get_i64("group_id")
             .or_else(|| normalized.get_u64("group_id").map(|value| value as i64));
@@ -796,7 +927,7 @@ mod tests {
             "satori_qq": {"manual_self": true, "actual_user_id": "10000"},
             "message": {"id": "7000000000000000000", "content": "自己发的"}
         });
-        let normalized = normalize_event(&event, &bot).unwrap();
+        let normalized = normalize_event(&event, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_i64("user_id"), Some(10000));
         assert_eq!(normalized.get_i64("group_id"), Some(123));
     }
@@ -813,7 +944,7 @@ mod tests {
             "user": {"id": "42"},
             "message": {"id": "flag-abc123", "content": "求进群"}
         });
-        let normalized = normalize_event(&event, &bot).unwrap();
+        let normalized = normalize_event(&event, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_str("post_type"), Some("request"));
         assert_eq!(normalized.get_str("flag"), Some("flag-abc123"));
         assert_eq!(normalized.get_str("comment"), Some("求进群"));
@@ -833,7 +964,7 @@ mod tests {
             "_type": "satori-qq/mute",
             "_data": {"duration": 600_000}
         });
-        let normalized = normalize_event(&mute, &bot).unwrap();
+        let normalized = normalize_event(&mute, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_str("notice_type"), Some("group_ban"));
         assert_eq!(normalized.get_str("sub_type"), Some("ban"));
         assert_eq!(normalized.get_i64("duration"), Some(600));
@@ -848,7 +979,7 @@ mod tests {
             "_type": "satori-qq/mute",
             "_data": {"duration": 0}
         });
-        let normalized = normalize_event(&lift, &bot).unwrap();
+        let normalized = normalize_event(&lift, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_str("sub_type"), Some("lift_ban"));
         assert_eq!(normalized.get_i64("duration"), Some(0));
     }

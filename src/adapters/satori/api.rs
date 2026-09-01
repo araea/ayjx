@@ -80,6 +80,7 @@ pub async fn get_msg(
             json!({"channel_id": channel_id(ctx)?, "message_id": message_id.to_string()}),
         )
         .await?;
+    let resources = writer.resources();
     let channel = value.get("channel").unwrap_or(&Value::Null);
     let user = value.get("user").unwrap_or(&Value::Null);
     let member = value.get("member").unwrap_or(&Value::Null);
@@ -106,7 +107,10 @@ pub async fn get_msg(
             card: optional_string(member.get("nick")).or_else(|| optional_string(user.get("nick"))),
             other: Default::default(),
         },
-        message: message::from_content(value.get("content").and_then(Value::as_str).unwrap_or("")),
+        message: message::from_content_with(
+            value.get("content").and_then(Value::as_str).unwrap_or(""),
+            &resources,
+        ),
     })
 }
 
@@ -123,12 +127,15 @@ pub async fn get_forward_msg(
     let value: Value = writer
         .call(ctx, "internal/get_forward", json!({"id": id}))
         .await?;
+    let resources = writer.resources();
     let mut chain = Message::new();
     if let Some(items) = value.get("data").and_then(Value::as_array) {
         for item in items {
             let user = item.get("user").unwrap_or(&Value::Null);
-            let content =
-                message::from_content(item.get("content").and_then(Value::as_str).unwrap_or(""));
+            let content = message::from_content_with(
+                item.get("content").and_then(Value::as_str).unwrap_or(""),
+                &resources,
+            );
             chain = chain.node_custom(
                 item.get("user")
                     .and_then(|user| user.get("id"))
@@ -297,30 +304,50 @@ pub struct GroupInfo {
     pub max_member_count: Option<i32>,
 }
 
+/// `guild.list` 是标准分页列表：跟着 `next` 令牌翻到底，否则群多时会漏群。
 pub async fn get_group_list(
     ctx: &Context,
     writer: LockedWriter,
     _no_cache: bool,
 ) -> Result<Vec<GroupInfo>, ApiError> {
-    let value: Value = writer.call(ctx, "guild.list", json!({})).await?;
-    Ok(value
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|guild| {
-            Some(GroupInfo {
-                group_id: guild.get("id").and_then(value_id)?,
-                group_name: guild
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                member_count: None,
-                max_member_count: None,
-            })
-        })
-        .collect())
+    const MAX_PAGES: usize = 64;
+    let mut out = Vec::new();
+    let mut next: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let params = match &next {
+            Some(cursor) => json!({"next": cursor}),
+            None => json!({}),
+        };
+        let value: Value = writer.call(ctx, "guild.list", params).await?;
+        out.extend(
+            value
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|guild| {
+                    Some(GroupInfo {
+                        group_id: guild.get("id").and_then(value_id)?,
+                        group_name: guild
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        member_count: None,
+                        max_member_count: None,
+                    })
+                }),
+        );
+        next = value
+            .get("next")
+            .and_then(Value::as_str)
+            .filter(|cursor| !cursor.is_empty())
+            .map(str::to_owned);
+        if next.is_none() {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 pub async fn upload_file(

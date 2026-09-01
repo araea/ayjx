@@ -5,7 +5,7 @@ use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsObject, ValueAsScalar};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use simd_json::owned::Object;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Default)]
 struct Element {
@@ -15,8 +15,64 @@ struct Element {
     text: String,
 }
 
-/// 将 Satori 元素串转为框架内部的消息段。
-pub fn from_content(content: &str) -> Message {
+/// 按 Satori 的[资源链接](https://satori.js.org/zh-CN/advanced/resource.html)规范，
+/// 把元素里的 `src` 解析成插件可以直接 GET 的地址。
+///
+/// `internal:` 链接和 `proxy_urls` 命中的平台链接都要走实现端的 `/v1/proxy/{url}`
+/// 路由——前者应用侧根本取不到，后者可能有防盗链或时效。该路由不需要鉴权头。
+#[derive(Clone, Default)]
+pub struct ResourceProxy {
+    endpoint: String,
+    proxy_urls: Arc<Vec<String>>,
+}
+
+impl ResourceProxy {
+    pub fn new(endpoint: String, proxy_urls: Arc<Vec<String>>) -> Self {
+        Self {
+            endpoint,
+            proxy_urls,
+        }
+    }
+
+    /// 返回可直接下载的 URL；`data:`、`file:` 和本地路径没有下载地址，返回 `None`。
+    fn fetchable(&self, src: &str) -> Option<String> {
+        let direct = src.starts_with("http://") || src.starts_with("https://");
+        let proxied = src.starts_with("internal:")
+            || (direct
+                && self
+                    .proxy_urls
+                    .iter()
+                    .any(|prefix| src.starts_with(prefix.as_str())));
+        if proxied && !self.endpoint.is_empty() {
+            return Some(format!(
+                "{}/v1/proxy/{}",
+                self.endpoint,
+                encode_proxy_url(src)
+            ));
+        }
+        direct.then(|| src.to_string())
+    }
+}
+
+/// 代理路由把 URL 直接拼在路径里，只转义会破坏路径解析的字符。
+/// `internal:` 链接不含这些字符，因此始终保持原样。
+fn encode_proxy_url(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for ch in src.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '+' => out.push_str("%2B"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            ' ' => out.push_str("%20"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// 将 Satori 元素串转为框架内部的消息段，按实现端下发的代理路由解析资源地址。
+pub fn from_content_with(content: &str, proxy: &ResourceProxy) -> Message {
     let normalized = normalize_boolean_attrs(content);
     let mut reader = Reader::from_str(&normalized);
     reader.config_mut().trim_text(false);
@@ -81,7 +137,7 @@ pub fn from_content(content: &str) -> Message {
 
     let mut out = Message::new();
     for root in roots {
-        append_element(&mut out, root);
+        append_element(&mut out, root, proxy);
     }
     out
 }
@@ -169,7 +225,7 @@ fn attr(element: &Element, key: &str) -> String {
         .to_string()
 }
 
-fn append_element(out: &mut Message, element: Element) {
+fn append_element(out: &mut Message, element: Element, proxy: &ResourceProxy) {
     let mut data = Object::new();
     match element.name.as_str() {
         "text" => push(out, "text", "text", element.text),
@@ -227,10 +283,10 @@ fn append_element(out: &mut Message, element: Element) {
             push(out, "reply", "id", id);
         }
         "face" | "emoji" => push(out, "face", "id", attr(&element, "id")),
-        "img" | "image" => resource(out, "image", element),
-        "audio" | "record" => resource(out, "record", element),
-        "video" => resource(out, "video", element),
-        "file" => resource(out, "file", element),
+        "img" | "image" => resource(out, "image", element, proxy),
+        "audio" | "record" => resource(out, "record", element, proxy),
+        "video" => resource(out, "video", element, proxy),
+        "file" => resource(out, "file", element, proxy),
         "json" => {
             let value = if attr(&element, "data").is_empty() {
                 joined_text(&element)
@@ -261,13 +317,13 @@ fn append_element(out: &mut Message, element: Element) {
         }
         "br" => push(out, "text", "text", "\n".to_string()),
         "p" => {
-            append_children(out, element.children);
+            append_children(out, element.children, proxy);
             push(out, "text", "text", "\n".to_string());
         }
         "a" => {
             let href = attr(&element, "href");
             let label = joined_text(&element);
-            append_children(out, element.children);
+            append_children(out, element.children, proxy);
             if !href.is_empty() && href != label {
                 let suffix = if label.is_empty() {
                     href
@@ -293,7 +349,7 @@ fn append_element(out: &mut Message, element: Element) {
                             node.insert("user_id".into(), OwnedValue::from(attr(&part, "id")));
                             node.insert("nickname".into(), OwnedValue::from(attr(&part, "name")));
                         } else {
-                            append_element(&mut body, part);
+                            append_element(&mut body, part, proxy);
                         }
                     }
                     node.insert(
@@ -308,7 +364,7 @@ fn append_element(out: &mut Message, element: Element) {
             if !element.text.is_empty() {
                 push(out, "text", "text", element.text);
             }
-            append_children(out, element.children);
+            append_children(out, element.children, proxy);
         }
     }
 }
@@ -321,9 +377,9 @@ fn joined_text(element: &Element) -> String {
     text
 }
 
-fn append_children(out: &mut Message, children: Vec<Element>) {
+fn append_children(out: &mut Message, children: Vec<Element>, proxy: &ResourceProxy) {
     for child in children {
-        append_element(out, child);
+        append_element(out, child, proxy);
     }
 }
 
@@ -333,13 +389,13 @@ fn push(out: &mut Message, kind: &str, key: &str, value: String) {
     out.0.push(Segment::new(kind, data));
 }
 
-fn resource(out: &mut Message, kind: &str, element: Element) {
+fn resource(out: &mut Message, kind: &str, element: Element, proxy: &ResourceProxy) {
     let mut data = Object::new();
     let src = attr(&element, "src");
-    data.insert("file".into(), OwnedValue::from(src.clone()));
-    if src.starts_with("http://") || src.starts_with("https://") {
-        data.insert("url".into(), OwnedValue::from(src));
+    if let Some(url) = proxy.fetchable(&src) {
+        data.insert("url".into(), OwnedValue::from(url));
     }
+    data.insert("file".into(), OwnedValue::from(src));
     let title = attr(&element, "title");
     if !title.is_empty() {
         data.insert("name".into(), OwnedValue::from(title));
@@ -531,6 +587,11 @@ fn escape_attr(value: &str) -> String {
 mod tests {
     use super::*;
 
+    /// 不涉及代理路由的用例走默认解析。
+    fn from_content(content: &str) -> Message {
+        from_content_with(content, &ResourceProxy::default())
+    }
+
     #[test]
     fn parses_satori_elements() {
         let message = from_content(
@@ -651,5 +712,54 @@ mod tests {
         let message = Message::new().text("第一行\n第二行");
         let value = simd_json::serde::to_owned_value(message).unwrap();
         assert_eq!(to_content(&value), "第一行\n第二行");
+    }
+
+    /// `internal:` 链接应用侧取不到，必须换成实现端的代理路由。
+    #[test]
+    fn internal_links_resolve_through_the_proxy_route() {
+        let proxy = ResourceProxy::new("http://127.0.0.1:3001".to_string(), Arc::new(Vec::new()));
+        let message = from_content_with(
+            "<img src=\"internal:red/10000/_tmp/satori-res:image:1\"/>",
+            &proxy,
+        );
+        assert_eq!(
+            message.0[0].data.get("url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:3001/v1/proxy/internal:red/10000/_tmp/satori-res:image:1")
+        );
+        // file 仍保留实现端给的原始 src，便于回传。
+        assert_eq!(
+            message.0[0].data.get("file").and_then(|v| v.as_str()),
+            Some("internal:red/10000/_tmp/satori-res:image:1")
+        );
+    }
+
+    /// 命中 proxy_urls 的平台链接有防盗链/时效，同样走代理路由；其余直连。
+    #[test]
+    fn only_declared_prefixes_are_proxied() {
+        let proxy = ResourceProxy::new(
+            "http://127.0.0.1:3001".to_string(),
+            Arc::new(vec!["https://gchat.qpic.cn/".to_string()]),
+        );
+        let hotlinked = from_content_with("<img src=\"https://gchat.qpic.cn/a?b=1\"/>", &proxy);
+        assert_eq!(
+            hotlinked.0[0].data.get("url").and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:3001/v1/proxy/https://gchat.qpic.cn/a%3Fb=1")
+        );
+        let plain = from_content_with("<img src=\"https://example.com/a.png\"/>", &proxy);
+        assert_eq!(
+            plain.0[0].data.get("url").and_then(|v| v.as_str()),
+            Some("https://example.com/a.png")
+        );
+    }
+
+    /// `data:` 与本地路径没有可下载地址，插件不该拿到假的 url。
+    #[test]
+    fn undownloadable_sources_have_no_url() {
+        let message = from_content("<img src=\"data:image/png;base64,AAAA\"/>");
+        assert!(message.0[0].data.get("url").is_none());
+        assert_eq!(
+            message.0[0].data.get("file").and_then(|v| v.as_str()),
+            Some("data:image/png;base64,AAAA")
+        );
     }
 }
