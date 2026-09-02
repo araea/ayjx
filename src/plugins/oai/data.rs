@@ -58,7 +58,7 @@ impl Manager {
         // 自实现 GET {base}/models：DeepSeek 官方（及多数中转）返回的 model 对象
         // 字段不全（缺 created），async-openai 的强类型反序列化会失败，这里宽松解析只取 id。
         let url = format!("{}/models", base.trim_end_matches('/'));
-        let resp = reqwest::Client::new()
+        let resp = crate::http::client()
             .get(&url)
             .bearer_auth(&key)
             .send()

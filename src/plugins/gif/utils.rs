@@ -49,7 +49,7 @@ pub async fn get_image_url(
 
 /// 下载图片
 pub async fn download_image(url: &str) -> Result<Vec<u8>> {
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
+    let resp = crate::http::get(url).await.map_err(|e| e.to_string())?;
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     Ok(bytes.to_vec())
 }

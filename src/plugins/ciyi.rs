@@ -1,15 +1,17 @@
 //! 词意：每日一个两字词，全群一起用「语义排名」把它逼出来。
 //!
-//! 呈现方式：盘面、揭晓、排行榜、玩法说明都排版成一张宣纸风的卡片图
-//! （见 `card.rs`），一局下来翻回去看历次提示不必在聊天记录里大海捞针；
-//! 「不在词库中」这类即时纠错仍走纯文本——它要的是快，不是好看。
-//! 截图失败（浏览器不可用等）自动退回文本，功能不受影响。
+//! 呈现方式：盘面、揭晓、排行榜、玩法说明都原生绘制成一张宣纸风的卡片图
+//! （见 `card.rs` 与 `painter.rs`），一局下来翻回去看历次提示不必在聊天
+//! 记录里大海捞针；「不在词库中」这类即时纠错仍走纯文本——它要的是快，
+//! 不是好看。绘制不走浏览器截图：文字由 ab_glyph 直接光栅化，环境里
+//! 连一个可用字体都没有时才退回文本，功能不受影响。
 
 pub mod card;
 pub mod config;
 pub mod data;
 pub mod engine;
 pub mod entity;
+pub mod painter;
 pub mod view;
 
 use crate::adapters::satori::{LockedWriter, send_msg};
@@ -21,6 +23,7 @@ use crate::plugins::ciyi::config::CiYiConfig;
 use crate::plugins::ciyi::entity::{record as record_entity, state as state_entity};
 use crate::plugins::ciyi::view::Reply;
 use crate::plugins::{PluginError, get_config};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::future::BoxFuture;
 use sea_orm::{ConnectionTrait, Schema};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
@@ -210,7 +213,8 @@ async fn send_response(
         msg = msg.at(user_id).text("\n");
     }
 
-    msg = match render_card(ctx, &reply, config).await {
+    msg = match render_card(&reply, config, &get_prefixes(ctx).first().cloned().unwrap_or_default())
+    {
         Some(b64) => msg.image(format!("base64://{b64}")),
         None => msg.text(reply.to_text()),
     };
@@ -219,19 +223,32 @@ async fn send_response(
     Ok(())
 }
 
-/// 排版并截图；关掉图片、内容不值得出图、或浏览器不可用时返回 None
-async fn render_card(ctx: &Context, reply: &Reply, config: &CiYiConfig) -> Option<String> {
+/// 排版并原生绘制成 PNG；关掉图片、内容不值得出图、或字体不可用时返回 None。
+/// 附带把每次发出去的图落盘到 `CIYI_CARD_DEBUG_DUMP/last_sent.png`，
+/// 便于排查"图片底部被截"等疑似被 QQ 二次处理的问题。
+fn render_card(reply: &Reply, config: &CiYiConfig, prefix: &str) -> Option<String> {
     if !config.plugin.image_enabled || !reply.wants_card() {
         return None;
     }
-
-    let prefix = get_prefixes(ctx).first().cloned().unwrap_or_default();
-    let html = card::render(reply, &prefix)?;
-    match card::capture(&html, config.plugin.image_scale).await {
-        Ok(b64) => Some(b64),
-        Err(e) => {
-            crate::warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
-            None
+    let b64 = match card::render(reply, prefix, config.plugin.image_scale) {
+        Some(s) => s,
+        None => {
+            crate::warn!(target: LOG_TARGET, "卡片绘制失败（字体不可用？），本次改发纯文本");
+            return None;
         }
+    };
+    if let Ok(dir) = std::env::var("CIYI_CARD_DEBUG_DUMP") {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            format!("{dir}/last_sent.png"),
+            STANDARD.decode(&b64).unwrap_or_default(),
+        );
     }
+    crate::info!(
+        target: LOG_TARGET,
+        "卡片已渲染: base64 {} 字符，原始 {} 字节",
+        b64.len(),
+        b64.len() * 3 / 4,
+    );
+    Some(b64)
 }

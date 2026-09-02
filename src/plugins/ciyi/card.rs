@@ -1,4 +1,4 @@
-//! 把词意的每一次回应排版成一张卡片图（HTML → 截图）。
+//! 把词意的每一次回应排版成一张卡片图（原生绘制，不走浏览器）。
 //!
 //! 设计取向：**宣纸 + 朱砂**。词意猜的是汉字与词义，所以整张卡走纸墨一路——
 //! 暖白纸底带极淡的纤维颗粒，古籍式的内外双框，正文汉字一律用宋体，
@@ -15,32 +15,44 @@
 //!   - **五档距离命名**（咫尺/相邻/相近/相关/天涯）：让「#137」这种抽象数字
 //!     有一个可直接读出来的语感，颜色同步从朱砂过渡到远山蓝。
 //!
-//! 版心 720 CSS px，配合 `image_scale`（默认 3 倍）出图 2160px 宽，
-//! 群聊里点开放大不糊。
+//! 绘制基元见 `painter.rs`：文字由 ab_glyph 直接光栅化，几何用 SDF 逐像素判定。
+//! 版心 668 逻辑 px，配合 `image_scale`（默认 3 倍）出图约 2160px 宽。
 
-use super::view::{Board, COMMAND_ROWS, HintRow, RankBoard, Reply, Win};
-use anyhow::Result;
-use cdp_html_shot::{Browser, CaptureOptions, Viewport};
+use super::view::{COMMAND_ROWS, Board, HintRow, RankBoard, RankItem, Reply, Win};
+use crate::plugins::ciyi::painter::{Canvas, Fonts, Ink};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{FixedOffset, Utc};
-use std::time::Duration;
+use image::RgbaImage;
 
-/// 卡片渲染宽度（CSS 像素）。实际出图宽度 = WIDTH × `image_scale`
-const WIDTH: u32 = 720;
+// ================= 版式常量（逻辑像素） =================
 
-fn esc(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 8);
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
+/// 视口宽 = 版心 720
+const VIEW_W: f32 = 720.0;
+/// 四周留白
+const PAD: f32 = 26.0;
+/// 卡片宽
+const CARD_W: f32 = VIEW_W - PAD * 2.0;
+/// 内容左右边界（卡片内边距 44）
+const CX0: f32 = PAD + 44.0;
+const CX1: f32 = PAD + CARD_W - 44.0;
+/// 内容宽度
+const CW: f32 = CX1 - CX0;
+
+// ================= 色板 =================
+
+const SHELL_BG: Ink = Ink::rgb(220, 210, 190); // #DCD2BE
+const PAPER: Ink = Ink::rgb(250, 246, 236); // #FAF6EC
+const INK: Ink = Ink::rgb(36, 31, 27); // #241F1B
+const INK2: Ink = Ink::rgb(75, 67, 58); // #4B433A
+const INK3: Ink = Ink::rgb(139, 127, 112); // #8B7F70
+const RED: Ink = Ink::rgb(176, 52, 42); // #B0342A
+const CREAM: Ink = Ink::rgb(251, 247, 239); // #FBF7EF
+const SEPIA: Ink = Ink::rgb(120, 95, 65); // 线与底纹
+const FOOT_C: Ink = Ink::rgb(154, 142, 126); // #9A8E7E
+const NB_C: Ink = Ink::rgb(126, 114, 100); // #7E7264 邻词牌
+const NOTE_C: Ink = Ink::rgb(109, 74, 64); // #6D4A40 提示条
+
+// ================= 通用小件 =================
 
 /// 出图时刻（北京时间），压在页眉右上角
 fn stamp() -> String {
@@ -60,8 +72,6 @@ fn group(n: usize) -> String {
     }
     out
 }
-
-// ================= 距离分档 =================
 
 /// 名次对应的「距离感」：一个能读出来的词 + 一种颜色。
 ///
@@ -87,548 +97,688 @@ fn heat(rank: usize, pool: usize) -> f64 {
     (1.0 - rank.ln() / pool.ln()).clamp(0.04, 1.0)
 }
 
-// ================= 样式 =================
-
-const CSS: &str = r#"
-*{margin:0;padding:0;box-sizing:border-box}
-:root{
-  --serif:"Source Han Serif SC","Noto Serif CJK SC","Songti SC","STSong","SimSun",Georgia,serif;
-  --sans:"PingFang SC","Noto Sans CJK SC","Source Han Sans SC","Microsoft YaHei","WenQuanYi Zen Hei","Helvetica Neue",Arial,sans-serif;
-  --ink:#241F1B;--ink2:#4B433A;--ink3:#8B7F70;--line:rgba(120,95,65,.20);--red:#B0342A}
-.shot{padding:26px;background:#DCD2BE;
-  background-image:radial-gradient(rgba(255,255,255,.42) 1px,transparent 1px);
-  background-size:7px 7px}
-/* 纸：两层极淡的颗粒 + 一层竖向明度渐变，凑出宣纸的手感，不用贴图 */
-.card{position:relative;overflow:hidden;border-radius:5px;padding:42px 44px 30px;
-  background-color:#FAF6EC;
-  background-image:
-    radial-gradient(rgba(120,90,60,.045) 1px,transparent 1px),
-    radial-gradient(rgba(120,90,60,.032) 1px,transparent 1px),
-    linear-gradient(175deg,rgba(255,253,247,.9),rgba(244,237,224,.85));
-  background-size:13px 13px,23px 23px,100% 100%;
-  background-position:0 0,8px 11px,0 0;
-  box-shadow:0 16px 40px rgba(70,52,32,.20);
-  font-family:var(--sans);color:var(--ink);
-  -webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
-/* 古籍式内框：离纸边 11px 的一道细线，比加分割线更安静 */
-.card::after{content:"";position:absolute;inset:11px;border:1px solid rgba(150,110,70,.16);
-  border-radius:2px;pointer-events:none}
-.card>*{position:relative;z-index:1}
-
-/* —— 页眉 —— */
-.head{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
-.brand{display:flex;align-items:center;gap:13px}
-.seal{width:42px;height:42px;border-radius:5px;background:var(--red);color:#FBF7EF;
-  display:flex;align-items:center;justify-content:center;font-family:var(--serif);
-  font-size:25px;font-weight:700;transform:rotate(-3deg);
-  box-shadow:0 5px 13px rgba(176,52,42,.30),inset 0 0 0 1px rgba(255,255,255,.18)}
-.bt b{display:block;font-family:var(--serif);font-size:20px;font-weight:700;letter-spacing:.24em;
-  line-height:1.2;color:var(--ink)}
-.bt i{display:block;margin-top:4px;font-style:normal;font-size:12px;letter-spacing:.2em;color:var(--ink3)}
-.stamp{font-size:13px;letter-spacing:.06em;color:var(--ink3);font-variant-numeric:tabular-nums}
-
-/* —— 标题区 —— */
-.lede{display:flex;align-items:flex-end;justify-content:space-between;gap:24px}
-.title{font-family:var(--serif);font-size:38px;font-weight:700;line-height:1.2;
-  letter-spacing:.06em;color:var(--ink)}
-.sub{margin-top:11px;font-size:14.5px;line-height:1.6;letter-spacing:.03em;color:var(--ink3);
-  font-variant-numeric:tabular-nums}
-.rule{height:2px;margin:22px 0 6px;border-radius:2px;
-  background:linear-gradient(90deg,var(--red) 0 54px,rgba(120,95,65,.22) 54px 100%)}
-
-/* —— 田字格 —— */
-.cells{display:flex;gap:10px}
-.cell{position:relative;width:74px;height:74px;border:2px solid rgba(176,52,42,.30);border-radius:4px;
-  display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.5);
-  font-family:var(--serif);font-size:42px;line-height:1;color:var(--ink)}
-.cell::before{content:"";position:absolute;left:9%;right:9%;top:50%;
-  border-top:1px dashed rgba(176,52,42,.26)}
-.cell::after{content:"";position:absolute;top:9%;bottom:9%;left:50%;
-  border-left:1px dashed rgba(176,52,42,.26)}
-/* 全角「？」的字形落在字身框左半边，flex 居中的是字身框而非笔画，
-   不补偿的话问号看着总偏左；padding 的一半真正作用到字形上，正好压回中线 */
-.cell.blank{border-style:dashed;font-size:30px;color:rgba(176,52,42,.42);padding-left:.5em}
-.cells.sm .cell{width:50px;height:50px;font-size:26px}
-.cells.sm .cell.blank{font-size:21px}
-.cells.lg .cell{width:104px;height:104px;font-size:60px;border-color:rgba(176,52,42,.5)}
-
-/* —— 提示行 —— */
-.row{position:relative;display:grid;grid-template-columns:84px 1fr 32px;gap:16px;align-items:center;
-  padding:14px 12px}
-.row::after{content:"";position:absolute;left:12px;right:12px;bottom:0;
-  border-bottom:1px dotted var(--line)}
-.row:last-child::after{display:none}
-.row.fresh{border-radius:9px;background:rgba(176,52,42,.055);
-  box-shadow:inset 3px 0 0 var(--red)}
-.rk{text-align:right}
-.rk b{display:block;font-size:25px;font-weight:800;line-height:1;letter-spacing:-.02em;
-  color:var(--c);font-variant-numeric:tabular-nums}
-.rk b s{text-decoration:none;font-size:16px;font-weight:700;opacity:.5;margin-right:1px}
-.rk em{display:block;margin-top:7px;font-style:normal;font-family:var(--serif);font-size:12.5px;
-  font-weight:600;letter-spacing:.2em;color:var(--c);opacity:.8}
-.tri{display:flex;align-items:center;gap:18px}
-.wd{font-family:var(--serif);font-size:31px;font-weight:600;letter-spacing:.12em;color:var(--ink)}
-/* 邻词牌：缺的那个字用浅色「？」占位，缺口一眼可见 */
-.nb{font-family:var(--serif);font-size:19px;letter-spacing:.1em;color:#7E7264;
-  padding:4px 10px 5px;border-radius:6px;background:rgba(120,95,65,.055);
-  border:1px dashed rgba(120,95,65,.24)}
-.nb i{font-style:normal;color:rgba(120,95,65,.42)}
-.bar{margin-top:11px;height:5px;border-radius:3px;background:rgba(120,95,65,.10);overflow:hidden}
-.bar span{display:block;height:100%;width:var(--w);border-radius:3px;
-  background:linear-gradient(90deg,rgba(255,255,255,.45),var(--c))}
-.flag{width:26px;height:26px;border-radius:5px;background:var(--red);color:#FBF7EF;
-  display:flex;align-items:center;justify-content:center;font-family:var(--serif);font-size:14px;
-  transform:rotate(-6deg);box-shadow:0 3px 9px rgba(176,52,42,.28)}
-
-/* —— 提示条 / 空盘 —— */
-.note{display:flex;align-items:center;gap:11px;margin:18px 0 2px;padding:12px 16px;
-  border-radius:8px;background:rgba(176,52,42,.06);border-left:3px solid var(--red);
-  font-size:16px;line-height:1.5;color:#6D4A40}
-.note b{width:24px;height:24px;flex:none;border-radius:4px;background:rgba(176,52,42,.14);
-  color:var(--red);display:flex;align-items:center;justify-content:center;
-  font-family:var(--serif);font-size:14px;font-weight:700}
-.empty{margin:22px 0 6px;padding:34px 20px;border:1px dashed var(--line);border-radius:10px;
-  text-align:center;font-family:var(--serif);font-size:18px;letter-spacing:.06em;color:var(--ink3)}
-
-/* —— 数字卡 —— */
-.stats{display:flex;gap:13px;margin-top:24px}
-/* min-width:0 不能省：flex 子项默认 min-width:auto，
-   里面 nowrap 的长昵称会把整行撑出卡片再被裁掉，省略号永远等不到 */
-.stat{flex:1;min-width:0;padding:15px 10px 14px;border-radius:10px;text-align:center;
-  background:rgba(255,255,255,.55);border:1px solid var(--line)}
-.stat b{display:block;font-size:26px;font-weight:800;line-height:1.15;letter-spacing:-.01em;
-  color:var(--ink);font-variant-numeric:tabular-nums}
-.stat b.w{font-family:var(--serif);font-size:21px;font-weight:700;letter-spacing:.04em;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.stat span{display:block;margin-top:8px;font-size:12px;letter-spacing:.16em;color:var(--ink3)}
-
-/* —— 揭晓 —— */
-/* 昵称通栏放，最多两行；超长的（含一长串不换行字符）就断行后省略，
-   overflow-wrap:anywhere 保证没有空格的长串也能断 */
-.winner{display:flex;align-items:baseline;gap:14px;margin-top:13px;padding:15px 20px;
-  border-radius:10px;background:rgba(176,52,42,.055);border:1px solid rgba(176,52,42,.16)}
-.winner span{flex:none;font-size:12px;letter-spacing:.16em;color:var(--ink3)}
-.winner b{min-width:0;font-family:var(--serif);font-size:22px;font-weight:700;letter-spacing:.04em;
-  line-height:1.45;color:var(--ink);overflow-wrap:anywhere;overflow:hidden;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
-.reveal{display:flex;align-items:center;justify-content:center;gap:34px;
-  margin:30px 0 6px;padding:30px 0}
-.mark{width:104px;height:104px;flex:none;border-radius:50%;
-  border:3px solid rgba(176,52,42,.7);box-shadow:inset 0 0 0 2px rgba(176,52,42,.16);
-  display:flex;align-items:center;justify-content:center;transform:rotate(-9deg);
-  font-family:var(--serif);font-size:29px;font-weight:700;line-height:1.08;letter-spacing:.08em;
-  text-align:center;color:rgba(176,52,42,.82)}
-
-/* —— 排行榜 —— */
-.lrow{position:relative;display:grid;grid-template-columns:44px 1fr 78px;gap:16px;align-items:center;
-  padding:15px 12px}
-.lrow::after{content:"";position:absolute;left:12px;right:12px;bottom:0;
-  border-bottom:1px dotted var(--line)}
-.lrow:last-child::after{display:none}
-.lmid{min-width:0}
-.lrk{width:38px;height:38px;border-radius:9px;display:flex;align-items:center;justify-content:center;
-  font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--red);
-  background:rgba(176,52,42,.09);border:1px solid rgba(176,52,42,.22)}
-.lrk.top{color:#FBF7EF;background:var(--red);border-color:transparent;
-  box-shadow:0 5px 13px rgba(176,52,42,.26)}
-.lname{font-family:var(--serif);font-size:22px;font-weight:600;letter-spacing:.04em;color:var(--ink);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lsc{text-align:right}
-.lsc b{font-size:26px;font-weight:800;letter-spacing:-.02em;color:var(--ink);
-  font-variant-numeric:tabular-nums}
-.lsc span{margin-left:4px;font-family:var(--serif);font-size:14px;color:var(--ink3)}
-
-/* —— 指令 / 规则 —— */
-.cmd{position:relative;display:grid;grid-template-columns:230px 1fr;gap:18px;align-items:baseline;
-  padding:15px 12px}
-.cmd::after{content:"";position:absolute;left:12px;right:12px;bottom:0;
-  border-bottom:1px dotted var(--line)}
-.cmd:last-child::after{display:none}
-.ck{font-family:var(--serif);font-size:20px;font-weight:600;letter-spacing:.06em;color:var(--ink)}
-.ck i{font-style:normal;font-family:var(--sans);font-size:13.5px;letter-spacing:.02em;color:var(--red);
-  opacity:.85}
-.ck u{text-decoration:none;display:block;margin-top:5px;font-family:var(--sans);font-size:12.5px;
-  letter-spacing:.04em;color:var(--ink3)}
-.cd{font-size:15.5px;line-height:1.6;color:var(--ink2)}
-.sec{padding:20px 2px 18px;border-bottom:1px dotted var(--line)}
-.sec:last-child{border-bottom:none;padding-bottom:4px}
-.sh{display:flex;align-items:center;gap:11px;font-family:var(--serif);font-size:21px;font-weight:700;
-  letter-spacing:.1em;color:var(--ink)}
-.sn{width:24px;height:24px;flex:none;border-radius:4px;background:var(--red);color:#FBF7EF;
-  display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600}
-.sb{margin-top:12px;font-size:16px;line-height:1.85;color:var(--ink2)}
-.key{margin-top:16px;display:flex;flex-direction:column;gap:10px}
-.ki{display:grid;grid-template-columns:96px 1fr;gap:14px;align-items:center}
-.ki b{font-family:var(--serif);font-size:19px;font-weight:600;letter-spacing:.08em;color:var(--red);
-  text-align:center;padding:5px 0;border-radius:6px;background:rgba(176,52,42,.07);
-  border:1px dashed rgba(176,52,42,.26)}
-/* 图例里的「新」要和盘面上那枚印一模一样，否则等于又多解释了一个符号 */
-.ki b.solid{color:#FBF7EF;background:var(--red);border:1px solid transparent}
-.ki span{font-size:15px;line-height:1.6;color:var(--ink2)}
-.tiers{display:flex;gap:9px;margin-top:16px}
-.tg{flex:1;padding:11px 4px 10px;border-radius:8px;text-align:center;
-  background:rgba(255,255,255,.5);border:1px solid var(--line);
-  border-top:2px solid var(--c)}
-.tg b{display:block;font-family:var(--serif);font-size:16px;font-weight:700;letter-spacing:.1em;
-  color:var(--c)}
-.tg span{display:block;margin-top:6px;font-size:11.5px;letter-spacing:.02em;color:var(--ink3);
-  font-variant-numeric:tabular-nums;white-space:nowrap}
-
-/* —— 页脚 —— */
-.foot{display:flex;align-items:center;justify-content:space-between;gap:18px;
-  margin-top:26px;padding-top:16px;border-top:1px solid rgba(120,95,65,.16);
-  font-size:12.5px;letter-spacing:.06em;color:#9A8E7E}
-.foot .dots{display:flex;align-items:center;gap:6px}
-.foot .dots i{width:5px;height:5px;border-radius:50%;background:rgba(176,52,42,.55)}
-.foot .dots i:nth-child(2){background:rgba(120,95,65,.28)}
-.foot .dots i:nth-child(3){background:rgba(120,95,65,.16)}
-"#;
-
-// ================= 组件 =================
-
-/// 卡片外壳：页眉印章、标题区（可带右侧配图）、朱砂起首的分隔线、正文、页脚
-fn shell(title: &str, sub: &str, aside: &str, body: &str, foot: &str) -> String {
-    let sub = match sub.is_empty() {
-        true => String::new(),
-        false => format!(r#"<div class="sub">{}</div>"#, esc(sub)),
-    };
-    format!(
-        r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><style>{css}</style></head>
-<body><div class="shot"><div class="card">
-<div class="head">
-  <div class="brand"><span class="seal">词</span><span class="bt"><b>词意</b><i>每日一词 · 语义寻踪</i></span></div>
-  <div class="stamp">{stamp}</div>
-</div>
-<div class="lede"><div><div class="title">{title}</div>{sub}</div>{aside}</div>
-<div class="rule"></div>
-{body}
-<div class="foot"><span>{foot}</span><span class="dots"><i></i><i></i><i></i></span></div>
-</div></div></body></html>"#,
-        css = CSS,
-        stamp = stamp(),
-        title = esc(title),
-        sub = sub,
-        aside = aside,
-        body = body,
-        foot = esc(foot),
-    )
+/// 垂直居中的文字基线：CJK 字面约占 0.88em，视觉重心略高于几何中心
+fn mid_baseline(cy: f32, px: f32) -> f32 {
+    cy + 0.38 * px
 }
 
-/// 田字格：`chars` 为空则画成虚线格里的「？」，即尚未揭晓的答案
-fn cells(word: &str, size: &str) -> String {
-    let mut out = format!(r#"<div class="cells {size}">"#);
-    if word.is_empty() {
-        out.push_str(r#"<span class="cell blank">？</span><span class="cell blank">？</span>"#);
-    } else {
-        for ch in word.chars() {
-            out.push_str(&format!(r#"<span class="cell">{}</span>"#, esc(&ch.to_string())));
-        }
+/// 白与色之间的插值（接近度条 / 底纹渐变）
+fn mix(a: Ink, b: Ink, t: f32) -> Ink {
+    let t = t.clamp(0.0, 1.0);
+    Ink {
+        r: (a.r as f32 + (b.r as f32 - a.r as f32) * t) as u8,
+        g: (a.g as f32 + (b.g as f32 - a.g as f32) * t) as u8,
+        b: (a.b as f32 + (b.b as f32 - a.b as f32) * t) as u8,
+        a: a.a + (b.a - a.a) * t,
     }
-    out.push_str("</div>");
-    out
 }
 
-/// 一条提示：名次 + 距离档 | 左邻词牌 · 猜过的词 · 右邻词牌 + 接近度条 | 「新」印
-fn hint_row(row: &HintRow, pool: usize) -> String {
+/// 虚线描一个矩形框（圆角近似为直角，框小看不出来）
+fn dashed_rect(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, ink: Ink) {
+    c.hline(x, x + w, y, 1.0, ink, 4.0, 4.0);
+    c.hline(x, x + w, y + h, 1.0, ink, 4.0, 4.0);
+    c.vdash(x, y, y + h, 1.0, ink, 4.0, 4.0);
+    c.vdash(x + w, y, y + h, 1.0, ink, 4.0, 4.0);
+}
+
+/// 点状分隔线（行与行之间）
+fn dotted_sep(c: &mut Canvas, y: f32) {
+    c.hline(CX0 + 12.0, CX1 - 12.0, y, 1.0, SEPIA.with_a(0.20), 1.0, 3.0);
+}
+
+/// 渐变进度条：左端混白提亮，右端落到本色
+fn gradient_bar(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: Ink) {
+    let cols = w.ceil() as i32;
+    for i in 0..cols {
+        let t = i as f32 / w.max(1.0);
+        let ink = mix(Ink::rgb(255, 255, 255).with_a(0.45), color, t);
+        c.rect(x + i as f32, y, 1.0, h, ink);
+    }
+}
+
+// ================= 公共部件 =================
+
+/// 田字格。`word` 为空则画成虚线格里的「？」，即尚未揭晓的答案。
+/// `large` 对应揭晓卡的放大版（104px 格、60px 字、重描边）。
+fn draw_cells(c: &mut Canvas, f: &Fonts, x: f32, y: f32, word: &str, large: bool) {
+    let (cell, font_px, blank_px, border_a) = if large {
+        (104.0, 60.0, 0.0, 0.5)
+    } else {
+        (50.0, 26.0, 21.0, 0.30)
+    };
+    let chars: Vec<char> = word.chars().collect();
+    let n = if chars.is_empty() { 2 } else { chars.len() };
+    let gap = 10.0;
+    let mut cx = x;
+    for i in 0..n {
+        let ch = chars.get(i);
+        // 底：半透明白
+        c.rrect_fill(cx, y, cell, cell, 4.0, Ink::rgb(255, 255, 255).with_a(0.5));
+        // 边框
+        match ch {
+            Some(_) => c.rrect_stroke(cx, y, cell, cell, 4.0, 2.0, RED.with_a(border_a)),
+            None => {
+                let ink = RED.with_a(border_a);
+                let dash = 5.0;
+                let g = 4.0;
+                c.hline(cx, cx + cell, y, 2.0, ink, dash, g);
+                c.hline(cx, cx + cell, y + cell - 2.0, 2.0, ink, dash, g);
+                c.vdash(cx, y, y + cell, 2.0, ink, dash, g);
+                c.vdash(cx + cell - 2.0, y, y + cell, 2.0, ink, dash, g);
+            }
+        }
+        // 田字虚线十字
+        let inner = cell * 0.09;
+        let cy = y + cell / 2.0;
+        let xc = cx + cell / 2.0;
+        c.hline(cx + inner, cx + cell - inner, cy, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
+        c.vdash(xc, y + inner, y + cell - inner, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
+        // 字
+        match ch {
+            Some(&ch) => {
+                c.text_center(xc, cy, &ch.to_string(), &f.serif_b, font_px, INK, 0.0);
+            }
+            None => {
+                // 全角「？」的字形偏左，往右挪四分之一个字身压回中线
+                c.text_center(xc + 0.25 * blank_px, cy, "？", &f.serif_b, blank_px, RED.with_a(0.42), 0.0);
+            }
+        }
+        cx += cell + gap;
+    }
+}
+
+fn cells_width(n: usize, cell: f32) -> f32 {
+    cell * n as f32 + 10.0 * (n as f32 - 1.0).max(0.0)
+}
+
+/// 右上角对齐的两格虚线田字格（盘面 / 玩法页眉配图）
+fn draw_aside_cells(c: &mut Canvas, f: &Fonts, right: f32, bottom: f32) {
+    let cell = 50.0;
+    let w = cells_width(2, cell);
+    draw_cells(c, f, right - w, bottom - cell, "", false);
+}
+
+/// 邻词牌：缺的那个字用浅色「？」占位，缺口一眼可见。
+/// `leading` 为真表示「？」在前（`？佩`），否则在后（`冥？`）。
+fn draw_nb(c: &mut Canvas, f: &Fonts, x: f32, cy: f32, text: &str, leading: bool) -> f32 {
+    let px = 19.0;
+    let spacing = 0.1 * px;
+    let w = c.text_w(text, &f.serif_b, px, spacing) + 20.0 + 2.0;
+    let h = 33.0;
+    c.rrect_fill(x, cy - h / 2.0, w, h, 6.0, SEPIA.with_a(0.055));
+    dashed_rect(c, x, cy - h / 2.0, w, h, SEPIA.with_a(0.24));
+    let baseline = mid_baseline(cy, px);
+    let chars: Vec<char> = text.chars().collect();
+    let mut tx = x + 11.0;
+    for (i, ch) in chars.iter().enumerate() {
+        let is_q = (leading && i == 0) || (!leading && i + 1 == chars.len());
+        let ink = if is_q { SEPIA.with_a(0.42) } else { NB_C };
+        tx += c.text(tx, baseline, &ch.to_string(), &f.serif_b, px, ink, spacing) + spacing;
+    }
+    w
+}
+
+/// 一条提示：名次 + 距离档 | 邻词牌 · 猜过的词 · 邻词牌 + 接近度条 | 「新」印
+/// 返回新的 y。
+fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, last: bool) -> f32 {
+    const ROW_H: f32 = 77.0;
+    const TRI_H: f32 = 37.0;
     let (label, color) = tier(row.rank);
-    let width = heat(row.rank, pool) * 100.0;
-    format!(
-        r#"<div class="row{fresh}" style="--c:{color};--w:{width:.1}%">
-<div class="rk"><b><s>#</s>{rank}</b><em>{label}</em></div>
-<div><div class="tri"><span class="nb"><i>？</i>{prev}</span><span class="wd">{word}</span><span class="nb">{next}<i>？</i></span></div>
-<div class="bar"><span></span></div></div>
-<div>{flag}</div></div>"#,
-        fresh = if row.fresh { " fresh" } else { "" },
-        color = color,
-        width = width,
-        rank = row.rank,
-        label = label,
-        prev = esc(&row.prev),
-        word = esc(&row.word),
-        next = esc(&row.next),
-        flag = if row.fresh {
-            r#"<div class="flag">新</div>"#
-        } else {
-            ""
-        },
-    )
+    let ink = Ink::hex(color);
+
+    if row.fresh {
+        c.rrect_fill(CX0, y, CW, ROW_H, 9.0, RED.with_a(0.055));
+        c.rrect_fill(CX0, y + 9.0, 3.0, ROW_H - 18.0, 1.5, RED);
+    }
+
+    // 名次 + 距离档（右对齐）
+    let rk_right = CX0 + 84.0;
+    let num = row.rank.to_string();
+    let hash_w = c.text_w("#", &f.sans_b, 16.0, 0.0);
+    let num_w = c.text_w(&num, &f.sans_b, 25.0, 0.0);
+    let base1 = y + 14.0 + 19.5;
+    let sx = rk_right - hash_w - 1.0 - num_w;
+    c.text(sx, base1, "#", &f.sans_b, 16.0, ink.with_a(0.5), 0.0);
+    c.text(sx + hash_w + 1.0, base1, &num, &f.sans_b, 25.0, ink, 0.0);
+    c.text_right(rk_right, base1 + 7.0 + 9.5, label, &f.serif_b, 12.5, ink.with_a(0.8), 2.5);
+
+    // 中列：邻词牌 + 词 + 邻词牌，垂直居中在 TRI_H 里
+    let mx = CX0 + 100.0;
+    let mw = CW - 84.0 - 32.0 - 32.0;
+    let tri_y = y + 14.0;
+    let cy = tri_y + TRI_H / 2.0;
+    let mut tx = mx;
+    tx += draw_nb(c, f, tx, cy, &format!("？{}", row.prev), true) + 18.0;
+    let wd_base = mid_baseline(cy, 31.0);
+    c.text(tx, wd_base, &row.word, &f.serif_b, 31.0, INK, 0.12 * 31.0);
+    tx += c.text_w(&row.word, &f.serif_b, 31.0, 0.12 * 31.0) + 18.0;
+    draw_nb(c, f, tx, cy, &format!("{}？", row.next), false);
+
+    // 接近度条（对数刻度）
+    let bar_y = tri_y + TRI_H + 11.0;
+    c.rrect_fill(mx, bar_y, mw, 5.0, 2.5, SEPIA.with_a(0.10));
+    let bw = (mw as f64 * heat(row.rank, pool)).max(5.0) as f32;
+    gradient_bar(c, mx, bar_y, bw, 5.0, ink);
+
+    // 「新」印
+    if row.fresh {
+        draw_flag(c, f, CX1 - 16.0, y + ROW_H / 2.0);
+    }
+
+    if !last {
+        dotted_sep(c, y + ROW_H);
+    }
+    y + ROW_H
 }
 
-fn stat(value: &str, label: &str, wide: bool) -> String {
-    format!(
-        r#"<div class="stat"><b{cls}>{value}</b><span>{label}</span></div>"#,
-        cls = if wide { r#" class="w""# } else { "" },
-        value = esc(value),
-        label = esc(label),
-    )
+/// 「新」小旗：旋转 -6° 的朱砂方印
+fn draw_flag(c: &mut Canvas, f: &Fonts, cx: f32, cy: f32) {
+    let mut layer = Canvas::new(30.0, 30.0, c.s());
+    layer.rrect_fill(2.0, 2.0, 26.0, 26.0, 5.0, RED);
+    layer.text_center(15.0, 15.0, "新", &f.serif_b, 14.0, CREAM, 0.0);
+    c.blit_rotated(&layer.img, cx, cy, -6.0);
+}
+
+/// 「注」提示条
+fn draw_note(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
+    let y = y + 18.0;
+    let h = 48.0;
+    c.rrect_fill(CX0, y, CW, h, 8.0, RED.with_a(0.06));
+    c.rrect_fill(CX0, y + 8.0, 3.0, h - 16.0, 1.5, RED);
+    c.rrect_fill(CX0 + 16.0, y + 12.0, 24.0, 24.0, 4.0, RED.with_a(0.14));
+    c.text_center(CX0 + 28.0, y + 24.0, "注", &f.serif_b, 14.0, RED, 0.0);
+    c.text(CX0 + 51.0, mid_baseline(y + 24.0, 16.0), text, &f.sans, 16.0, NOTE_C, 0.0);
+    y + h
+}
+
+/// 空盘占位框
+fn draw_empty(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
+    let y = y + 22.0;
+    let h = 34.0 * 2.0 + 24.0;
+    dashed_rect(c, CX0, y, CW, h, SEPIA.with_a(0.20));
+    c.text_center(CX0 + CW / 2.0, y + h / 2.0, text, &f.serif_b, 18.0, INK3, 0.06 * 18.0);
+    y + h + 6.0
+}
+
+/// 数字卡一排：`items` 为 (值, 标签)，固定三格
+fn draw_stats(c: &mut Canvas, f: &Fonts, y: f32, items: &[(String, &str)]) -> f32 {
+    let gap = 13.0;
+    let tw = (CW - gap * 2.0) / 3.0;
+    let h = 81.0;
+    for (i, (val, label)) in items.iter().enumerate() {
+        let x = CX0 + (tw + gap) * i as f32;
+        c.rrect_fill(x, y, tw, h, 10.0, Ink::rgb(255, 255, 255).with_a(0.55));
+        c.rrect_stroke(x, y, tw, h, 10.0, 1.0, SEPIA.with_a(0.20));
+        c.text_center(x + tw / 2.0, y + 29.0, val, &f.sans_b, 26.0, INK, 0.0);
+        c.text_center(x + tw / 2.0, y + 56.0, label, &f.sans, 12.0, INK3, 0.16 * 12.0);
+    }
+    y + h
+}
+
+// ================= 卡片外壳 =================
+
+/// 背景、纸纹、内外双框、页眉、标题区、朱砂分隔线。返回正文起始 y。
+fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) -> f32 {
+    let h = c.img.height() as f32 / c.s();
+    // 托纸
+    c.fill(SHELL_BG);
+    c.dot_grid(0.0, 0.0, VIEW_W, h, 7.0, 0.0, 0.0, 1.0, Ink::rgb(255, 255, 255).with_a(0.42));
+    // 宣纸卡：暖白底 + 两层纤维颗粒
+    c.rrect_fill(PAD, PAD, CARD_W, h - PAD * 2.0, 5.0, PAPER);
+    let paper = |cc: &mut Canvas| {
+        cc.dot_grid(PAD, PAD, CARD_W, h - PAD * 2.0, 13.0, 0.0, 0.0, 1.0, Ink::rgb(120, 90, 60).with_a(0.045));
+        cc.dot_grid(PAD, PAD, CARD_W, h - PAD * 2.0, 23.0, 8.0, 11.0, 1.0, Ink::rgb(120, 90, 60).with_a(0.032));
+    };
+    paper(c);
+    // 古籍式内框：离纸边 11px 的一道细线
+    c.rrect_stroke(PAD + 11.0, PAD + 11.0, CARD_W - 22.0, h - PAD * 2.0 - 22.0, 2.0, 1.0, SEPIA.with_a(0.16));
+
+    // —— 页眉 ——
+    let head_y = PAD + 42.0;
+    let head_cy = head_y + 21.0;
+    // 印章：朱砂底 + 旋转 -3° 的「词」
+    let mut seal = Canvas::new(46.0, 46.0, c.s());
+    seal.rrect_fill(2.0, 2.0, 42.0, 42.0, 5.0, RED);
+    seal.text_center(23.0, 23.0, "词", &f.serif_b, 25.0, CREAM, 0.0);
+    c.blit_rotated(&seal.img, CX0 + 21.0, head_cy, -3.0);
+    // 品名
+    let bx = CX0 + 42.0 + 13.0;
+    c.text(bx, head_y + 20.0, "词意", &f.serif_b, 20.0, INK, 0.24 * 20.0);
+    c.text(bx, head_y + 24.0 + 4.0 + 12.0, "每日一词 · 语义寻踪", &f.sans, 12.0, INK3, 0.2 * 12.0);
+    // 时刻
+    c.text_right(CX1, mid_baseline(head_cy, 13.0), &stamp(), &f.sans, 13.0, INK3, 0.0);
+
+    // —— 标题区 ——
+    let lede_y = head_y + 42.0 + 22.0;
+    c.text(CX0, lede_y + 37.0, title, &f.serif_b, 38.0, INK, 0.06 * 38.0);
+    let mut bottom = lede_y + 46.0;
+    if !sub.is_empty() {
+        c.text(CX0, bottom + 11.0 + 17.0, sub, &f.sans, 14.5, INK3, 0.0);
+        bottom += 11.0 + 23.0;
+    }
+    if aside {
+        draw_aside_cells(c, f, CX1, bottom);
+    }
+
+    // —— 朱砂起首的分隔线 ——
+    let ry = bottom + 22.0;
+    c.hline(CX0, CX1, ry, 2.0, SEPIA.with_a(0.22), 0.0, 0.0);
+    c.hline(CX0, CX0 + 54.0, ry, 2.0, RED, 0.0, 0.0);
+    ry + 2.0 + 6.0
+}
+
+/// 页脚 + 纸卡收边。返回整卡的内容底界（含内外留白），用于裁剪。
+///
+/// 纸卡与内框在 `shell_head` 里是按预分配画布高度画的，远超实际内容；
+/// 若直接裁剪，纸卡的圆角底边会落在裁剪线之外——图片底缘是纸色平切，
+/// 看起来就像「下端被截掉」。这里在内容底界处用壳色擦出纸卡底边，
+/// 再补画圆角收边、内框底线与壳面纹理，让卡片在裁剪线内完整闭合。
+fn shell_foot(c: &mut Canvas, f: &Fonts, y: f32, foot: &str) -> f32 {
+    let fy = y + 26.0;
+    c.hline(CX0, CX1, fy, 1.0, SEPIA.with_a(0.16), 0.0, 0.0);
+    c.text(CX0, fy + 16.0 + 10.0, foot, &f.sans, 12.5, FOOT_C, 0.0);
+    // 三枚圆点收尾
+    let dcy = fy + 16.0 + 5.0;
+    c.circle_fill(CX1 - 3.0, dcy, 2.5, RED.with_a(0.55));
+    c.circle_fill(CX1 - 13.0, dcy, 2.5, SEPIA.with_a(0.28));
+    c.circle_fill(CX1 - 23.0, dcy, 2.5, SEPIA.with_a(0.16));
+
+    // 纸卡底边 = 页脚文字底 + 30px 纸内留白；最终裁剪线再留一圈壳边
+    let card_bottom = fy + 16.0 + 15.0 + 30.0;
+    let alloc_h = c.img.height() as f32 / c.s();
+    if card_bottom + PAD <= alloc_h {
+        // 1) 擦掉纸卡底边以下的多画部分，还原为壳底色
+        c.rect(0.0, card_bottom, VIEW_W, alloc_h - card_bottom, SHELL_BG);
+        // 2) 重画该区域的壳面纹理（对齐全局 7px 网格相位，避免接缝错位）
+        let oy = (7.0 - card_bottom % 7.0) % 7.0;
+        c.dot_grid(0.0, card_bottom, VIEW_W, alloc_h - card_bottom, 7.0, 0.0, oy, 1.0, Ink::rgb(255, 255, 255).with_a(0.42));
+        // 3) 纸卡底部圆角收边：同色条带叠在纸面上，只让下缘出现圆角
+        c.rrect_fill(PAD, card_bottom - 12.0, CARD_W, 12.0, 5.0, PAPER);
+        // 4) 内框重描到底：顶边重复描一遍同色细线，视觉无差
+        c.rrect_stroke(PAD + 11.0, PAD + 11.0, CARD_W - 22.0, card_bottom - PAD - 22.0, 2.0, 1.0, SEPIA.with_a(0.16));
+    }
+    card_bottom + PAD
 }
 
 // ================= 四种卡片 =================
 
 /// 盘面卡：一局进行中的全部有效提示，按名次从近到远排
-pub fn board_card(board: &Board) -> String {
-    let mut body = String::new();
-
-    if let Some(notice) = &board.notice {
-        body.push_str(&format!(
-            r#"<div class="note"><b>注</b>{}</div>"#,
-            esc(notice)
-        ));
-    }
-
-    if board.rows.is_empty() {
-        body.push_str(r#"<div class="empty">还没有命中排名的词，换个方向再试一个</div>"#);
-    } else {
-        for row in &board.rows {
-            body.push_str(&hint_row(row, board.pool));
-        }
-    }
-
-    body.push_str(&format!(
-        r#"<div class="stats">{}{}{}</div>"#,
-        stat(&group(board.guesses), "已猜次数", false),
-        stat(&group(board.hits), "命中排名", false),
-        stat(
-            &board
-                .rows
-                .first()
-                .map(|r| format!("#{}", r.rank))
-                .unwrap_or_else(|| "—".into()),
-            "最近名次",
-            false
-        ),
-    ));
-
+pub fn board_card(c: &mut Canvas, f: &Fonts, board: &Board) -> f32 {
     let sub = format!(
         "已猜 {} 次 · 命中 {} 词 · 词池 {}",
         group(board.guesses),
         group(board.hits),
         group(board.pool)
     );
+    let mut y = shell_head(c, f, "今日词意", &sub, true);
+
+    if let Some(notice) = &board.notice {
+        y = draw_note(c, f, y, notice);
+    }
+
+    if board.rows.is_empty() {
+        y = draw_empty(c, f, y, "还没有命中排名的词，换个方向再试一个");
+    } else {
+        for (i, row) in board.rows.iter().enumerate() {
+            y = draw_hint_row(c, f, y, row, board.pool, i + 1 == board.rows.len());
+        }
+    }
+
+    y += 24.0;
+    let best = board
+        .rows
+        .first()
+        .map(|r| format!("#{}", r.rank))
+        .unwrap_or_else(|| "—".into());
+    y = draw_stats(
+        c,
+        f,
+        y,
+        &[
+            (group(board.guesses), "已猜次数"),
+            (group(board.hits), "命中排名"),
+            (best, "最近名次"),
+        ],
+    );
+
     let foot = match board.hidden {
         0 => "左邻更近 · 右邻更远 · ？为待猜的字".to_string(),
         n => format!("另有 {n} 条更远的记录未列出 · 左邻更近 · 右邻更远"),
     };
-
-    shell("今日词意", &sub, &cells("", "sm"), &body, &foot)
+    shell_foot(c, f, y, &foot)
 }
 
 /// 揭晓卡：田字格从虚线换成实线，答案落格，右侧盖一枚「猜中」圆印
-pub fn win_card(win: &Win) -> String {
-    let mut body = format!(
-        r#"<div class="reveal">{}<div class="mark">猜<br>中</div></div>"#,
-        cells(&win.answer, "lg")
-    );
+pub fn win_card(c: &mut Canvas, f: &Fonts, win: &Win) -> f32 {
+    let mut y = shell_head(c, f, "猜对了", &format!("今日答案「{}」已揭晓", win.answer), false);
 
-    let mut stats = format!(
-        "{}{}",
-        stat(&group(win.guesses), "猜测次数", false),
-        stat(&group(win.hits), "命中排名", false),
-    );
+    // 揭晓区：田字格 + 圆印
+    y += 30.0;
+    let cell = 104.0;
+    let cells_w = cells_width(2, cell);
+    let mark_d = 104.0;
+    let total = cells_w + 34.0 + mark_d;
+    let x = CX0 + (CW - total) / 2.0;
+    draw_cells(c, f, x, y, &win.answer, true);
+
+    let mut mark = Canvas::new(mark_d + 8.0, mark_d + 8.0, c.s());
+    let m = mark_d / 2.0 + 4.0;
+    mark.circle_stroke(m, m, mark_d / 2.0 - 1.5, 3.0, RED.with_a(0.7));
+    mark.circle_stroke(m, m, mark_d / 2.0 - 4.0, 1.0, RED.with_a(0.16));
+    mark.text_center(m, m - 15.6, "猜", &f.serif_b, 29.0, RED.with_a(0.82), 0.08 * 29.0);
+    mark.text_center(m, m + 15.6, "中", &f.serif_b, 29.0, RED.with_a(0.82), 0.08 * 29.0);
+    c.blit_rotated(&mark.img, x + cells_w + 34.0 + mark_d / 2.0, y + cell / 2.0, -9.0);
+    y += cell + 30.0 + 6.0;
+
+    // 数字卡：第三格只有当局历时超过一分钟才出现
+    y += 24.0;
+    let mut stats = vec![
+        (group(win.guesses), "猜测次数"),
+        (group(win.hits), "命中排名"),
+    ];
     if let Some(elapsed) = win.elapsed() {
-        stats.push_str(&stat(&elapsed, "本局历时", true));
+        stats.push((elapsed, "本局历时"));
     }
-    body.push_str(&format!(r#"<div class="stats">{stats}</div>"#));
+    y = draw_stats(c, f, y, &stats);
 
-    // 猜中者独占一行：昵称长短不受控，塞进四分之一宽的数字卡里
-    // 六个字就到头了，通栏才放得下一个正常的群昵称
-    body.push_str(&format!(
-        r#"<div class="winner"><span>猜中者</span><b>{}</b></div>"#,
-        esc(&win.winner)
-    ));
+    // 猜中者独占一行：昵称长短不受控，塞进数字卡里六个字就到头了
+    y += 13.0;
+    y = draw_winner(c, f, y, &win.winner);
 
-    shell(
-        "猜对了",
-        &format!("今日答案「{}」已揭晓", win.answer),
-        "",
-        &body,
-        "明日零点换新词 · 猜中次数已计入排行",
-    )
+    shell_foot(c, f, y, "明日零点换新词 · 猜中次数已计入排行")
+}
+
+/// 猜中者通栏：昵称最多两行，超长断行后省略
+fn draw_winner(c: &mut Canvas, f: &Fonts, y: f32, winner: &str) -> f32 {
+    const PAD_Y: f32 = 15.0;
+    const PAD_X: f32 = 20.0;
+    const LH: f32 = 32.0;
+    let span = "猜中者";
+    let span_w = c.text_w(span, &f.sans, 12.0, 0.16 * 12.0);
+    let name_x = CX0 + PAD_X + span_w + 14.0;
+    let name_max = CX1 - PAD_X - name_x;
+    let lines = c.wrap(winner, &f.serif_b, 22.0, 0.04 * 22.0, name_max, 2);
+    let h = PAD_Y + lines.len() as f32 * LH + PAD_Y;
+
+    c.rrect_fill(CX0, y, CW, h, 10.0, RED.with_a(0.055));
+    c.rrect_stroke(CX0, y, CW, h, 10.0, 1.0, RED.with_a(0.16));
+    c.text(CX0 + PAD_X, y + PAD_Y + 19.0, span, &f.sans, 12.0, INK3, 0.16 * 12.0);
+    for (i, line) in lines.iter().enumerate() {
+        c.text(name_x, y + PAD_Y + 19.0 + i as f32 * LH, line, &f.serif_b, 22.0, INK, 0.04 * 22.0);
+    }
+    y + h
 }
 
 /// 排行榜卡：前三名实心朱砂号牌，其余描边；条长按最高分归一化
-pub fn rank_card(rank: &RankBoard) -> String {
+pub fn rank_card(c: &mut Canvas, f: &Fonts, rank: &RankBoard) -> f32 {
+    let mut y = shell_head(c, f, &rank.title, &rank.subtitle, false);
+
     if rank.items.is_empty() {
-        let body = r#"<div class="empty">当前还没有人猜对过，第一个名字留给你</div>"#;
-        return shell(&rank.title, &rank.subtitle, "", body, "猜中一次即入榜");
+        y = draw_empty(c, f, y, "当前还没有人猜对过，第一个名字留给你");
+        return shell_foot(c, f, y, "猜中一次即入榜");
     }
 
-    let top = rank.items.iter().map(|i| i.score).max().unwrap_or(1).max(1);
-    let mut body = String::new();
+    let top = rank.items.iter().map(|i| i.score).max().unwrap_or(1).max(1) as f32;
     for (idx, item) in rank.items.iter().enumerate() {
-        let place = idx + 1;
-        // 榜单只有一种量纲（猜中次数），条长按榜首归一化即可，不必再分色
-        body.push_str(&format!(
-            r#"<div class="lrow" style="--c:var(--red);--w:{width:.1}%">
-<div class="lrk{top_cls}">{place}</div>
-<div class="lmid"><div class="lname">{name}</div><div class="bar"><span></span></div></div>
-<div class="lsc"><b>{score}</b><span>胜</span></div></div>"#,
-            width = (item.score as f64 / top as f64) * 100.0,
-            top_cls = if place <= 3 { " top" } else { "" },
-            place = place,
-            name = esc(&item.name),
-            score = item.score,
-        ));
+        y = draw_rank_row(c, f, y, idx + 1, item, top, idx + 1 == rank.items.len());
     }
 
+    // 榜单只有一种量纲（猜中次数），条长按榜首归一化即可，不必再分色
+    y += 24.0;
     let total: i64 = rank.items.iter().map(|i| i.score).sum();
-    body.push_str(&format!(
-        r#"<div class="stats">{}{}{}</div>"#,
-        stat(&group(rank.items.len()), "上榜人数", false),
-        stat(&group(total as usize), "合计猜中", false),
-        stat(&group(top as usize), "榜首战绩", false),
-    ));
+    y = draw_stats(
+        c,
+        f,
+        y,
+        &[
+            (group(rank.items.len()), "上榜人数"),
+            (group(total as usize), "合计猜中"),
+            (group(top as usize), "榜首战绩"),
+        ],
+    );
 
-    shell(
-        &rank.title,
-        &rank.subtitle,
-        "",
-        &body,
-        "每日一词 · 每人每日至多一胜",
-    )
+    shell_foot(c, f, y, "每日一词 · 每人每日至多一胜")
+}
+
+fn draw_rank_row(c: &mut Canvas, f: &Fonts, y: f32, place: usize, item: &RankItem, top: f32, last: bool) -> f32 {
+    const ROW_H: f32 = 72.0;
+    // 号牌
+    let lx = CX0 + 12.0;
+    let ly = y + (ROW_H - 38.0) / 2.0;
+    if place <= 3 {
+        c.rrect_fill(lx, ly, 38.0, 38.0, 9.0, RED);
+        c.text_center(lx + 19.0, ly + 19.0, &place.to_string(), &f.sans_b, 17.0, CREAM, 0.0);
+    } else {
+        c.rrect_fill(lx, ly, 38.0, 38.0, 9.0, RED.with_a(0.09));
+        c.rrect_stroke(lx, ly, 38.0, 38.0, 9.0, 1.0, RED.with_a(0.22));
+        c.text_center(lx + 19.0, ly + 19.0, &place.to_string(), &f.sans_b, 17.0, RED, 0.0);
+    }
+
+    // 名字 + 条
+    let name_x = lx + 38.0 + 16.0;
+    let name_max = CX1 - 78.0 - 16.0 - name_x;
+    let name = c.ellipsis(&item.name, &f.serif_b, 22.0, 0.04 * 22.0, name_max);
+    c.text(name_x, y + 15.0 + 19.0, &name, &f.serif_b, 22.0, INK, 0.04 * 22.0);
+    let bar_y = y + 15.0 + 26.0 + 11.0;
+    c.rrect_fill(name_x, bar_y, name_max, 5.0, 2.5, SEPIA.with_a(0.10));
+    let bw = (name_max * item.score as f32 / top).max(5.0);
+    c.rrect_fill(name_x, bar_y, bw, 5.0, 2.5, RED);
+
+    // 分数
+    let score = item.score.to_string();
+    let unit_w = c.text_w("胜", &f.serif_b, 14.0, 0.0);
+    let score_w = c.text_w(&score, &f.sans_b, 26.0, 0.0);
+    c.text(CX1 - unit_w, y + 15.0 + 19.0, "胜", &f.serif_b, 14.0, INK3, 0.0);
+    c.text(CX1 - unit_w - 4.0 - score_w, y + 15.0 + 19.0, &score, &f.sans_b, 26.0, INK, 0.0);
+
+    if !last {
+        dotted_sep(c, y + ROW_H);
+    }
+    y + ROW_H
 }
 
 /// 指令卡：左栏指令与别名，右栏一句话说明。
 ///
 /// 指令一律带上本机真实的前缀，图里看到什么就照抄什么，不用再猜要不要加斜杠。
-pub fn help_card(prefix: &str) -> String {
-    let mut body = String::new();
-    for (cmd, extra, desc) in COMMAND_ROWS {
-        let extra = match extra.is_empty() {
-            true => String::new(),
-            false if extra.starts_with('[') => format!(r#" <i>{}</i>"#, esc(extra)),
-            false => format!(r#"<u>亦可 {}{}</u>"#, esc(prefix), esc(extra)),
-        };
-        body.push_str(&format!(
-            r#"<div class="cmd"><div class="ck">{}{}{}</div><div class="cd">{}</div></div>"#,
-            esc(prefix),
-            esc(cmd),
-            extra,
-            esc(desc),
-        ));
+pub fn help_card(c: &mut Canvas, f: &Fonts, prefix: &str) -> f32 {
+    let sub = format!("共 {} 条指令 · 群内发送即可", COMMAND_ROWS.len());
+    let mut y = shell_head(c, f, "词意指令", &sub, false);
+
+    for (i, (cmd, extra, desc)) in COMMAND_ROWS.iter().enumerate() {
+        let has_u = !extra.is_empty() && !extra.starts_with('[');
+        let row_h = if has_u { 74.0 } else { 55.0 };
+        let base = y + 15.0 + 19.0;
+        let main = format!("{prefix}{cmd}");
+        c.text(CX0 + 12.0, base, &main, &f.serif_b, 20.0, INK, 0.06 * 20.0);
+        if extra.starts_with('[') {
+            let w = c.text_w(&main, &f.serif_b, 20.0, 0.06 * 20.0);
+            c.text(CX0 + 12.0 + w + 6.0, base, extra, &f.sans, 13.5, RED, 0.0);
+        } else if has_u {
+            c.text(
+                CX0 + 12.0,
+                base + 24.0 + 5.0 + 12.0,
+                &format!("亦可 {prefix}{extra}"),
+                &f.sans,
+                12.5,
+                INK3,
+                0.0,
+            );
+        }
+        c.text(CX0 + 12.0 + 230.0 + 18.0, base, desc, &f.sans, 15.5, INK2, 0.0);
+        y += row_h;
+        if i + 1 < COMMAND_ROWS.len() {
+            dotted_sep(c, y);
+        }
     }
 
-    let sub = format!("共 {} 条指令 · 群内发送即可", COMMAND_ROWS.len());
-    shell(
-        "词意指令",
-        &sub,
-        "",
-        &body,
-        &format!("发送「{prefix}词意玩法」查看规则"),
-    )
+    shell_foot(c, f, y, &format!("发送「{prefix}词意玩法」查看规则"))
 }
 
 /// 规则卡：把玩法讲清楚，示例直接用真实的提示行渲染——
 /// 说明与实战看到的是同一套版式，不必二次翻译
-pub fn rules_card() -> String {
+pub fn rules_card(c: &mut Canvas, f: &Fonts) -> f32 {
+    let mut y = shell_head(c, f, "词意玩法", "猜词 · 看名次 · 顺着邻词收网", true);
+
+    // 一 · 目标
+    y += 20.0;
+    y = draw_section_head(c, f, y, "一", "目标");
+    y = draw_sb(c, f, y, "猜出系统每天选定的那个两字词语。全群共用一个词，谁先猜中算谁的。");
+    y += 18.0;
+    dotted_sep(c, y);
+
+    // 二 · 反馈
+    y += 20.0;
+    y = draw_section_head(c, f, y, "二", "反馈");
+    y = draw_sb(c, f, y, "每猜一个词，若它落在该词的语义排名里，就会得到一个名次与它的左右邻词。名次越小，离答案越近。");
     let sample = [
         HintRow { rank: 14, prev: "器".into(), word: "镯子".into(), next: "玉".into(), fresh: false },
         HintRow { rank: 15, prev: "子".into(), word: "玉佩".into(), next: "东".into(), fresh: false },
         HintRow { rank: 16, prev: "佩".into(), word: "东西".into(), next: "冥".into(), fresh: true },
     ];
-    let rows: String = sample.iter().map(|r| hint_row(r, 3000)).collect();
-
-    // 五档距离的图例：颜色、称呼、名次区间三者对上号，盘面上的色条才读得懂
-    let scale: String = [
-        (1, "#1 — #10"),
-        (11, "#11 — #50"),
-        (51, "#51 — #200"),
-        (201, "#201 — #1000"),
-        (1001, "#1000 之后"),
-    ]
-    .iter()
-    .map(|(rank, range)| {
-        let (label, color) = tier(*rank);
-        format!(r#"<div class="tg" style="--c:{color}"><b>{label}</b><span>{range}</span></div>"#)
-    })
-    .collect();
-
-    let body = format!(
-        r#"<div class="sec"><div class="sh"><span class="sn">一</span>目标</div>
-<div class="sb">猜出系统每天选定的那个两字词语。全群共用一个词，谁先猜中算谁的。</div></div>
-<div class="sec"><div class="sh"><span class="sn">二</span>反馈</div>
-<div class="sb">每猜一个词，若它落在该词的语义排名里，就会得到一个名次与它的左右邻词。名次越小，离答案越近。</div>
-{rows}
-<div class="key">
-<div class="ki"><b>？佩</b><span>名次更靠前（更近）的那个词，末字是「佩」</span></div>
-<div class="ki"><b>冥？</b><span>名次更靠后（更远）的那个词，首字是「冥」</span></div>
-<div class="ki"><b>#15</b><span>语义排名，数字越小离答案越近</span></div>
-<div class="ki"><b class="solid">新</b><span>本次刚猜出来的那一条，会单独标出</span></div>
-</div></div>
-<div class="sec"><div class="sh"><span class="sn">三</span>远近</div>
-<div class="sb">名次按五档标注，色条越长离答案越近（对数刻度，前排之间的差距也看得出来）。</div>
-<div class="tiers">{scale}</div></div>
-<div class="sec"><div class="sh"><span class="sn">四</span>周期</div>
-<div class="sb">每日一词，猜中后次日零点换新；系统记录每个人的猜中次数，可用「词意榜」「词意全榜」查看。</div></div>"#,
-        rows = rows,
-        scale = scale,
+    for (i, row) in sample.iter().enumerate() {
+        y = draw_hint_row(c, f, y, row, 3000, i + 1 == sample.len());
+    }
+    y = draw_key(
+        c,
+        f,
+        y,
+        &[
+            ("？佩", "名次更靠前（更近）的那个词，末字是「佩」", false),
+            ("冥？", "名次更靠后（更远）的那个词，首字是「冥」", false),
+            ("#15", "语义排名，数字越小离答案越近", false),
+            ("新", "本次刚猜出来的那一条，会单独标出", true),
+        ],
     );
+    y += 18.0;
+    dotted_sep(c, y);
 
-    shell(
-        "词意玩法",
-        "猜词 · 看名次 · 顺着邻词收网",
-        &cells("", "sm"),
-        &body,
-        "发送「词意猜测 词语」即可开局",
-    )
+    // 三 · 远近
+    y += 20.0;
+    y = draw_section_head(c, f, y, "三", "远近");
+    y = draw_sb(c, f, y, "名次按五档标注，色条越长离答案越近（对数刻度，前排之间的差距也看得出来）。");
+    y += 16.0;
+    y = draw_tiers(
+        c,
+        f,
+        y,
+        &[
+            ("咫尺", "#B0342A", "#1 — #10"),
+            ("相邻", "#C0662A", "#11 — #50"),
+            ("相近", "#A08420", "#51 — #200"),
+            ("相关", "#4B7A62", "#201 — #1000"),
+            ("天涯", "#5D6C85", "#1000 之后"),
+        ],
+    );
+    y += 18.0;
+    dotted_sep(c, y);
+
+    // 四 · 周期
+    y += 20.0;
+    y = draw_section_head(c, f, y, "四", "周期");
+    y = draw_sb(c, f, y, "每日一词，猜中后次日零点换新；系统记录每个人的猜中次数，可用「词意榜」「词意全榜」查看。");
+
+    shell_foot(c, f, y, "发送「词意猜测 词语」即可开局")
 }
 
-/// 按回应类型选卡片；`Notice` 不出图，返回 None 由调用方走文本
-pub fn render(reply: &Reply, prefix: &str) -> Option<String> {
-    match reply {
-        Reply::Board(board) => Some(board_card(board)),
-        Reply::Win(win) => Some(win_card(win)),
-        Reply::Rank(rank) => Some(rank_card(rank)),
-        Reply::Help => Some(help_card(prefix)),
-        Reply::Rules => Some(rules_card()),
-        Reply::Notice(_) => None,
+/// 分区标题：编号印 + 标题
+fn draw_section_head(c: &mut Canvas, f: &Fonts, y: f32, num: &str, title: &str) -> f32 {
+    c.rrect_fill(CX0 + 2.0, y, 24.0, 24.0, 4.0, RED);
+    c.text_center(CX0 + 14.0, y + 12.0, num, &f.sans_b, 13.0, CREAM, 0.0);
+    c.text(CX0 + 2.0 + 24.0 + 11.0, mid_baseline(y + 12.0, 21.0), title, &f.serif_b, 21.0, INK, 0.1 * 21.0);
+    y + 25.0
+}
+
+/// 分区正文：自动折行，行高 1.85
+fn draw_sb(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
+    let lh = 16.0 * 1.85;
+    let lines = c.wrap(text, &f.sans, 16.0, 0.0, CW - 4.0, 6);
+    let mut by = y + 12.0 + 14.0;
+    for line in &lines {
+        c.text(CX0 + 2.0, by, line, &f.sans, 16.0, INK2, 0.0);
+        by += lh;
     }
+    y + 12.0 + lines.len() as f32 * lh
 }
 
-// ================= 截图 =================
+/// 图例键：`（词, 说明, 是否实心印）`
+fn draw_key(c: &mut Canvas, f: &Fonts, y: f32, rows: &[(&str, &str, bool)]) -> f32 {
+    let mut ky = y + 16.0;
+    const BH: f32 = 35.0;
+    for (term, desc, solid) in rows {
+        if *solid {
+            c.rrect_fill(CX0 + 2.0, ky, 96.0, BH, 6.0, RED);
+            c.text_center(CX0 + 50.0, ky + BH / 2.0, term, &f.serif_b, 19.0, CREAM, 0.08 * 19.0);
+        } else {
+            c.rrect_fill(CX0 + 2.0, ky, 96.0, BH, 6.0, RED.with_a(0.07));
+            dashed_rect(c, CX0 + 2.0, ky, 96.0, BH, RED.with_a(0.26));
+            c.text_center(CX0 + 50.0, ky + BH / 2.0, term, &f.serif_b, 19.0, RED, 0.08 * 19.0);
+        }
+        c.text(CX0 + 2.0 + 96.0 + 14.0, mid_baseline(ky + BH / 2.0, 15.0), desc, &f.sans, 15.0, INK2, 0.0);
+        ky += BH + 10.0;
+    }
+    ky - 10.0
+}
 
-/// 把卡片 HTML 截成图，返回 base64。
-///
-/// 先按固定宽度定版，量出实际高度后再放大视口重截，长卡片一次出完不被截断。
-/// `scale` 是设备像素比：版心宽度不变、出图分辨率翻倍，字形边缘更实；
-/// 取值过大只会把图撑肥，限制在 1—4 倍。
-pub async fn capture(html: &str, scale: f64) -> Result<String> {
-    let scale = if scale.is_finite() {
-        scale.clamp(1.0, 4.0)
-    } else {
-        3.0
+/// 五档距离图例
+fn draw_tiers(c: &mut Canvas, f: &Fonts, y: f32, tiers: &[(&str, &str, &str)]) -> f32 {
+    let gap = 9.0;
+    let tw = (CW - gap * 4.0) / 5.0;
+    let h = 60.0;
+    for (i, (label, color, range)) in tiers.iter().enumerate() {
+        let x = CX0 + (tw + gap) * i as f32;
+        let ink = Ink::hex(color);
+        c.rrect_fill(x, y, tw, h, 8.0, Ink::rgb(255, 255, 255).with_a(0.5));
+        c.rrect_stroke(x, y, tw, h, 8.0, 1.0, SEPIA.with_a(0.20));
+        c.rect(x + 1.0, y, tw - 2.0, 2.0, ink);
+        c.text_center(x + tw / 2.0, y + 19.0, label, &f.serif_b, 16.0, ink, 0.1 * 16.0);
+        c.text_center(x + tw / 2.0, y + 44.0, range, &f.sans, 11.5, INK3, 0.0);
+    }
+    y + h
+}
+
+// ================= 入口 =================
+
+/// 预分配画布高度（逻辑像素）：按内容类型给足上界，绘制完再裁掉空白。
+fn alloc_height(reply: &Reply) -> f32 {
+    let base = match reply {
+        Reply::Board(b) => {
+            430.0 + b.rows.len() as f32 * 80.0
+                + if b.rows.is_empty() { 160.0 } else { 0.0 }
+                + if b.notice.is_some() { 84.0 } else { 0.0 }
+        }
+        Reply::Win(_) => 780.0,
+        Reply::Rank(r) => {
+            440.0 + r.items.len() as f32 * 76.0 + if r.items.is_empty() { 160.0 } else { 0.0 }
+        }
+        Reply::Help => 820.0,
+        Reply::Rules => 1560.0,
+        Reply::Notice(_) => 0.0,
     };
-    let browser = Browser::instance().await;
-    let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?;
+    (base + 100.0).min(3000.0)
+}
 
-    let result = async {
-        tab.set_viewport(&Viewport::new(WIDTH, 600).with_device_scale_factor(scale))
-            .await?;
-        tab.set_content(html).await?;
-        tokio::time::sleep(Duration::from_millis(150)).await;
+/// 按回应类型选卡片并原生绘制成 PNG base64；
+/// `Notice` 不出图，返回 None 由调用方走文本；字体不可用同样退回文本。
+pub fn render(reply: &Reply, prefix: &str, scale: f64) -> Option<String> {
+    let f = Fonts::get()?;
+    let s = if scale.is_finite() { scale.clamp(1.0, 4.0) as f32 } else { 3.0 };
+    let mut c = Canvas::new(VIEW_W, alloc_height(reply), s);
 
-        let height = tab
-            .evaluate("document.body.scrollHeight")
-            .await?
-            .as_f64()
-            .unwrap_or(900.0) as u32;
-        let viewport =
-            Viewport::new(WIDTH, (height + 40).clamp(320, 12000)).with_device_scale_factor(scale);
-        tab.set_viewport(&viewport).await?;
-        tokio::time::sleep(Duration::from_millis(80)).await;
+    let bottom = match reply {
+        Reply::Board(board) => board_card(&mut c, f, board),
+        Reply::Win(win) => win_card(&mut c, f, win),
+        Reply::Rank(rank) => rank_card(&mut c, f, rank),
+        Reply::Help => help_card(&mut c, f, prefix),
+        Reply::Rules => rules_card(&mut c, f),
+        Reply::Notice(_) => return None,
+    };
 
-        let opts = CaptureOptions::new().with_viewport(viewport).with_quality(92);
-        let b64 = tab
-            .find_element(".shot")
-            .await?
-            .screenshot_with_options(opts)
-            .await?;
-        Ok::<String, anyhow::Error>(b64)
-    }
-    .await;
-
-    let _ = tab.close().await;
-    result
+    let img: RgbaImage = c.crop(bottom);
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    Some(STANDARD.encode(png))
 }
 
 #[cfg(test)]
@@ -666,44 +816,39 @@ mod tests {
         }
     }
 
-    /// 把五种卡片的 HTML 落到 `CIYI_CARD_DUMP` 指定的目录，方便肉眼校版：
-    ///   CIYI_CARD_DUMP=/tmp/ciyi cargo test ciyi::card::tests::dump -- --ignored
-    #[test]
-    #[ignore = "仅用于人工核对排版"]
-    fn dump_sample_cards() {
-        let Ok(dir) = std::env::var("CIYI_CARD_DUMP") else {
-            return;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let win = Win {
+    fn sample_win() -> Win {
+        Win {
             answer: "东西".into(),
             winner: "夜航船".into(),
             guesses: 23,
             hits: 9,
             started_at: Utc::now() - ChronoDuration::minutes(194),
-        };
-        let rank = RankBoard {
+        }
+    }
+
+    fn sample_rank() -> RankBoard {
+        RankBoard {
             title: "词意榜".into(),
             subtitle: "本群 · 猜中次数前 6 名".into(),
             items: [("夜航船", 12), ("清风", 9), ("南山", 7), ("拾遗", 4), ("白露", 2), ("无名氏", 1)]
                 .iter()
-                .map(|(name, score)| RankItem {
-                    name: (*name).into(),
-                    score: *score,
-                })
+                .map(|(name, score)| RankItem { name: (*name).into(), score: *score })
                 .collect(),
-        };
+        }
+    }
 
-        // 群昵称长度不受控，长名字单独出一版校对
-        let long = "✿ 今天也要元气满满地猜词哦超级无敌长的群昵称 ✿ QwQ";
-        let long_win = Win {
-            answer: "东西".into(),
-            winner: long.into(),
-            guesses: 7,
-            hits: 3,
-            started_at: Utc::now() - ChronoDuration::minutes(41),
+    /// 把五种卡片各出一次图，确认都能走完绘制并编码成 PNG：
+    ///   CIYI_CARD_DUMP=/tmp/ciyi cargo test ciyi::card -- --ignored
+    #[test]
+    #[ignore = "需要可用的 CJK 字体，落盘 PNG 供人工核对"]
+    fn renders_sample_cards_to_png() {
+        let Ok(dir) = std::env::var("CIYI_CARD_DUMP") else {
+            return;
         };
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let long = "✿ 今天也要元气满满地猜词哦超级无敌长的群昵称 ✿ QwQ";
+        let long_win = Win { winner: long.into(), guesses: 7, hits: 3, ..sample_win() };
         let long_rank = RankBoard {
             title: "词意全榜".into(),
             subtitle: "全部群聊 · 猜中次数前 3 名".into(),
@@ -714,69 +859,31 @@ mod tests {
             ],
         };
 
-        for (name, html) in [
-            ("board.html", board_card(&sample_board(4, None))),
-            ("win_long_name.html", win_card(&long_win)),
-            ("rank_long_name.html", rank_card(&long_rank)),
-            (
-                "board_notice.html",
-                board_card(&sample_board(0, Some("「玉佩」已经猜过了"))),
-            ),
-            ("board_empty.html", board_card(&Board {
+        let cases: Vec<(&str, Reply)> = vec![
+            ("board", Reply::Board(sample_board(4, None))),
+            ("board_notice", Reply::Board(sample_board(0, Some("「玉佩」已经猜过了")))),
+            ("board_empty", Reply::Board(Board {
                 notice: None, rows: vec![], hidden: 0, guesses: 3, hits: 0, pool: 4831,
             })),
-            ("win.html", win_card(&win)),
-            ("rank.html", rank_card(&rank)),
-            ("help.html", help_card("/")),
-            ("rules.html", rules_card()),
-        ] {
-            std::fs::write(format!("{}/{}", dir, name), html).unwrap();
-        }
-    }
-
-    /// 端到端跑一次截图，确认 HTML 能被无头浏览器吃下并出图：
-    ///   CIYI_CARD_DUMP=/tmp/ciyi cargo test ciyi::card::tests::captures -- --ignored
-    #[tokio::test]
-    #[ignore = "需要可用的无头浏览器"]
-    async fn captures_a_card_to_png() {
-        let Ok(dir) = std::env::var("CIYI_CARD_DUMP") else {
-            return;
-        };
-        dump_sample_cards();
-
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        for name in [
-            "board",
-            "board_notice",
-            "board_empty",
-            "win",
-            "win_long_name",
-            "rank",
-            "rank_long_name",
-            "help",
-            "rules",
-        ] {
-            let html = std::fs::read_to_string(format!("{}/{}.html", dir, name)).unwrap();
-            let b64 = capture(&html, 2.0).await.expect("截图应当成功");
-            let bytes = STANDARD.decode(&b64).expect("截图应是合法 base64");
-            std::fs::write(format!("{}/{}.png", dir, name), &bytes).unwrap();
+            ("win", Reply::Win(sample_win())),
+            ("win_long_name", Reply::Win(long_win)),
+            ("rank", Reply::Rank(sample_rank())),
+            ("rank_long_name", Reply::Rank(long_rank)),
+            ("help", Reply::Help),
+            ("rules", Reply::Rules),
+        ];
+        for (name, reply) in cases {
+            let b64 = render(&reply, "/", 3.0).expect("字体可用时应当出图");
+            let bytes = STANDARD.decode(&b64).expect("应是合法 base64");
+            assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{name} 应是 PNG");
+            std::fs::write(format!("{dir}/{name}.png"), &bytes).unwrap();
             println!("{name} 出图 {} 字节", bytes.len());
         }
     }
 
     #[test]
-    fn escapes_user_supplied_names() {
-        let rank = RankBoard {
-            title: "词意榜".into(),
-            subtitle: String::new(),
-            items: vec![RankItem {
-                name: r#"<img src=x onerror="alert(1)">"#.into(),
-                score: 3,
-            }],
-        };
-        let html = rank_card(&rank);
-        assert!(!html.contains("<img src=x"));
-        assert!(html.contains("&lt;img src=x"));
+    fn notice_never_renders() {
+        assert!(render(&Reply::Notice("不在词库中".into()), "/", 3.0).is_none());
     }
 
     #[test]
@@ -796,87 +903,45 @@ mod tests {
         }
     }
 
-    #[test]
-    fn board_card_renders_hints_and_summary() {
-        let html = board_card(&sample_board(4, Some("「行头」未进入排名")));
-        assert!(html.contains("东西"), "应画出猜过的词");
-        assert!(html.contains("咫尺"), "前排应标出距离档");
-        assert!(html.contains("「行头」未进入排名"), "提示条应保留");
-        assert!(html.contains("另有 4 条更远的记录未列出"));
-        assert!(html.contains(r#"class="row fresh""#), "本次猜测应高亮");
-    }
 
+    /// 复现：notice + 10 行 + hidden，最大规模 board 卡是否画得下
     #[test]
-    fn win_card_puts_the_answer_in_grid_cells() {
-        let win = Win {
-            answer: "东西".into(),
-            winner: "夜航船".into(),
-            guesses: 23,
-            hits: 9,
-            started_at: Utc::now() - ChronoDuration::minutes(194),
+    #[ignore]
+    fn repro_worst_case_board() {
+        let rows: Vec<(usize, &str, &str, &str)> = vec![
+            (7, "环", "手镯", "玉"),
+            (14, "器", "镯子", "玉"),
+            (15, "子", "玉佩", "东"),
+            (137, "佩", "东西", "冥"),
+            (864, "西", "物件", "行"),
+            (2301, "件", "行头", "衣"),
+            (4500, "行", "衣物", "穿"),
+            (7800, "物", "服装", "面"),
+            (12000, "衣", "穿戴", "环"),
+            (17000, "穿", "打扮", "天"),
+        ];
+        let board = Board {
+            notice: Some("「衣物」不在词库中。".to_string()),
+            rows: rows.iter().enumerate().map(|(i, (rank, prev, word, next))| HintRow {
+                rank: *rank, prev: (*prev).into(), word: (*word).into(), next: (*next).into(), fresh: i == 9,
+            }).collect(),
+            hidden: 1234,
+            guesses: 21,
+            hits: 10,
+            pool: 18054,
         };
-        let html = win_card(&win);
-        assert_eq!(html.matches(r#"class="cell""#).count(), 2, "两字两格");
-        assert!(html.contains("夜航船"));
-        assert!(html.contains("3 小时 14 分"));
-    }
-
-    /// 图里的指令要能直接照抄，前缀必须跟着本机配置走
-    #[test]
-    fn help_card_prints_the_live_prefix() {
-        let html = help_card("/");
-        assert!(html.contains("/词意猜测"));
-        assert!(html.contains("亦可 /词意指令"));
-        assert!(!help_card("").contains("亦可 /"), "没配前缀就不该凭空加一个");
-    }
-
-    #[test]
-    fn rules_card_explains_every_tier() {
-        let html = rules_card();
-        for label in ["咫尺", "相邻", "相近", "相关", "天涯"] {
-            assert!(html.contains(label), "图例缺少「{label}」档");
-        }
-    }
-
-    /// 长昵称不能把版面撑破。
-    ///
-    /// 关键在 `min-width:0`：flex / grid 子项默认 `min-width:auto`，
-    /// 里面 nowrap 的长名字会成为子项的最小宽度，把整行顶出卡片再被
-    /// `.card{overflow:hidden}` 裁掉——省略号根本轮不到生效。
-    #[test]
-    fn long_names_are_bounded_not_overflowing() {
-        let long = "✿ 今天也要元气满满地猜词哦超级无敌长的群昵称 ✿ QwQ".repeat(3);
-
-        let win = win_card(&Win {
-            answer: "东西".into(),
-            winner: long.clone(),
-            guesses: 7,
-            hits: 3,
-            started_at: Utc::now(),
-        });
-        assert!(win.contains(&esc(&long)), "名字要完整写进 HTML，由 CSS 决定截断");
-        assert!(win.contains(".winner b{min-width:0"), "通栏昵称需要 min-width:0");
-        assert!(win.contains("-webkit-line-clamp:2"), "超长昵称最多两行");
-        assert!(win.contains("overflow-wrap:anywhere"), "无空格长串也要能断行");
-
-        let rank = rank_card(&RankBoard {
-            title: "词意榜".into(),
-            subtitle: String::new(),
-            items: vec![RankItem { name: long, score: 4 }],
-        });
-        assert!(rank.contains(".lmid{min-width:0}"), "榜单中间列需要 min-width:0");
-        assert!(rank.contains(r#"class="lmid""#), "中间列要真的用上这个类");
-        assert!(
-            rank.contains("text-overflow:ellipsis"),
-            "单行名字超宽时以省略号收尾"
-        );
-    }
-
-    /// 数字卡也在 flex 里，同样会被长内容顶破
-    #[test]
-    fn stat_tiles_clamp_their_content() {
-        assert!(CSS.contains(".stat{flex:1;min-width:0"));
-        assert!(CSS.contains(".stat b.w{"));
+        let f = Fonts::get().unwrap();
+        let s = 3.0f32;
+        let alloc = alloc_height(&Reply::Board(board.clone()));
+        let mut c = Canvas::new(VIEW_W, alloc, s);
+        let bottom = board_card(&mut c, f, &board);
+        eprintln!("WORST alloc={alloc} bottom={bottom}");
+        let img = c.crop(bottom);
+        eprintln!("WORST final {:?}", img.dimensions());
+        image::DynamicImage::ImageRgba8(img)
+            .save(std::env::var("CIYI_CARD_DUMP").unwrap() + "/repro_worst.png").unwrap();
+        // 关键断言：内容底界不能超过画布，否则会静默截断
+        assert!(bottom <= alloc, "内容 {bottom} 超出画布 {alloc}");
     }
 
     #[test]

@@ -116,7 +116,7 @@ pub fn handle(
         };
 
         // 1. 全局指令解析
-        if let Some(cmd) = parser::parse_global(&raw_text) {
+        if let Some(cmd) = parser::parse_global(&raw_text, &crate::command::get_prefixes(&ctx)) {
             logic::execute(cmd, String::new(), vec![], &ctx, &writer, mgr).await;
             return Ok(None); // 指令被消费，不再传递
         }

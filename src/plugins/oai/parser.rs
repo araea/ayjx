@@ -60,11 +60,19 @@ impl Command {
     }
 }
 
-pub fn parse_global(raw: &str) -> Option<Command> {
+pub fn parse_global(raw: &str, prefixes: &[String]) -> Option<Command> {
     let norm = normalize(raw.trim());
 
-    if norm.starts_with("oai") {
-        let rest = norm.get(3..).unwrap_or("").trim();
+    // `oai` 是词指令而非符号指令，帮助里显示为带前缀的写法（默认 `/oai`）。
+    // 这里同时接受带前缀与裸写法，避免「帮助说 /oai、实现只认 oai」。
+    let worded = prefixes
+        .iter()
+        .filter(|prefix| !prefix.is_empty())
+        .find_map(|prefix| norm.strip_prefix(prefix.as_str()))
+        .unwrap_or(norm.as_str());
+
+    if worded.starts_with("oai") {
+        let rest = worded.get(3..).unwrap_or("").trim();
         if rest.is_empty() {
             return Some(Command::new("", Action::Help));
         }

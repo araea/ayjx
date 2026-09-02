@@ -157,8 +157,8 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
             ],
         ),
         "group_title" => (
-            "Bot 为群主时，给自己设置专属头衔",
-            cmds![("我要头衔 <文字>", "设置 Bot 的群专属头衔")],
+            "Bot 为群主时，给申请者设置群专属头衔",
+            cmds![("我要头衔 <文字>", "给自己申请一个群专属头衔")],
         ),
         "ping" => (
             "心跳测试，统计全服 Ping 次数",

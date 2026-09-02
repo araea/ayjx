@@ -39,7 +39,7 @@ impl SatoriClient {
         Self {
             endpoint,
             token: token.filter(|value| !value.trim().is_empty()),
-            http: reqwest::Client::new(),
+            http: crate::http::client(),
             console: false,
             proxy_urls: RwLock::new(Arc::new(Vec::new())),
         }
@@ -49,7 +49,7 @@ impl SatoriClient {
         Self {
             endpoint: String::new(),
             token: None,
-            http: reqwest::Client::new(),
+            http: crate::http::client(),
             console: true,
             proxy_urls: RwLock::new(Arc::new(Vec::new())),
         }

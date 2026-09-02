@@ -5,6 +5,7 @@ mod db;
 mod event;
 #[macro_use]
 mod log;
+mod http;
 mod matcher;
 mod message;
 mod plugins;

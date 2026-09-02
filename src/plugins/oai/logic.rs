@@ -116,7 +116,7 @@ async fn to_data_url(url: &str) -> String {
 async fn download_image_to_data_url(url: &str) -> Option<String> {
     const MAX_BYTES: usize = 20 * 1024 * 1024;
 
-    let resp = reqwest::Client::new()
+    let resp = crate::http::client()
         .get(url)
         .header(
             reqwest::header::USER_AGENT,
@@ -264,7 +264,8 @@ async fn chat(
         generating.set_generating(name, is_priv_ctx, &uid, true);
     }
 
-    let client = Client::with_config(OpenAIConfig::new().with_api_base(api.0).with_api_key(api.1));
+    let client = Client::with_config(OpenAIConfig::new().with_api_base(api.0).with_api_key(api.1))
+        .with_http_client(crate::http::client());
     let mut msgs: Vec<ChatCompletionRequestMessage> = vec![];
 
     let model_lower = agent.model.to_lowercase();
@@ -1390,7 +1391,8 @@ pub async fn execute(
                 OpenAIConfig::new()
                     .with_api_base(api_config.0)
                     .with_api_key(api_config.1),
-            );
+            )
+            .with_http_client(crate::http::client());
             let mut success_count = 0;
 
             for (name, prompt) in target_agents {

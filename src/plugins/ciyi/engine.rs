@@ -559,7 +559,7 @@ pub async fn fetch_words_rank_list(
     word: &str,
 ) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
     let url = format!("https://ci-ying.oss-cn-zhangjiakou.aliyuncs.com/v1/ci-yi-list/{word}.txt");
-    let response = reqwest::get(&url).await?;
+    let response = crate::http::get(&url).await?;
     let response = response.error_for_status()?;
     let body_text = response.text().await?;
     let words_rank_list: Vec<String> = body_text

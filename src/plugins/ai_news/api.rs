@@ -104,7 +104,7 @@ pub(super) fn client(timeout_secs: u64) -> Result<&'static reqwest::Client, ApiE
     if let Some(c) = CLIENT.get() {
         return Ok(c);
     }
-    let built = reqwest::Client::builder()
+    let built = crate::http::builder()
         .timeout(Duration::from_secs(timeout_secs.clamp(3, 60)))
         .user_agent(concat!(
             "ayjx-ai-news/",

@@ -101,7 +101,7 @@ async fn download_avatar_cached(
         }
 
     // 2. 下载
-    let client = reqwest::Client::builder()
+    let client = crate::http::builder()
         .timeout(Duration::from_secs(8))
         .build()
         .ok()?;

@@ -126,7 +126,7 @@ pub fn handle(
                 .await;
 
                 // 下载图片
-                let img_bytes = match reqwest::get(&img_url).await {
+                let img_bytes = match crate::http::get(&img_url).await {
                     Ok(resp) => match resp.bytes().await {
                         Ok(b) => b,
                         Err(e) => {
