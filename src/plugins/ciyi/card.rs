@@ -145,7 +145,9 @@ const CSS: &str = r#"
   border-top:1px dashed rgba(176,52,42,.26)}
 .cell::after{content:"";position:absolute;top:9%;bottom:9%;left:50%;
   border-left:1px dashed rgba(176,52,42,.26)}
-.cell.blank{border-style:dashed;font-size:30px;color:rgba(176,52,42,.42)}
+/* 全角「？」的字形落在字身框左半边，flex 居中的是字身框而非笔画，
+   不补偿的话问号看着总偏左；padding 的一半真正作用到字形上，正好压回中线 */
+.cell.blank{border-style:dashed;font-size:30px;color:rgba(176,52,42,.42);padding-left:.5em}
 .cells.sm .cell{width:50px;height:50px;font-size:26px}
 .cells.sm .cell.blank{font-size:21px}
 .cells.lg .cell{width:104px;height:104px;font-size:60px;border-color:rgba(176,52,42,.5)}
@@ -164,7 +166,7 @@ const CSS: &str = r#"
 .rk b s{text-decoration:none;font-size:16px;font-weight:700;opacity:.5;margin-right:1px}
 .rk em{display:block;margin-top:7px;font-style:normal;font-family:var(--serif);font-size:12.5px;
   font-weight:600;letter-spacing:.2em;color:var(--c);opacity:.8}
-.tri{display:flex;align-items:center;gap:13px}
+.tri{display:flex;align-items:center;gap:18px}
 .wd{font-family:var(--serif);font-size:31px;font-weight:600;letter-spacing:.12em;color:var(--ink)}
 /* 邻词牌：缺的那个字用浅色「？」占位，缺口一眼可见 */
 .nb{font-family:var(--serif);font-size:19px;letter-spacing:.1em;color:#7E7264;
