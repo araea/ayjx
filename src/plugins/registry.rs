@@ -45,9 +45,6 @@ register_plugins!(
         display_name: "统计图表",
         on_connected: Some(stats::on_connected)
     },
-    card {
-        display_name: "卡片解析"
-    },
     gif {
         display_name: "GIF 工具箱"
     },

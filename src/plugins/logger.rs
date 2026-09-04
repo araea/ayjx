@@ -1,7 +1,7 @@
 use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
@@ -10,17 +10,23 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct LoggerConfig {
     enabled: bool,
-    #[serde(default)]
     debug: bool,
 }
 
+impl Default for LoggerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debug: false,
+        }
+    }
+}
+
 pub fn default_config() -> Value {
-    build_config(LoggerConfig {
-        enabled: true,
-        debug: false,
-    })
+    build_config(LoggerConfig::default())
 }
 
 pub fn handle(
@@ -29,10 +35,7 @@ pub fn handle(
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
         // 获取配置
-        let config: LoggerConfig = get_config(&ctx, "logger").unwrap_or(LoggerConfig {
-            enabled: true,
-            debug: false,
-        });
+        let config: LoggerConfig = get_config_or_default(&ctx, "logger");
 
         match &ctx.event {
             EventType::Satori(ev) => {

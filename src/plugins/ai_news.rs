@@ -63,14 +63,13 @@
 //! 本插件只作展示，不参与任何指令解析。
 
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::{get_prefixes, match_command};
+use crate::command::{extract_text_arg, get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config, update_config};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value;
 
@@ -533,18 +532,6 @@ fn parse_time(input: &str) -> (u32, u32, u32) {
 }
 
 // ================= 指令 =================
-
-fn extract_text_arg(args: &[simd_json::OwnedValue]) -> String {
-    let mut buf = String::new();
-    for seg in args {
-        if seg.get_str("type") == Some("text")
-            && let Some(text) = seg.get("data").and_then(|d| d.get_str("text"))
-        {
-            buf.push_str(text);
-        }
-    }
-    buf.trim().to_string()
-}
 
 pub fn handle(
     ctx: Context,

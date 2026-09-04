@@ -2,47 +2,33 @@ use crate::config::build_config;
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
+/// 词云配置：容器级 `#[serde(default)]` 让缺省字段全部回落到 `Default`，单一事实来源。
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct WordCloudConfig {
     pub enabled: bool,
-    #[serde(default = "default_limit")]
     pub limit: usize,
-    #[serde(default = "default_width")]
     pub width: u32,
-    #[serde(default = "default_height")]
     pub height: u32,
-    #[serde(default)]
     pub font_path: Option<String>,
-    #[serde(default)]
     pub font_family: Option<String>,
-    #[serde(default = "default_max_msg")]
     pub max_msg: usize,
 }
 
-fn default_limit() -> usize {
-    50
-}
-
-fn default_width() -> u32 {
-    800
-}
-
-fn default_height() -> u32 {
-    600
-}
-
-fn default_max_msg() -> usize {
-    50000
+impl Default for WordCloudConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            limit: 50,
+            width: 800,
+            height: 600,
+            font_path: None,
+            font_family: None,
+            max_msg: 50000,
+        }
+    }
 }
 
 pub fn default_config() -> Value {
-    build_config(WordCloudConfig {
-        enabled: true,
-        limit: 50,
-        width: 800,
-        height: 600,
-        font_path: None,
-        font_family: None,
-        max_msg: 50000,
-    })
+    build_config(WordCloudConfig::default())
 }

@@ -13,6 +13,8 @@ use toml::Value;
 
 pub type PluginError = Box<dyn std::error::Error + Send + Sync>;
 
+pub type PluginResult<T> = std::result::Result<T, PluginError>;
+
 pub type PluginHandler =
     fn(Context, LockedWriter) -> BoxFuture<'static, Result<Option<Context>, PluginError>>;
 
@@ -258,11 +260,21 @@ pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginErr
 
         // ctx 在这里 Move 进 handler，若插件返回 Some(ctx) 则接力给下一个插件
         // 这样插件拥有 Context 的所有权，可以修改 Context.event 中的内容
-        match (plugin.handler)(ctx, writer.clone()).await? {
-            Some(next_ctx) => {
+        match (plugin.handler)(ctx, writer.clone()).await {
+            Ok(Some(next_ctx)) => {
                 ctx = next_ctx;
             }
-            None => return Ok(()),
+            // None：插件消费了事件，流水线到此为止
+            Ok(None) => return Ok(()),
+            // 单个插件失败不应崩掉整个适配器：记录后按"事件已消费"处理
+            Err(e) => {
+                error!(
+                    target: "Plugin",
+                    "❌ [{}] 处理事件失败: {}",
+                    plugin.name, e
+                );
+                return Ok(());
+            }
         }
     }
 
@@ -321,6 +333,28 @@ where
         .plugins
         .get(plugin_name)
         .and_then(|v| T::deserialize(v.clone()).ok())
+}
+
+/// 读取插件配置，未配置或反序列化失败时回落到 `T::default()`。
+///
+/// 要求配置类型实现 `Default`（约定 `enabled` 默认为 `true`），
+/// 并对反序列化失败打告警，避免配置类型改坏后静默失效难以排查。
+pub fn get_config_or_default<T>(ctx: &Context, plugin_name: &str) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    let guard = ctx.config.read().unwrap();
+    match guard.plugins.get(plugin_name) {
+        None => T::default(),
+        Some(v) => T::deserialize(v.clone()).unwrap_or_else(|e| {
+            warn!(
+                target: "Plugin",
+                "插件 [{}] 配置反序列化失败，已使用默认值: {}",
+                plugin_name, e
+            );
+            T::default()
+        }),
+    }
 }
 
 /// 修改配置 (异步 & 自动持久化 & 线程安全)

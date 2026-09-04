@@ -13,14 +13,13 @@
 mod card;
 
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::{get_prefixes, match_command};
+use crate::command::{extract_text_arg, get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config, get_plugins};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
 const LOG_TARGET: &str = "Plugin/Help";
@@ -107,7 +106,6 @@ const SECTIONS: &[Section] = &[
         members: &[
             "media",
             "sticker",
-            "card",
             "image_split",
             "gif",
             "echo",
@@ -189,10 +187,6 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
                 ("本群本周发言走势", "示例"),
                 ("所有群近7天发言排行榜", "示例：跨全部群"),
             ],
-        ),
-        "card" => (
-            "解析 JSON 卡片消息为可读文本/链接（需引用角色卡图片）",
-            cmds![("读卡 / 解析卡 / 看卡 / card", "引用角色卡图片后发送")],
         ),
         "gif" => (
             "GIF 工具箱：合成、变速、倒放、缩放等",
@@ -433,20 +427,6 @@ fn lookup(ctx: &Context, arg: &str) -> Option<Entry> {
             desc: describe(p.name).0,
             enabled: is_enabled(ctx, p.name),
         })
-}
-
-fn extract_text_arg(args: &[simd_json::OwnedValue]) -> String {
-    let mut buf = String::new();
-    for seg in args {
-        if seg.get_str("type") == Some("text")
-            && let Some(s) = seg
-                .get("data")
-                .and_then(|d| d.get_str("text"))
-        {
-            buf.push_str(s);
-        }
-    }
-    buf.trim().to_string()
 }
 
 /// 一次回复的内容：文本必备，卡片可选（渲染失败时就靠文本兜底）

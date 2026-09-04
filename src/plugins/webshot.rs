@@ -1,15 +1,14 @@
 use crate::adapters::satori::{LockedWriter, send_msg};
+use crate::command::find_url;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
 use anyhow::{Result, anyhow};
 use cdp_html_shot::{Browser, CaptureOptions, ImageFormat, Viewport};
 use futures_util::future::BoxFuture;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
-use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::time;
 use toml::Value;
@@ -25,6 +24,7 @@ pub struct ChannelConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Config {
     pub enabled: bool,
     pub max_height: u32,
@@ -33,21 +33,26 @@ pub struct Config {
     pub viewport_width: u32,
     pub device_scale_factor: f64,
     pub ignore_domains: Vec<String>,
-    #[serde(default)]
     pub channel: ChannelConfig,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_height: 5000,
+            timeout_seconds: 30,
+            quality: 80,
+            viewport_width: 1280,
+            device_scale_factor: 1.0,
+            ignore_domains: vec![],
+            channel: ChannelConfig::default(),
+        }
+    }
+}
+
 pub fn default_config() -> Value {
-    build_config(Config {
-        enabled: true,
-        max_height: 5000,
-        timeout_seconds: 30,
-        quality: 80,
-        viewport_width: 1280,
-        device_scale_factor: 1.0,
-        ignore_domains: vec![],
-        channel: ChannelConfig::default(),
-    })
+    build_config(Config::default())
 }
 
 // ================= Core Logic =================
@@ -120,16 +125,6 @@ async fn capture_url(url: &str, config: &Config, browser_path: Option<String>) -
     base64_data.map_err(|e| anyhow!("Screenshot failed: {}", e))
 }
 
-// ================= Utils =================
-
-static URL_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn extract_url(text: &str) -> Option<String> {
-    let re = URL_REGEX
-        .get_or_init(|| Regex::new(r"https?://[^\s\u4e00-\u9fa5]+").expect("Invalid Regex"));
-    re.find(text).map(|m| m.as_str().to_string())
-}
-
 fn should_process(group_id: Option<i64>, white: &[i64], black: &[i64]) -> bool {
     let gid = match group_id {
         Some(id) => id,
@@ -161,11 +156,7 @@ pub fn handle(
         };
 
         // 读取配置
-        let config: Config = get_config(&ctx, "webshot").unwrap_or_else(|| {
-            // 这里的 fallback 主要是为了防止反序列化失败，正常情况下 init 会写入默认配置
-            let val = default_config();
-            serde_json::from_value(serde_json::to_value(val).unwrap()).unwrap()
-        });
+        let config: Config = get_config_or_default(&ctx, "webshot");
 
         // 获取全局浏览器路径配置
         let browser_path = ctx.config.read().unwrap().browser_path.clone();
@@ -191,13 +182,13 @@ pub fn handle(
                     .find_map(|seg| {
                         seg.get("data")
                             .and_then(|d| d.get_str("text"))
-                            .and_then(extract_url)
+                            .and_then(find_url)
                     })
             } else {
-                extract_url(msg_event.text())
+                find_url(msg_event.text())
             }
         } else {
-            extract_url(msg_event.text())
+            find_url(msg_event.text())
         };
 
         if let Some(url) = url_candidate {
@@ -209,7 +200,7 @@ pub fn handle(
             }
 
             // 执行截图
-            info!(target: "WebShot", "Capturing: {}", url);
+            info!(target: "Plugin/WebShot", "Capturing: {}", url);
 
             match capture_url(&url, &config, browser_path).await {
                 Ok(base64_img) => {
@@ -220,7 +211,7 @@ pub fn handle(
                     send_msg(&ctx, writer, group_id, Some(user_id), msg).await?;
                 }
                 Err(e) => {
-                    error!(target: "WebShot", "Error capturing {}: {}", url, e);
+                    error!(target: "Plugin/WebShot", "Error capturing {}: {}", url, e);
                 }
             }
         }

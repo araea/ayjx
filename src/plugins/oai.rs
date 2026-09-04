@@ -3,6 +3,7 @@ use crate::config::build_config;
 use crate::event::Context;
 use crate::plugins::{PluginError, get_data_dir};
 use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 
 use std::sync::Arc;
@@ -16,10 +17,20 @@ pub mod utils;
 
 use data::MANAGER;
 
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct OaiConfig {
+    enabled: bool,
+}
+
+impl Default for OaiConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 pub fn default_config() -> Value {
-    build_config(serde_json::json!({
-        "enabled": true
-    }))
+    build_config(OaiConfig::default())
 }
 
 pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
@@ -31,14 +42,14 @@ pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         let mgr_clone = mgr.clone();
         tokio::spawn(async move {
             if let Err(e) = mgr_clone.fetch_models().await {
-                warn!(target: "OAI", "初始化获取模型列表失败: {}", e);
+                warn!(target: "Plugin/OAI", "初始化获取模型列表失败: {}", e);
             } else {
-                info!(target: "OAI", "初始化获取模型列表成功");
+                info!(target: "Plugin/OAI", "初始化获取模型列表成功");
             }
         });
 
         if MANAGER.set(mgr).is_err() {
-            warn!(target: "OAI", "Manager 已经被初始化");
+            warn!(target: "Plugin/OAI", "Manager 已经被初始化");
         }
         Ok(())
     })
@@ -104,7 +115,7 @@ pub fn handle(
         let mgr = match MANAGER.get() {
             Some(m) => m,
             None => {
-                error!(target: "OAI", "插件尚未初始化");
+                error!(target: "Plugin/OAI", "插件尚未初始化");
                 return Ok(Some(ctx));
             }
         };

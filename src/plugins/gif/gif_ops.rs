@@ -8,7 +8,7 @@ use image::{
 use std::io::Cursor;
 use std::time::Duration;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+use crate::plugins::PluginResult;
 
 /// 合成 GIF (网格图 -> 动图)
 pub fn grid_to_gif(
@@ -17,7 +17,7 @@ pub fn grid_to_gif(
     cols: u32,
     interval_secs: f64,
     margin: u32,
-) -> Result<String> {
+) -> PluginResult<String> {
     let img = image::load_from_memory(&img_bytes).map_err(|e| e.to_string())?;
     let (width, height) = img.dimensions();
 
@@ -62,7 +62,7 @@ pub fn grid_to_gif(
 }
 
 /// GIF 拼图 (动图 -> 网格图)
-pub fn gif_to_grid(img_bytes: Vec<u8>, cols_opt: Option<u32>) -> Result<String> {
+pub fn gif_to_grid(img_bytes: Vec<u8>, cols_opt: Option<u32>) -> PluginResult<String> {
     let decoder = GifDecoder::new(Cursor::new(img_bytes)).map_err(|e| e.to_string())?;
     let frames: Vec<Frame> = decoder
         .into_frames()
@@ -105,7 +105,7 @@ pub fn gif_to_grid(img_bytes: Vec<u8>, cols_opt: Option<u32>) -> Result<String> 
 }
 
 /// GIF 拆分 (返回 base64 列表)
-pub fn gif_to_frames(img_bytes: Vec<u8>) -> Result<Vec<String>> {
+pub fn gif_to_frames(img_bytes: Vec<u8>) -> PluginResult<Vec<String>> {
     let decoder = GifDecoder::new(Cursor::new(img_bytes)).map_err(|e| e.to_string())?;
     let frames = decoder
         .into_frames()
@@ -125,7 +125,7 @@ pub fn gif_to_frames(img_bytes: Vec<u8>) -> Result<Vec<String>> {
 }
 
 /// GIF 信息
-pub fn gif_info(img_bytes: Vec<u8>) -> Result<String> {
+pub fn gif_info(img_bytes: Vec<u8>) -> PluginResult<String> {
     let len = img_bytes.len();
     let decoder = GifDecoder::new(Cursor::new(&img_bytes)).map_err(|e| e.to_string())?;
     let frames = decoder
@@ -167,7 +167,7 @@ pub enum Transform {
     FlipV,
 }
 
-pub fn process_gif(img_bytes: Vec<u8>, op: Transform) -> Result<String> {
+pub fn process_gif(img_bytes: Vec<u8>, op: Transform) -> PluginResult<String> {
     let decoder = GifDecoder::new(Cursor::new(img_bytes)).map_err(|e| e.to_string())?;
     let mut frames = decoder
         .into_frames()
@@ -243,7 +243,7 @@ where
         .collect()
 }
 
-fn encode_frames_to_b64(frames: Vec<Frame>) -> Result<String> {
+fn encode_frames_to_b64(frames: Vec<Frame>) -> PluginResult<String> {
     let mut buffer = Cursor::new(Vec::new());
     {
         let mut encoder = GifEncoder::new(&mut buffer);

@@ -9,14 +9,13 @@
 //! 但定时任务类配置（如重启时间）需重启后生效。
 
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::match_command;
+use crate::command::{extract_text_arg, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_plugins};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 use toml::map::Map;
 
@@ -213,21 +212,6 @@ fn format_value(v: &Value) -> String {
         Value::Datetime(d) => d.to_string(),
         other => other.to_string(),
     }
-}
-
-fn extract_text_arg(args: &[simd_json::OwnedValue]) -> String {
-    let mut buf = String::new();
-    for seg in args {
-        if seg.get_str("type") == Some("text")
-            && let Some(s) = seg
-                .get("data")
-                .and_then(|d| d.get_str("text"))
-        {
-            buf.push_str(s);
-            buf.push(' ');
-        }
-    }
-    buf.trim().to_string()
 }
 
 // ================= 指令处理 =================

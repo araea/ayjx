@@ -1,10 +1,10 @@
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::get_prefixes;
+use crate::command::strip_prefix;
 use crate::db::queries::get_text_corpus;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -37,23 +37,8 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
         let text = msg.text();
-        let trimmed_text = text.trim();
 
-        let prefixes = get_prefixes(&ctx);
-        let mut matched_content = None;
-
-        if prefixes.is_empty() {
-            matched_content = Some(trimmed_text);
-        } else {
-            for prefix in &prefixes {
-                if trimmed_text.starts_with(prefix) {
-                    matched_content = Some(trimmed_text[prefix.len()..].trim_start());
-                    break;
-                }
-            }
-        }
-
-        let content_to_match = match matched_content {
+        let content_to_match = match strip_prefix(&ctx, text) {
             Some(c) => c,
             None => return Ok(Some(ctx)),
         };
@@ -92,7 +77,7 @@ pub fn handle(
             let target_user = Some(msg.user_id());
 
             // 发送提示
-            let _ = send_msg(
+            send_msg(
                 &ctx,
                 writer.clone(),
                 target_group,
@@ -101,17 +86,17 @@ pub fn handle(
                     .reply(reply_id)
                     .text(format!("⏳ 正在生成 {}...", title)),
             )
-            .await;
+            .await?;
 
             // 生成并发送
             match generate_image(&ctx, query_group_id, query_user_id, start_time, end_time).await {
                 Ok(b64) => {
                     let img_msg = Message::new().image(b64);
-                    let _ = send_msg(&ctx, writer, target_group, target_user, img_msg).await;
+                    send_msg(&ctx, writer, target_group, target_user, img_msg).await?;
                 }
                 Err(e) => {
                     let err_msg = Message::new().text(format!("❌ 生成失败：{}", e));
-                    let _ = send_msg(&ctx, writer, target_group, target_user, err_msg).await;
+                    send_msg(&ctx, writer, target_group, target_user, err_msg).await?;
                     error!(target: "Plugin/WordCloud", "Handler error: {}", e);
                 }
             }
@@ -131,8 +116,7 @@ pub async fn generate_image(
     start_time: i64,
     end_time: i64,
 ) -> Result<String, String> {
-    let config: WordCloudConfig = get_config(ctx, "wordcloud")
-        .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
+    let config: WordCloudConfig = get_config_or_default(ctx, "wordcloud");
 
     if !config.enabled {
         return Err("词云插件未启用".to_string());

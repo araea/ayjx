@@ -1,18 +1,16 @@
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::match_command;
+use crate::command::{extract_text_arg, get_image_url, match_command};
 use crate::config::build_config;
 use crate::event::Context;
+use crate::http::download_bytes;
 use crate::message::Message;
-use crate::plugins::PluginError;
+use crate::plugins::{PluginError, PluginResult};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use toml::Value;
 
 pub mod gif_ops;
 pub mod utils;
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 // =============================
 //      Main Plugin Logic
@@ -54,12 +52,19 @@ const COMMANDS: &[&str] = &[
 ];
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
     enabled: bool,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 pub fn default_config() -> Value {
-    build_config(Config { enabled: true })
+    build_config(Config::default())
 }
 
 pub fn handle(
@@ -78,15 +83,7 @@ pub fn handle(
                 let user_id = msg.user_id();
 
                 // 提取纯文本参数
-                let mut args_text = String::new();
-                for seg in &matched.args {
-                    if seg.get_str("type") == Some("text")
-                        && let Some(t) = seg.get("data").and_then(|d| d.get_str("text"))
-                    {
-                        args_text.push_str(t);
-                        args_text.push(' ');
-                    }
-                }
+                let args_text = extract_text_arg(&matched.args);
                 let args: Vec<&str> = args_text.split_whitespace().collect();
 
                 // 3. 帮助指令
@@ -96,7 +93,7 @@ pub fn handle(
                 }
 
                 // 4. 获取图片
-                let img_url = match utils::get_image_url(
+                let img_url = match get_image_url(
                     &ctx,
                     writer.clone(),
                     &matched.args,
@@ -127,7 +124,7 @@ pub fn handle(
                 )
                 .await;
 
-                let img_bytes = match utils::download_image(&img_url).await {
+                let img_bytes = match download_bytes(&img_url).await {
                     Ok(b) => b,
                     Err(e) => {
                         let _ = send_msg(
@@ -143,7 +140,7 @@ pub fn handle(
                 };
 
                 // 5. 处理逻辑分发
-                let res: Result<Option<String>> = match cmd {
+                let res: PluginResult<Option<String>> = match cmd {
                     "合成gif" => {
                         let (rows, cols) = args
                             .first()

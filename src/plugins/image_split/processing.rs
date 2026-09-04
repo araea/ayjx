@@ -2,16 +2,10 @@ use base64::{Engine as _, engine::general_purpose};
 use image::GenericImageView;
 use std::io::Cursor;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-pub async fn download_image(url: &str) -> Result<Vec<u8>> {
-    let resp = crate::http::get(url).await.map_err(|e| e.to_string())?;
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-    Ok(bytes.to_vec())
-}
+use crate::plugins::PluginResult;
 
 /// 阻塞执行图片裁剪，返回 Base64 列表
-pub fn split_image_blocking(img_bytes: Vec<u8>, rows: u32, cols: u32) -> Result<Vec<String>> {
+pub fn split_image_blocking(img_bytes: Vec<u8>, rows: u32, cols: u32) -> PluginResult<Vec<String>> {
     let img = image::load_from_memory(&img_bytes)
         .map_err(|e| format!("Failed to load image from memory: {}", e))?;
 

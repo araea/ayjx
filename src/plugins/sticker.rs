@@ -1,17 +1,24 @@
 use crate::adapters::satori::{LockedWriter, api, send_msg};
-use crate::command::match_command;
+use crate::command::first_command_match;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::base::ValueAsScalar;
 use toml::Value;
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
     enabled: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 // 收藏指令（内置，无需配置）
@@ -20,7 +27,7 @@ const COMMANDS: &[&str] = &["表情转图片", "收", "偷", "存表情"];
 const RECALL_AFTER_SAVE: bool = false;
 
 pub fn default_config() -> Value {
-    build_config(Config { enabled: true })
+    build_config(Config::default())
 }
 
 pub fn handle(
@@ -33,15 +40,13 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        let config: Config = get_config(&ctx, "sticker")
-            .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
+        let config: Config = get_config_or_default(&ctx, "sticker");
 
         if !config.enabled {
             return Ok(Some(ctx));
         }
 
-        for cmd in COMMANDS {
-            if let Some(matched) = match_command(&ctx, cmd) {
+        if let Some(matched) = first_command_match(&ctx, COMMANDS) {
                 // 必须通过引用回复
                 let reply_id = match matched.reply_id {
                     Some(id_str) => id_str.parse::<i64>().unwrap_or(0),
@@ -121,7 +126,6 @@ pub fn handle(
                     }
                 }
                 return Ok(None);
-            }
         }
 
         Ok(Some(ctx))

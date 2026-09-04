@@ -1,5 +1,5 @@
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::get_prefixes;
+use crate::command::strip_prefix;
 use crate::config::build_config;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
@@ -19,144 +19,79 @@ mod pusher;
 // ================= 配置定义 =================
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct StatsConfig {
     pub enabled: bool,
     /// 字体文件绝对路径。若提供且存在，优先于 `font_family` 使用。
-    #[serde(default)]
     pub font_path: String,
-    #[serde(default = "default_font_family")]
     pub font_family: String,
-    #[serde(default = "default_width")]
     pub width: u32,
-    #[serde(default = "default_height")]
     pub height: u32,
 
     // —— 主动推送总开关与阈值 ——
     /// 群在统计区间内消息数低于此值则跳过推送（避免打扰冷群）
-    #[serde(default = "default_push_min_messages")]
     pub push_min_messages: u64,
 
     // —— 多群推送节奏 ——
     /// 群与群之间的最小等待秒数
-    #[serde(default = "default_push_gap_min")]
     pub push_group_gap_min_seconds: u64,
     /// 群与群之间的最大等待秒数；实际间隔在 min—max 之间随机取值，
     /// 避免所有群在同一时刻收到推送，也让节奏不那么"机器"
-    #[serde(default = "default_push_gap_max")]
     pub push_group_gap_max_seconds: u64,
 
     // —— 每日 23:30 当日总结 ——
-    #[serde(default = "default_true")]
     pub daily_push_enabled: bool,
-    #[serde(default = "default_daily_push_time")]
     pub daily_push_time: String,
 
     // —— 每日 09:00 早安回顾（昨日数据） ——
-    #[serde(default = "default_true")]
     pub morning_recap_enabled: bool,
-    #[serde(default = "default_morning_recap_time")]
     pub morning_recap_time: String,
 
     // —— 每日 12:30 午间速览（今日上午） ——
-    #[serde(default = "default_true")]
     pub noon_brief_enabled: bool,
-    #[serde(default = "default_noon_brief_time")]
     pub noon_brief_time: String,
 
     // —— 每周一 10:00 上周回顾 ——
-    #[serde(default = "default_true")]
     pub weekly_recap_enabled: bool,
-    #[serde(default = "default_weekly_recap_time")]
     pub weekly_recap_time: String,
 
     // —— 每周日 21:00 周末轻松榜（表情包） ——
-    #[serde(default = "default_true")]
     pub weekend_fun_enabled: bool,
-    #[serde(default = "default_weekend_fun_time")]
     pub weekend_fun_time: String,
 
     // —— 每月 1 日 10:20 上月回顾（与周一 10:00 的周报错开，1 号恰逢周一时不会挤在一起）——
-    #[serde(default = "default_true")]
     pub monthly_recap_enabled: bool,
-    #[serde(default = "default_monthly_recap_time")]
     pub monthly_recap_time: String,
 }
 
-fn default_true() -> bool {
-    true
-}
 
-fn default_font_family() -> String {
-    "Noto Sans CJK SC".to_string()
-}
 
-fn default_width() -> u32 {
-    960
-}
 
-fn default_height() -> u32 {
-    800
-}
 
-fn default_push_min_messages() -> u64 {
-    20
-}
-
-fn default_push_gap_min() -> u64 {
-    20
-}
-
-fn default_push_gap_max() -> u64 {
-    75
-}
-
-fn default_daily_push_time() -> String {
-    "23:30:00".to_string()
-}
-
-fn default_morning_recap_time() -> String {
-    "09:00:00".to_string()
-}
-
-fn default_noon_brief_time() -> String {
-    "12:30:00".to_string()
-}
-
-fn default_weekly_recap_time() -> String {
-    "10:00:00".to_string()
-}
-
-fn default_weekend_fun_time() -> String {
-    "21:00:00".to_string()
-}
-
-fn default_monthly_recap_time() -> String {
-    "10:20:00".to_string()
-}
 
 impl Default for StatsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             font_path: String::new(),
-            font_family: default_font_family(),
-            width: default_width(),
-            height: default_height(),
-            push_min_messages: default_push_min_messages(),
-            push_group_gap_min_seconds: default_push_gap_min(),
-            push_group_gap_max_seconds: default_push_gap_max(),
+            font_family: "Noto Sans CJK SC".to_string(),
+            width: 960,
+            height: 800,
+            push_min_messages: 20,
+            push_group_gap_min_seconds: 20,
+            push_group_gap_max_seconds: 75,
             daily_push_enabled: true,
-            daily_push_time: default_daily_push_time(),
+            daily_push_time: "23:30:00".to_string(),
             morning_recap_enabled: true,
-            morning_recap_time: default_morning_recap_time(),
+            morning_recap_time: "09:00:00".to_string(),
             noon_brief_enabled: true,
-            noon_brief_time: default_noon_brief_time(),
+            noon_brief_time: "12:30:00".to_string(),
             weekly_recap_enabled: true,
-            weekly_recap_time: default_weekly_recap_time(),
+            weekly_recap_time: "10:00:00".to_string(),
             weekend_fun_enabled: true,
-            weekend_fun_time: default_weekend_fun_time(),
+            weekend_fun_time: "21:00:00".to_string(),
             monthly_recap_enabled: true,
-            monthly_recap_time: default_monthly_recap_time(),
+            monthly_recap_time: "10:20:00".to_string(),
         }
     }
 }
@@ -197,24 +132,7 @@ pub fn handle(
             Some(m) => m,
             None => return Ok(Some(ctx)),
         };
-        let text = msg.text();
-        let trimmed_text = text.trim();
-
-        let prefixes = get_prefixes(&ctx);
-        let mut matched_content = None;
-
-        if prefixes.is_empty() {
-            matched_content = Some(trimmed_text);
-        } else {
-            for prefix in &prefixes {
-                if trimmed_text.starts_with(prefix) {
-                    matched_content = Some(trimmed_text[prefix.len()..].trim_start());
-                    break;
-                }
-            }
-        }
-
-        let content = match matched_content {
+        let content = match strip_prefix(&ctx, msg.text()) {
             Some(c) => c,
             None => return Ok(Some(ctx)),
         };
@@ -239,14 +157,14 @@ pub fn handle(
         let user_id = msg.user_id();
 
         if scope == "本群" && group_id.is_none() {
-            let _ = send_msg(
+            send_msg(
                 &ctx,
                 writer,
                 None,
                 Some(user_id),
                 r#"请在群聊中使用"本群"相关指令。"#,
             )
-            .await;
+            .await?;
             return Ok(None);
         }
 
@@ -288,17 +206,17 @@ pub fn handle(
         match result_img {
             Ok(b64) => {
                 let reply = Message::new().image(b64);
-                let _ = send_msg(&ctx, writer, group_id, Some(user_id), reply).await;
+                send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
             }
             Err(e) => {
-                let _ = send_msg(
+                send_msg(
                     &ctx,
                     writer,
                     group_id,
                     Some(user_id),
                     format!("❌ 生成失败：{}", e),
                 )
-                .await;
+                .await?;
             }
         }
 

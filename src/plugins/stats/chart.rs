@@ -4,8 +4,8 @@ pub mod renderer;
 pub mod utils;
 
 use crate::event::Context;
-use crate::plugins::get_config;
-use crate::plugins::stats::{StatsConfig, default_config};
+use crate::plugins::get_config_or_default;
+use crate::plugins::stats::StatsConfig;
 
 use self::avatar::prepare_avatars;
 use self::data_loader::{BarData, SeriesData, fetch_bar_data, fetch_line_data};
@@ -46,8 +46,7 @@ pub async fn generate(
     title: &str,
 ) -> Result<String, String> {
     let db = &ctx.db;
-    let config: StatsConfig = get_config(ctx, "stats")
-        .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
+    let config: StatsConfig = get_config_or_default(ctx, "stats");
 
     // 1. 走势图
     if chart_type == "走势" {

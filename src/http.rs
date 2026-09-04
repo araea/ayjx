@@ -28,11 +28,7 @@ fn ca_bundle() -> Option<&'static [u8]> {
                 .ok()
                 .into_iter()
                 .chain(CA_BUNDLES.iter().map(|path| (*path).to_string()))
-                .find_map(|path| {
-                    std::fs::read(&path)
-                        .ok()
-                        .filter(|bytes| !bytes.is_empty())
-                })
+                .find_map(|path| std::fs::read(&path).ok().filter(|bytes| !bytes.is_empty()))
         })
         .as_deref()
 }
@@ -63,4 +59,11 @@ pub fn client() -> Client {
 /// `reqwest::get` 的替代：共享连接池，且带正确的根证书。
 pub async fn get<U: reqwest::IntoUrl>(url: U) -> reqwest::Result<reqwest::Response> {
     client().get(url).send().await
+}
+
+/// 下载资源到内存（图片等小体积文件用）。
+pub async fn download_bytes(url: &str) -> reqwest::Result<Vec<u8>> {
+    let resp = get(url).await?;
+    let bytes = resp.error_for_status()?.bytes().await?;
+    Ok(bytes.to_vec())
 }

@@ -100,14 +100,14 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let ctx = daily_ctx.clone();
             async move {
                 info!(
-                    target: "Plugin/restart",
+                    target: "Plugin/Restart",
                     "每日定时重启触发，开始执行重启流程..."
                 );
                 do_restart(&ctx, "每日定时".to_string()).await;
             }
         });
         info!(
-            target: "Plugin/restart",
+            target: "Plugin/Restart",
             "已计划每日 {:02}:{:02} 自动重启",
             h,
             m
@@ -124,7 +124,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                     match current_rss_mb() {
                         Some(mb) if mb >= threshold => {
                             warn!(
-                                target: "Plugin/restart",
+                                target: "Plugin/Restart",
                                 "内存占用 {}MB 达到阈值 {}MB，提前重启",
                                 mb,
                                 threshold
@@ -134,7 +134,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                         }
                         Some(mb) => {
                             debug!(
-                                target: "Plugin/restart",
+                                target: "Plugin/Restart",
                                 "内存巡检: {}/{}MB",
                                 mb,
                                 threshold
@@ -142,7 +142,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                         }
                         None => {
                             debug!(
-                                target: "Plugin/restart",
+                                target: "Plugin/Restart",
                                 "当前平台不支持读取内存占用，跳过巡检"
                             );
                         }
@@ -150,7 +150,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 }
             });
             info!(
-                target: "Plugin/restart",
+                target: "Plugin/Restart",
                 "已开启内存监控: 阈值 {}MB，每 {} 分钟巡检一次",
                 threshold,
                 cfg.memory_check_interval_minutes
@@ -194,7 +194,7 @@ pub fn handle(
                 .reply(message_id)
                 .text(format!("⏳ 收到，{} 秒后重启，稍等片刻~", delay));
             if let Err(e) = send_msg(&ctx, writer.clone(), group_id, Some(user_id), reply).await {
-                error!(target: "Plugin/restart", "重启通知发送失败: {}", e);
+                error!(target: "Plugin/Restart", "重启通知发送失败: {}", e);
             }
 
             // 延迟执行重启，确保回复消息已刷新到 WebSocket
@@ -217,14 +217,14 @@ pub fn handle(
 async fn do_restart(ctx: &Context, reason: String) {
     if RESTARTING.swap(true, Ordering::SeqCst) {
         info!(
-            target: "Plugin/restart",
+            target: "Plugin/Restart",
             "重启流程已在进行中，忽略本次触发 ({})",
             reason
         );
         return;
     }
     info!(
-        target: "Plugin/restart",
+        target: "Plugin/Restart",
         "========== 开始重启 (原因: {}) ==========",
         reason
     );
@@ -238,11 +238,11 @@ async fn do_restart(ctx: &Context, reason: String) {
         spawn_self()
     };
     if let Err(e) = spawned {
-        error!(target: "Plugin/restart", "拉起新进程失败: {}，放弃重启", e);
+        error!(target: "Plugin/Restart", "拉起新进程失败: {}，放弃重启", e);
         RESTARTING.store(false, Ordering::SeqCst);
         return;
     }
-    info!(target: "Plugin/restart", "新进程已拉起，开始清理资源...");
+    info!(target: "Plugin/Restart", "新进程已拉起，开始清理资源...");
 
     // 2. 保存配置(加锁避免与 update_config 并发写文件)
     {
@@ -252,20 +252,20 @@ async fn do_restart(ctx: &Context, reason: String) {
             guard.clone()
         };
         if let Err(e) = snapshot.save(&ctx.config_path).await {
-            error!(target: "Plugin/restart", "重启前保存配置失败: {}", e);
+            error!(target: "Plugin/Restart", "重启前保存配置失败: {}", e);
         }
     }
 
     // 3. 关闭数据库连接(WAL 模式下安全落盘)
     // 注: ctx.db 为共享引用，clone 连接池句柄后 close，等价于关闭整个连接池
     if let Err(e) = ctx.db.clone().close().await {
-        error!(target: "Plugin/restart", "关闭数据库失败: {}", e);
+        error!(target: "Plugin/Restart", "关闭数据库失败: {}", e);
     }
 
     // 4. 销毁全局无头浏览器实例，释放其内存
     cdp_html_shot::Browser::shutdown_global().await;
 
-    info!(target: "Plugin/restart", "资源清理完毕，旧进程退出。");
+    info!(target: "Plugin/Restart", "资源清理完毕，旧进程退出。");
     std::process::exit(0);
 }
 
@@ -287,7 +287,7 @@ fn spawn_self() -> Result<(), PluginError> {
 
     let child = cmd.spawn()?;
     info!(
-        target: "Plugin/restart",
+        target: "Plugin/Restart",
         "已自我拉起新进程: {:?} (pid: {:?})",
         exe,
         child.id()
@@ -306,7 +306,7 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
             .creation_flags(CREATE_NEW_PROCESS_GROUP)
             .spawn()?;
         info!(
-            target: "Plugin/restart",
+            target: "Plugin/Restart",
             "已执行外部重启命令: {} (pid: {:?})",
             command,
             child.id()
@@ -316,7 +316,7 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
     {
         let child = std::process::Command::new("sh").args(["-c", command]).spawn()?;
         info!(
-            target: "Plugin/restart",
+            target: "Plugin/Restart",
             "已执行外部重启命令: {} (pid: {:?})",
             command,
             child.id()

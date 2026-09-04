@@ -1,21 +1,26 @@
 use crate::adapters::satori::{LockedWriter, api, send_msg};
-use crate::command::match_command;
+use crate::command::{find_url, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::base::ValueAsScalar;
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
-use std::sync::OnceLock;
 use toml::Value;
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct Config {
     enabled: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 // 媒体 → 链接 指令（内置，无需配置）
@@ -24,13 +29,7 @@ const CMD_TO_URL: &[&str] = &["转链接", "看链接", "提取地址", "url"];
 const CMD_TO_MEDIA: &[&str] = &["转图片", "转视频", "预览"];
 
 pub fn default_config() -> Value {
-    build_config(Config { enabled: true })
-}
-
-static URL_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn get_url_regex() -> &'static Regex {
-    URL_REGEX.get_or_init(|| Regex::new(r"https?://[^\s\u4e00-\u9fa5]+").expect("Invalid Regex"))
+    build_config(Config::default())
 }
 
 pub fn handle(
@@ -38,8 +37,7 @@ pub fn handle(
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: Config = get_config(&ctx, "media")
-            .unwrap_or_else(|| serde::Deserialize::deserialize(default_config()).unwrap());
+        let config: Config = get_config_or_default(&ctx, "media");
 
         if !config.enabled {
             return Ok(Some(ctx));
@@ -152,19 +150,15 @@ async fn handle_to_media(
     is_video_cmd: bool,
 ) -> Result<Option<Context>, PluginError> {
     let msg = ctx.as_message().unwrap();
-    let regex = get_url_regex();
 
     // 1. 尝试从指令参数中提取 URL
-    let mut target_url = None;
-    for seg in &matched.args {
-        if seg.get_str("type") == Some("text")
-            && let Some(text) = seg.get("data").and_then(|d| d.get_str("text"))
-            && let Some(m) = regex.find(text)
-        {
-            target_url = Some(m.as_str().to_string());
-            break;
+    let mut target_url = matched.args.iter().find_map(|seg| {
+        if seg.get_str("type") == Some("text") {
+            seg.get("data").and_then(|d| d.get_str("text")).and_then(find_url)
+        } else {
+            None
         }
-    }
+    });
 
     // 2. 如果参数没有 URL，尝试从引用消息的文本中提取
     if target_url.is_none()
@@ -172,15 +166,15 @@ async fn handle_to_media(
         && let Ok(reply_id) = reply_id_str.parse::<i64>()
         && let Ok(res) = api::get_msg(&ctx, writer.clone(), reply_id).await
     {
-        for seg in &res.message.0 {
+        target_url = res.message.0.iter().find_map(|seg| {
             if seg.type_ == "text"
                 && let Some(text) = seg.data.get("text").and_then(|v| v.as_str())
-                && let Some(m) = regex.find(text)
             {
-                target_url = Some(m.as_str().to_string());
-                break;
+                find_url(text)
+            } else {
+                None
             }
-        }
+        });
     }
 
     if let Some(url) = target_url {

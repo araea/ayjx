@@ -56,9 +56,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         let stmt = builder.build(&create_table_stmt);
 
-        db.execute_raw(stmt)
-            .await
-            .map_err(|e| format!("PingPong Plugin Init DB Error: {}", e))?;
+        db.execute_raw(stmt).await?;
 
         Ok(())
     })
@@ -83,15 +81,9 @@ pub fn handle(
                 ..Default::default()
             };
 
-            new_stat
-                .insert(db)
-                .await
-                .map_err(|e| format!("DB Insert Error: {}", e))?;
+            new_stat.insert(db).await?;
 
-            let count = PingStats::find()
-                .count(db)
-                .await
-                .map_err(|e| format!("DB Query Error: {}", e))?;
+            let count = PingStats::find().count(db).await?;
 
             // 回复消息
             let reply_msg = Message::new()

@@ -1,7 +1,10 @@
 use crate::adapters::satori::LockedWriter;
 use crate::config::build_config;
 use crate::event::{Context, EventType};
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{PluginError, get_config_or_default};
+
+/// 统一日志 target
+const LOG_TARGET: &str = "Plugin/Recorder";
 use chrono::{Datelike, Duration, Local, TimeZone, Timelike};
 use futures_util::future::BoxFuture;
 use jieba_rs::Jieba;
@@ -81,29 +84,26 @@ fn get_jieba() -> &'static Jieba {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(default)]
 struct RecorderConfig {
     enabled: bool,
-    #[serde(default = "default_true")]
     record_self: bool,
     // 数据保留天数，默认 180 天
-    #[serde(default = "default_retention_days")]
     retention_days: i64,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-fn default_retention_days() -> i64 {
-    180
+impl Default for RecorderConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            record_self: true,
+            retention_days: 180,
+        }
+    }
 }
 
 pub fn default_config() -> Value {
-    build_config(RecorderConfig {
-        enabled: true,
-        record_self: true,
-        retention_days: 180,
-    })
+    build_config(RecorderConfig::default())
 }
 
 pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
@@ -118,7 +118,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         let stmt = builder.build(&create_table_stmt);
         if let Err(e) = db.execute_raw(stmt).await {
-            warn!(target: "Plugin/Recorder", "Init table error (ignore if exists): {}", e);
+            warn!(target: LOG_TARGET, "Init table error (ignore if exists): {}", e);
         }
 
         // 2. 创建索引
@@ -160,7 +160,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
 
         // 3. 初始化统计聚合表（建表；若有历史数据则一次性回填，否则自愈近 7 天）
         if let Err(e) = crate::db::stats::init(db).await {
-            warn!(target: "Plugin/Recorder", "统计聚合表初始化失败: {}", e);
+            warn!(target: LOG_TARGET, "统计聚合表初始化失败: {}", e);
         }
 
         // 4. 注册每日数据清理任务
@@ -175,7 +175,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 // 统计聚合自愈：重建近 7 天聚合行，修复异常场景下的计数漂移
                 // （保留期之外的聚合行是冻结的历史，不会被触碰）
                 if let Err(e) = crate::db::stats::self_heal_recent(&db).await {
-                    warn!(target: "Plugin/Recorder", "统计聚合自愈失败: {}", e);
+                    warn!(target: LOG_TARGET, "统计聚合自愈失败: {}", e);
                 }
 
                 let retention_days = {
@@ -188,14 +188,14 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 };
 
                 if retention_days <= 0 {
-                    info!(target: "Plugin/Recorder", "数据保留天数设置为 0 或负数，跳过清理。");
+                    info!(target: LOG_TARGET, "数据保留天数设置为 0 或负数，跳过清理。");
                     return;
                 }
 
                 let cutoff_time = Local::now() - Duration::days(retention_days);
                 let timestamp = cutoff_time.timestamp();
 
-                info!(target: "Plugin/Recorder", "开始清理 {} 天前的数据 (Time < {})...", retention_days, timestamp);
+                info!(target: LOG_TARGET, "开始清理 {} 天前的数据 (Time < {})...", retention_days, timestamp);
 
                 // 注意：只删除原始消息记录，统计聚合表 (message_stats_daily /
                 // message_user_stats_daily) 中对应日期的聚合行保留——历史统计
@@ -206,20 +206,20 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
                 match res {
                     Ok(exec_res) => {
                         let rows = exec_res.rows_affected();
-                        info!(target: "Plugin/Recorder", "已清理 {} 条过期消息记录。", rows);
+                        info!(target: LOG_TARGET, "已清理 {} 条过期消息记录。", rows);
                         if rows > 0 {
                             // 增量回收 freelist 页(依赖 db.rs 的 auto_vacuum=INCREMENTAL)，
                             // 避免全量 VACUUM 需要约 2× 文件大小的临时空间且长时间锁库。
-                            info!(target: "Plugin/Recorder", "正在增量回收数据库空间 (incremental_vacuum)...");
+                            info!(target: LOG_TARGET, "正在增量回收数据库空间 (incremental_vacuum)...");
                             if let Err(e) = db.execute_raw(Statement::from_string(sea_orm::DatabaseBackend::Sqlite, "PRAGMA incremental_vacuum;".to_owned())).await {
-                                warn!(target: "Plugin/Recorder", "incremental_vacuum 执行失败: {}", e);
+                                warn!(target: LOG_TARGET, "incremental_vacuum 执行失败: {}", e);
                             } else {
-                                info!(target: "Plugin/Recorder", "数据库空间回收完成。");
+                                info!(target: LOG_TARGET, "数据库空间回收完成。");
                             }
                         }
                     },
                     Err(e) => {
-                        error!(target: "Plugin/Recorder", "清理数据失败: {}", e);
+                        error!(target: LOG_TARGET, "清理数据失败: {}", e);
                     }
                 }
             }
@@ -234,11 +234,7 @@ pub fn handle(
     _writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: RecorderConfig = get_config(&ctx, "recorder").unwrap_or(RecorderConfig {
-            enabled: true,
-            record_self: true,
-            retention_days: 180,
-        });
+        let config: RecorderConfig = get_config_or_default(&ctx, "recorder");
 
         let mut record = RecordActiveModel {
             platform: Set("qq".to_string()),
@@ -420,7 +416,7 @@ pub fn handle(
                 .await;
 
             if let Err(e) = insert_res {
-                error!(target: "Plugin/Recorder", "消息记录失败: {}", e);
+                error!(target: LOG_TARGET, "消息记录失败: {}", e);
             }
         }
 

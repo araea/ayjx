@@ -55,7 +55,7 @@ pub fn handle(
                     Ok(info) => info,
                     Err(e) => {
                         error!(
-                            target: "Plugin/Title",
+                            target: "Plugin/GroupTitle",
                             "[Group({})] 获取 Bot 成员信息失败: {}",
                             group_id, e
                         );
@@ -66,7 +66,7 @@ pub fn handle(
             if bot_info.role != "owner" {
                 // 如果不是群主，忽略指令（或者可以回复提示）
                 warn!(
-                    target: "Plugin/Title",
+                    target: "Plugin/GroupTitle",
                     "[Group({})] Bot 不是群主，无法设置头衔",
                     group_id
                 );
@@ -95,7 +95,7 @@ pub fn handle(
             .await
             {
                 error!(
-                    target: "Plugin/Title",
+                    target: "Plugin/GroupTitle",
                     "[Group({})] 设置头衔失败: {}",
                     group_id, e
                 );
