@@ -1,6 +1,7 @@
 /target
 /all-in-one.md
 /config.toml
+/config.toml.testbak
 /ayjx-task
 /data
 /Cargo.lock
