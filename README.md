@@ -36,6 +36,7 @@ Chrome/Chromium，默认自动查找，也可用 `browser_path` 指定可执行�
 
 ## 文档
 
+- [架构说明](docs/ARCHITECTURE.md)
 - [Satori 接入说明](docs/SATORI.md)
 - [插件兼容性审计](docs/SATORI_PLUGIN_AUDIT.md)
 
