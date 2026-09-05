@@ -19,7 +19,7 @@
 //!   - 返回内容属于不可信外部数据，只作为资讯展示，不参与任何指令解析。
 
 use chrono::{DateTime, FixedOffset, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -203,7 +203,7 @@ where
     })
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Links {
     /// AIHOT 站内中文阅读页，默认主链接
     #[serde(default)]
@@ -226,7 +226,7 @@ impl Links {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Source {
     #[serde(default)]
     pub name: Option<String>,
@@ -234,7 +234,7 @@ pub struct Source {
 
 /// 一条资讯。文档承诺 `id` / `title` / `links` / `discoveredAt` 非空，
 /// 但客户端仍全部按可空处理，避免服务端演进时整批解析失败。
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     #[serde(default, deserialize_with = "flex_string")]

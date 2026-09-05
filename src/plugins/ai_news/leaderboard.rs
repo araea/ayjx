@@ -423,7 +423,11 @@ mod tests {
         // 顺带把真实数据的卡片 HTML 落盘，方便肉眼校版
         if let Ok(dir) = std::env::var("AI_NEWS_CARD_DUMP") {
             std::fs::create_dir_all(&dir).unwrap();
-            let html = crate::plugins::ai_news::card::models_card(&board, 12);
+            let html = crate::plugins::ai_news::card::models_card(
+                &board,
+                12,
+                crate::plugins::ai_news::card::CardTheme::Dark,
+            );
             std::fs::write(format!("{}/models_live.html", dir), html).unwrap();
         }
     }

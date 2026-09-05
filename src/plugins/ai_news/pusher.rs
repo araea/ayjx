@@ -14,12 +14,43 @@ use crate::message::Message;
 use rand::RngExt;
 use std::time::Duration;
 
+/// 两条推送线的数据源是产品语义，不跟随通用 `mode` 配置：
+/// 实时线追求完整与及时，定时线负责精选回顾。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushFeed {
+    Realtime,
+    Curated,
+}
+
+impl PushFeed {
+    fn mode(self) -> &'static str {
+        match self {
+            Self::Realtime => "all",
+            Self::Curated => "selected",
+        }
+    }
+
+    fn request_limit(self, cfg: &AiNewsConfig, has_group_override: bool) -> u32 {
+        match self {
+            // 实时抓取固定取接口上限，再交给持久队列分批发送。这里若沿用展示
+            // 条数，突发时排在 limit 之后的条目会因下一轮 304 而永久漏掉。
+            Self::Realtime => 100,
+            Self::Curated if has_group_override => cfg.limit.saturating_mul(5).clamp(1, 100),
+            Self::Curated => cfg.limit.clamp(1, 100),
+        }
+    }
+}
+
 pub fn render_options(cfg: &AiNewsConfig) -> RenderOptions {
     RenderOptions {
         summary_max_chars: cfg.summary_max_chars.clamp(20, 400),
         show_reason: cfg.show_reason,
         show_original_link: cfg.show_original_link,
     }
+}
+
+fn card_theme(cfg: &AiNewsConfig) -> card::CardTheme {
+    card::resolve_theme(&cfg.card_theme)
 }
 
 /// 全局过滤：白名单模式下只发白名单群，否则跳过黑名单群
@@ -195,6 +226,7 @@ pub(super) async fn deliver_items(
         headline.card_subtitle,
         card_slice(items, cfg),
         &opts,
+        card_theme(cfg),
     );
     let payload = Payload::build(cfg, rendered, Some(card_html)).await;
 
@@ -249,6 +281,56 @@ pub async fn fetch_brief(
     .await
 }
 
+/// 主动推送需要兼顾按群分类覆盖：只要有群设置了独立分类，就抓取未筛选的
+/// 动态池，再在本地按群过滤；仍然只发起一次请求，不随群数放大流量。
+async fn fetch_feed_for_push(
+    cfg: &AiNewsConfig,
+    poll: api::Poll,
+    feed: PushFeed,
+) -> Result<Option<Vec<Item>>, api::ApiError> {
+    let has_group_override = cfg
+        .group_preferences
+        .values()
+        .any(|preference| preference.category.is_some());
+    let category = cfg.category.trim();
+
+    api::fetch_items(
+        feed.mode(),
+        &cfg.window,
+        if has_group_override || category.is_empty() {
+            None
+        } else {
+            Some(category)
+        },
+        None,
+        feed.request_limit(cfg, has_group_override),
+        cfg.request_timeout_seconds,
+        poll,
+    )
+    .await
+}
+
+/// 定时速递固定读取精选池；通用 `mode` 配置只影响手动查询。
+pub async fn fetch_brief_for_push(
+    cfg: &AiNewsConfig,
+    poll: api::Poll,
+) -> Result<Option<Vec<Item>>, api::ApiError> {
+    fetch_feed_for_push(cfg, poll, PushFeed::Curated).await
+}
+
+/// 实时快报固定读取全部公开动态，并以接口上限抓取，避免突发资讯遗漏。
+pub async fn fetch_realtime_for_push(
+    cfg: &AiNewsConfig,
+    poll: api::Poll,
+) -> Result<Option<Vec<Item>>, api::ApiError> {
+    fetch_feed_for_push(cfg, poll, PushFeed::Realtime).await
+}
+
+pub(super) fn item_matches_group(cfg: &AiNewsConfig, group_id: i64, item: &Item) -> bool {
+    let category = cfg.category_for_group(group_id);
+    category.is_empty() || item.category.as_deref() == Some(category)
+}
+
 /// 关键词搜索：精选池查不到时，用完全相同的参数再查一次全量池。
 /// 返回 (条目, 是否来自全量池)。
 pub async fn search(
@@ -290,7 +372,7 @@ pub async fn search(
 
 /// 精选速递：只推该群没见过的条目
 pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, groups: Vec<i64>) {
-    let items = match fetch_brief(&cfg, api::Poll::Cached("brief")).await {
+    let items = match fetch_brief_for_push(&cfg, api::Poll::Cached("brief")).await {
         Ok(Some(items)) => items,
         Ok(None) => {
             info!(target: LOG_TARGET, "精选速递：服务端返回 304，无新内容，跳过。");
@@ -314,13 +396,19 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
     let subtitle = window_label(&cfg.window);
     let header = format!("🤖 AI 资讯速递 · {}", subtitle);
 
-    for (idx, group_id) in groups.iter().enumerate() {
+    let mut attempted_any = false;
+    for group_id in &groups {
         if !is_allowed(&ctx, *group_id) {
             continue;
         }
 
-        let keys: Vec<String> = keyed.iter().map(|(k, _)| k.clone()).collect();
-        let fresh = state::unseen_keys(*group_id, keys, cfg.dedupe_days).await;
+        let group_items: Vec<&(String, Item)> = keyed
+            .iter()
+            .filter(|(_, item)| item_matches_group(&cfg, *group_id, item))
+            .take(cfg.limit.clamp(1, 100) as usize)
+            .collect();
+        let keys: Vec<String> = group_items.iter().map(|(key, _)| key.clone()).collect();
+        let fresh = state::unseen_brief_keys(*group_id, keys, cfg.dedupe_days).await;
 
         if (fresh.len() as u32) < cfg.min_items.max(1) {
             info!(
@@ -331,11 +419,16 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             continue;
         }
 
-        let picked: Vec<Item> = keyed
+        let picked: Vec<Item> = group_items
             .iter()
             .filter(|(key, _)| fresh.contains(key))
-            .map(|(_, item)| item.clone())
+            .map(|(_, item)| (*item).clone())
             .collect();
+
+        if attempted_any {
+            pace(&cfg).await;
+        }
+        attempted_any = true;
 
         let sent = deliver_items(
             &ctx,
@@ -353,12 +446,9 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
 
         // 只有真正发出去了才记入去重，发送失败的条目下次继续推
         if sent {
-            state::mark_seen(*group_id, fresh).await;
+            state::mark_brief_seen(*group_id, fresh).await;
         }
 
-        if idx + 1 < groups.len() {
-            pace(&cfg).await;
-        }
     }
 }
 
@@ -382,10 +472,15 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
     };
     // 各群内容一致，卡片只截一次
     let rendered = render::render_daily(&report, cfg.daily_max_blocks);
-    let card_html = Some(card::daily_card(&report, cfg.daily_max_blocks));
+    let card_html = Some(card::daily_card(
+        &report,
+        cfg.daily_max_blocks,
+        card_theme(&cfg),
+    ));
     let payload = Payload::build(&cfg, rendered, card_html).await;
 
-    for (idx, group_id) in groups.iter().enumerate() {
+    let mut attempted_any = false;
+    for group_id in &groups {
         if !is_allowed(&ctx, *group_id) {
             continue;
         }
@@ -393,6 +488,11 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             info!(target: LOG_TARGET, "群 {} 已推送过 {} 的日报，跳过。", group_id, date);
             continue;
         }
+
+        if attempted_any {
+            pace(&cfg).await;
+        }
+        attempted_any = true;
 
         if deliver(
             &ctx,
@@ -408,9 +508,6 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
             state::mark_daily(*group_id, &date).await;
         }
 
-        if idx + 1 < groups.len() {
-            pace(&cfg).await;
-        }
     }
 }
 
@@ -440,13 +537,21 @@ pub async fn push_hot_topics(
     }
 
     let rendered = render::render_hot_topics(&topics);
-    let card_html = Some(card::hot_topics_card(card_slice(&topics, &cfg)));
+    let card_html = Some(card::hot_topics_card(
+        card_slice(&topics, &cfg),
+        card_theme(&cfg),
+    ));
     let payload = Payload::build(&cfg, rendered, card_html).await;
 
-    for (idx, group_id) in groups.iter().enumerate() {
+    let mut attempted_any = false;
+    for group_id in &groups {
         if !is_allowed(&ctx, *group_id) {
             continue;
         }
+        if attempted_any {
+            pace(&cfg).await;
+        }
+        attempted_any = true;
         let _ = deliver(
             &ctx,
             writer.clone(),
@@ -457,9 +562,6 @@ pub async fn push_hot_topics(
             None,
         )
         .await;
-        if idx + 1 < groups.len() {
-            pace(&cfg).await;
-        }
     }
 }
 
@@ -467,5 +569,26 @@ pub fn window_label(window: &str) -> &'static str {
     match window {
         "24h" => "过去 24 小时",
         _ => "最近 7 天",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn realtime_and_scheduled_feeds_have_distinct_fixed_policies() {
+        // 即使手动查询配置改成 all，定时推送仍然只取精选；实时则始终取全量。
+        let cfg = AiNewsConfig {
+            limit: 8,
+            mode: "all".into(),
+            ..Default::default()
+        };
+
+        assert_eq!(PushFeed::Realtime.mode(), "all");
+        assert_eq!(PushFeed::Curated.mode(), "selected");
+        assert_eq!(PushFeed::Realtime.request_limit(&cfg, false), 100);
+        assert_eq!(PushFeed::Curated.request_limit(&cfg, false), 8);
+        assert_eq!(PushFeed::Curated.request_limit(&cfg, true), 40);
     }
 }

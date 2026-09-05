@@ -1,8 +1,9 @@
 //! 把资讯排版成一张卡片图（HTML → 截图）。
 //!
-//! 设计取向：深色「夜读」版式，靠字号、字重与明度三级台阶拉开层级，
-//! 而不是靠分割线堆砌。四类内容各有一个主色——速递靛蓝、热点橙、日报薄荷绿、
-//! 模型榜琥珀金，主色只出现在序号、标签、顶部微光与引用左界这几处。
+//! 设计取向：随北京时间自动切换「日读 / 夜读」，也可在配置中固定主题。
+//! 两套主题共用字号、间距与信息层级，只替换明度和主色，避免切换后像两套产品。
+//! 四类内容各有一个主色——速递靛蓝、热点橙、日报薄荷绿、模型榜琥珀金，
+//! 主色只出现在序号、标签、顶部微光与引用左界这几处。
 //!
 //! 排版参数是按「群聊里被缩略图裹一层再点开看」这个真实场景定的：
 //!   - 版心 720 CSS px 配合 `image_scale`（默认 3 倍）出图，2160px 宽，放大不糊；
@@ -19,32 +20,93 @@ use super::leaderboard::{Board, Trend};
 use super::render::{RenderOptions, fmt_time, truncate};
 use anyhow::Result;
 use cdp_html_shot::{Browser, CaptureOptions, Viewport};
-use chrono::Utc;
+use chrono::{DateTime, Timelike, Utc};
 use std::time::Duration;
 
 /// 卡片主色。`rgb` 供 `rgba()` 调透明度用，避免写死多份色值。
 #[derive(Clone, Copy)]
 pub struct Accent {
-    hex: &'static str,
-    rgb: &'static str,
+    dark_hex: &'static str,
+    dark_rgb: &'static str,
+    light_hex: &'static str,
+    light_rgb: &'static str,
 }
 
 const BRIEF: Accent = Accent {
-    hex: "#8296FF",
-    rgb: "130,150,255",
+    dark_hex: "#8296FF",
+    dark_rgb: "130,150,255",
+    light_hex: "#5268D8",
+    light_rgb: "82,104,216",
 };
 const HOT: Accent = Accent {
-    hex: "#FF8A5B",
-    rgb: "255,138,91",
+    dark_hex: "#FF8A5B",
+    dark_rgb: "255,138,91",
+    light_hex: "#C9562B",
+    light_rgb: "201,86,43",
 };
 const DAILY: Accent = Accent {
-    hex: "#3FD6AC",
-    rgb: "63,214,172",
+    dark_hex: "#3FD6AC",
+    dark_rgb: "63,214,172",
+    light_hex: "#168668",
+    light_rgb: "22,134,104",
 };
 const MODELS: Accent = Accent {
-    hex: "#FFC24B",
-    rgb: "255,194,75",
+    dark_hex: "#FFC24B",
+    dark_rgb: "255,194,75",
+    light_hex: "#A86400",
+    light_rgb: "168,100,0",
 };
+
+/// 最终用于截图的主题。`auto` 在 07:00—18:59 使用日读，其余时间使用夜读。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardTheme {
+    Light,
+    Dark,
+}
+
+impl CardTheme {
+    fn vars(self) -> &'static str {
+        match self {
+            Self::Dark => r#"color-scheme:dark;
+  --canvas:#04060A;--surface:#0C1017;--title:#FFFFFF;--body:#BFC9D9;
+  --strong:#F2F5FA;--subtle:#98A3B8;--muted:#8A94A8;--faint:#6B7689;
+  --line:rgba(255,255,255,.07);--strong-line:rgba(255,255,255,.09);
+  --pattern:rgba(255,255,255,.04);--panel:rgba(255,255,255,.05);
+  --panel-border:rgba(255,255,255,.07);--plain-chip:rgba(255,255,255,.07);
+  --sep:rgba(255,255,255,.16);--top-rank:#0A0D13;--up:#4ADE80;--down:#FF7A7A;
+  --shadow:none"#,
+            Self::Light => r#"color-scheme:light;
+  --canvas:#E9EDF3;--surface:#FBFCFE;--title:#17202E;--body:#3D4858;
+  --strong:#202A38;--subtle:#596679;--muted:#687487;--faint:#7A8596;
+  --line:rgba(25,37,55,.10);--strong-line:rgba(25,37,55,.13);
+  --pattern:rgba(31,48,72,.045);--panel:rgba(38,54,78,.045);
+  --panel-border:rgba(29,43,63,.10);--plain-chip:rgba(37,51,72,.07);
+  --sep:rgba(31,44,63,.20);--top-rank:#FFFFFF;--up:#168447;--down:#C33E46;
+  --shadow:0 16px 42px rgba(35,47,65,.10)"#,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "白天",
+            Self::Dark => "夜晚",
+        }
+    }
+}
+
+/// 解析主题配置。未知值安全回退到自动，避免手改配置导致渲染失败。
+pub fn resolve_theme(mode: &str) -> CardTheme {
+    resolve_theme_at(mode, Utc::now().with_timezone(&super::render::beijing()))
+}
+
+fn resolve_theme_at(mode: &str, now: DateTime<chrono::FixedOffset>) -> CardTheme {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "light" | "day" | "白天" | "日间" => CardTheme::Light,
+        "dark" | "night" | "夜晚" | "夜间" => CardTheme::Dark,
+        _ if (7..19).contains(&now.hour()) => CardTheme::Light,
+        _ => CardTheme::Dark,
+    }
+}
 
 /// 卡片渲染宽度（CSS 像素）。实际出图宽度 = WIDTH × `image_scale`（默认 3 倍 → 2160px）
 const WIDTH: u32 = 720;
@@ -74,13 +136,14 @@ fn stamp() -> String {
 
 const CSS: &str = r#"
 *{margin:0;padding:0;box-sizing:border-box}
-.shot{padding:26px;background:#04060A}
-.card{position:relative;overflow:hidden;border-radius:24px;padding:44px 44px 34px;
-  background:#0C1017;border:1px solid rgba(255,255,255,.08);
-  background-image:radial-gradient(rgba(255,255,255,.04) 1px,transparent 1px);
+.shot{padding:20px;background:var(--canvas)}
+.card{position:relative;overflow:hidden;border-radius:22px;padding:42px 40px 32px;
+  background:var(--surface);border:1px solid var(--strong-line);box-shadow:var(--shadow);
+  background-image:radial-gradient(var(--pattern) 1px,transparent 1px);
   background-size:28px 28px;
   font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Source Han Sans SC","WenQuanYi Zen Hei","Helvetica Neue",Arial,sans-serif;
-  color:#F2F5FA;-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
+  color:var(--strong);-webkit-font-smoothing:antialiased;text-rendering:geometricPrecision;
+  overflow-wrap:anywhere;word-break:normal}
 /* 左上角一团主色微光，给深底一点纵深，不喧宾夺主 */
 .card::before{content:"";position:absolute;top:-230px;left:-130px;width:480px;height:480px;
   border-radius:50%;background:rgba(__RGB__,.20);filter:blur(95px);pointer-events:none}
@@ -91,80 +154,80 @@ const CSS: &str = r#"
   letter-spacing:.18em;color:__ACCENT__}
 .dot{width:9px;height:9px;border-radius:50%;background:__ACCENT__;
   box-shadow:0 0 0 5px rgba(__RGB__,.16)}
-.stamp{font-size:14px;color:#6B7689;letter-spacing:.04em;font-variant-numeric:tabular-nums}
+.stamp{font-size:14px;color:var(--faint);letter-spacing:.04em;font-variant-numeric:tabular-nums}
 
-.title{font-size:42px;line-height:1.24;font-weight:800;letter-spacing:-.015em;color:#FFFFFF}
-.subtitle{margin-top:12px;font-size:18px;line-height:1.6;font-weight:500;color:#98A3B8}
+.title{font-size:42px;line-height:1.25;font-weight:800;letter-spacing:-.015em;color:var(--title)}
+.subtitle{margin-top:12px;font-size:19px;line-height:1.65;font-weight:500;color:var(--subtle)}
 .rule{height:2px;margin:28px 0 2px;border-radius:2px;
-  background:linear-gradient(90deg,__ACCENT__,rgba(__RGB__,.35) 38%,rgba(255,255,255,.05))}
+  background:linear-gradient(90deg,__ACCENT__,rgba(__RGB__,.35) 38%,var(--line))}
 
-.row{display:grid;grid-template-columns:56px 1fr;gap:18px;padding:26px 0;
-  border-bottom:1px solid rgba(255,255,255,.07)}
+.row{display:grid;grid-template-columns:50px minmax(0,1fr);gap:17px;padding:27px 0;
+  border-bottom:1px solid var(--line)}
 .row:last-child{border-bottom:none;padding-bottom:8px}
-.idx{font-size:26px;font-weight:800;line-height:1.35;color:rgba(__RGB__,.85);
+.idx{font-size:27px;font-weight:800;line-height:1.4;color:rgba(__RGB__,.88);
   font-variant-numeric:tabular-nums;text-align:right;letter-spacing:-.02em}
 .rank{display:flex;align-items:center;justify-content:center;width:42px;height:42px;
   margin-left:auto;border-radius:12px;font-size:20px;font-weight:800;
   font-variant-numeric:tabular-nums;
   color:rgba(__RGB__,.95);background:rgba(__RGB__,.12);border:1px solid rgba(__RGB__,.28)}
-.rank.top{color:#0A0D13;background:__ACCENT__;border-color:transparent;
+.rank.top{color:var(--top-rank);background:__ACCENT__;border-color:transparent;
   box-shadow:0 6px 18px rgba(__RGB__,.28)}
 
-.h{font-size:26px;line-height:1.46;font-weight:700;letter-spacing:-.01em;color:#FFFFFF;
+.h{font-size:27px;line-height:1.5;font-weight:700;letter-spacing:-.01em;color:var(--title);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .meta{margin-top:12px;display:flex;flex-wrap:wrap;align-items:center;gap:10px;
-  font-size:15px;font-weight:500;color:#8A94A8}
-.sep{color:rgba(255,255,255,.16)}
+  font-size:16px;font-weight:500;color:var(--muted)}
+.sep{color:var(--sep)}
 .chip{padding:3px 11px;border-radius:7px;font-size:14px;font-weight:700;letter-spacing:.02em;
   color:__ACCENT__;background:rgba(__RGB__,.14)}
-.chip.plain{color:#93A0B6;background:rgba(255,255,255,.07)}
-.sum{margin-top:12px;font-size:18.5px;line-height:1.72;color:#BFC9D9;
+.chip.plain{color:var(--subtle);background:var(--plain-chip)}
+.sum{margin-top:13px;font-size:19.5px;line-height:1.76;color:var(--body);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .why{margin-top:14px;padding:12px 16px;border-left:4px solid __ACCENT__;
   border-radius:0 10px 10px 0;background:rgba(__RGB__,.09);
-  font-size:17px;line-height:1.66;color:#CBD4E4;
+  font-size:18px;line-height:1.7;color:var(--body);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .why b{color:__ACCENT__;font-weight:800;letter-spacing:.02em}
 
 .lead{margin:26px 0 4px;padding:20px 22px;border-radius:14px;
-  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.07);
-  font-size:20px;line-height:1.74;font-weight:500;color:#D2DAE7}
-.sec{padding:26px 0 6px;border-bottom:1px solid rgba(255,255,255,.07)}
+  background:var(--panel);border:1px solid var(--panel-border);
+  font-size:21px;line-height:1.78;font-weight:500;color:var(--body)}
+.sec{padding:27px 0 7px;border-bottom:1px solid var(--line)}
 .sec:last-of-type{border-bottom:none}
-.sec-h{display:flex;align-items:center;gap:12px;font-size:22px;font-weight:800;color:#FFFFFF}
+.sec-h{display:flex;align-items:center;gap:12px;font-size:23px;font-weight:800;color:var(--title)}
 .bar{width:5px;height:22px;border-radius:3px;background:__ACCENT__}
-.li{margin-top:16px;padding-left:20px;position:relative;font-size:19px;line-height:1.6;color:#C2CBDA}
+.li{margin-top:17px;padding-left:20px;position:relative;font-size:20px;line-height:1.68;color:var(--body)}
 .li::before{content:"";position:absolute;left:2px;top:12px;width:7px;height:7px;
   border-radius:50%;background:__ACCENT__}
-.li b{color:#FFFFFF;font-weight:700}
-.li .t{margin-top:6px;font-size:17px;line-height:1.68;color:#A5B0C4}
+.li b{color:var(--title);font-weight:700}
+.li .t{margin-top:6px;font-size:18px;line-height:1.72;color:var(--subtle)}
 
 /* —— 模型榜 —— */
-.mrow{display:grid;grid-template-columns:56px 1fr 150px;gap:18px;align-items:center;
-  padding:22px 0;border-bottom:1px solid rgba(255,255,255,.07)}
+.mrow{display:grid;grid-template-columns:50px minmax(0,1fr) 142px;gap:17px;align-items:center;
+  padding:23px 0;border-bottom:1px solid var(--line)}
 .mrow:last-of-type{border-bottom:none}
 .mname{display:flex;align-items:baseline;flex-wrap:wrap;gap:10px;
-  font-size:25px;line-height:1.35;font-weight:700;color:#FFFFFF}
+  font-size:26px;line-height:1.4;font-weight:700;color:var(--title)}
 .trend{font-size:15px;font-weight:800;letter-spacing:.02em;
-  font-variant-numeric:tabular-nums;color:#6B7689}
-.trend.up{color:#4ADE80}
-.trend.down{color:#FF7A7A}
+  font-variant-numeric:tabular-nums;color:var(--faint)}
+.trend.up{color:var(--up)}
+.trend.down{color:var(--down)}
 .trend.new{color:__ACCENT__}
-.meter{margin-top:12px;height:7px;border-radius:4px;background:rgba(255,255,255,.07);overflow:hidden}
+.meter{margin-top:12px;height:7px;border-radius:4px;background:var(--line);overflow:hidden}
 .meter i{display:block;height:100%;border-radius:4px;
   background:linear-gradient(90deg,rgba(__RGB__,.55),__ACCENT__)}
 .mscore{text-align:right}
 .mscore strong{display:block;font-size:34px;line-height:1;font-weight:800;
   letter-spacing:-.02em;color:__ACCENT__;font-variant-numeric:tabular-nums}
-.mscore small{display:block;margin-top:6px;font-size:14px;line-height:1.4;color:#8A94A8;white-space:nowrap}
-.note{margin-top:22px;font-size:15px;line-height:1.7;color:#7E8899}
+.mscore small{display:block;margin-top:6px;font-size:14px;line-height:1.4;color:var(--muted);white-space:nowrap}
+.note{margin-top:22px;font-size:16px;line-height:1.72;color:var(--muted)}
 
 .foot{display:flex;align-items:center;justify-content:space-between;
-  margin-top:30px;padding-top:20px;border-top:1px solid rgba(255,255,255,.09);
-  font-size:14px;font-weight:500;color:#6B7689;letter-spacing:.02em}
-.foot .src{display:flex;align-items:center;gap:10px}
-.mark{width:5px;height:5px;border-radius:50%;background:rgba(__RGB__,.7);
-  box-shadow:9px 0 0 rgba(255,255,255,.14),18px 0 0 rgba(255,255,255,.08)}
+  gap:22px;margin-top:30px;padding-top:20px;border-top:1px solid var(--strong-line);
+  font-size:15px;line-height:1.55;font-weight:500;color:var(--faint);letter-spacing:.02em}
+.foot>div:last-child{text-align:right}.foot .src{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.mark{width:5px;height:5px;margin-right:18px;flex:0 0 5px;border-radius:50%;background:rgba(__RGB__,.7);
+  box-shadow:9px 0 0 var(--sep),18px 0 0 var(--line)}
 "#;
 
 /// 套上统一的卡片外壳：页眉（主色标签 + 出图时间）、大标题、正文、页脚。
@@ -173,13 +236,20 @@ const CSS: &str = r#"
 /// 别写成图里说一套、群里发另一套。
 fn shell(
     accent: Accent,
+    theme: CardTheme,
     kicker: &str,
     title: &str,
     subtitle: &str,
     body: &str,
     foot_note: &str,
 ) -> String {
-    let css = CSS.replace("__ACCENT__", accent.hex).replace("__RGB__", accent.rgb);
+    let (accent_hex, accent_rgb) = match theme {
+        CardTheme::Dark => (accent.dark_hex, accent.dark_rgb),
+        CardTheme::Light => (accent.light_hex, accent.light_rgb),
+    };
+    let css = format!(":root{{{}}}\n{}", theme.vars(), CSS)
+        .replace("__ACCENT__", accent_hex)
+        .replace("__RGB__", accent_rgb);
     let subtitle = if subtitle.is_empty() {
         String::new()
     } else {
@@ -187,7 +257,7 @@ fn shell(
     };
 
     format!(
-        r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><style>{css}</style></head>
+        r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>{css}</style></head>
 <body><div class="shot"><div class="card">
 <div class="eyebrow"><div class="kicker"><span class="dot"></span>{kicker}</div><div class="stamp">{stamp}</div></div>
 <div class="title">{title}</div>{subtitle}
@@ -206,7 +276,7 @@ fn shell(
 }
 
 /// 图后必定跟一条带链接的文本，页脚据此措辞
-const FOOT_LINKS: &str = "完整链接见下方合并转发";
+const FOOT_LINKS: &str = "链接与完整内容见随附消息";
 
 /// 一条资讯的元信息行：来源 · 分类 · 时间
 fn meta_html(item: &Item) -> String {
@@ -249,7 +319,13 @@ fn meta_html(item: &Item) -> String {
 }
 
 /// 资讯列表卡片（速递 / 搜索结果共用）
-pub fn items_card(title: &str, subtitle: &str, items: &[Item], opts: &RenderOptions) -> String {
+pub fn items_card(
+    title: &str,
+    subtitle: &str,
+    items: &[Item],
+    opts: &RenderOptions,
+    theme: CardTheme,
+) -> String {
     let mut body = String::new();
 
     for (idx, item) in items.iter().enumerate() {
@@ -285,11 +361,11 @@ pub fn items_card(title: &str, subtitle: &str, items: &[Item], opts: &RenderOpti
         true => format!("共 {} 条", items.len()),
         false => format!("{} · 共 {} 条", subtitle, items.len()),
     };
-    shell(BRIEF, "AI NEWS", title, &subtitle, &body, FOOT_LINKS)
+    shell(BRIEF, theme, "AI NEWS", title, &subtitle, &body, FOOT_LINKS)
 }
 
 /// 热点榜卡片：前三名用实心序号牌，其余描边，一眼看出梯队
-pub fn hot_topics_card(topics: &[HotTopic]) -> String {
+pub fn hot_topics_card(topics: &[HotTopic], theme: CardTheme) -> String {
     let mut body = String::new();
 
     for (idx, topic) in topics.iter().enumerate() {
@@ -335,14 +411,14 @@ pub fn hot_topics_card(topics: &[HotTopic]) -> String {
     }
 
     let subtitle = format!("跨信源聚合 · TOP {}", topics.len());
-    shell(HOT, "AI HOTLIST", "当前热点榜", &subtitle, &body, FOOT_LINKS)
+    shell(HOT, theme, "AI HOTLIST", "当前热点榜", &subtitle, &body, FOOT_LINKS)
 }
 
 /// 模型榜卡片：一行一个模型，左名次、中模型与价格、右共识分。
 ///
 /// 共识分是这张图唯一需要「一眼看到」的数字，所以给到 34px 主色 + 一条同色进度条；
 /// 其余信息（厂商、上线日期、价格）压到 15px 的灰阶里，不与之争。
-pub fn models_card(board: &Board, max_items: usize) -> String {
+pub fn models_card(board: &Board, max_items: usize, theme: CardTheme) -> String {
     let shown = &board.entries[..board.entries.len().min(max_items.max(1))];
     let mut body = String::new();
 
@@ -424,11 +500,12 @@ pub fn models_card(board: &Board, max_items: usize) -> String {
 
     shell(
         MODELS,
+        theme,
         "MODEL CONSENSUS",
         "AIHOT 大模型排行榜",
         &subtitle.join(" · "),
         &body,
-        "完整榜单见下方链接",
+        "榜单链接见随附消息",
     )
 }
 
@@ -459,7 +536,7 @@ fn daily_items(out: &mut String, block: &DailyBlock, budget: &mut usize) {
 }
 
 /// AI 日报卡片：保留 lead / sections / flashes 的分栏结构
-pub fn daily_card(report: &DailyReport, max_blocks: usize) -> String {
+pub fn daily_card(report: &DailyReport, max_blocks: usize, theme: CardTheme) -> String {
     let mut body = String::new();
 
     if let Some(lead) = report.lead.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -517,7 +594,7 @@ pub fn daily_card(report: &DailyReport, max_blocks: usize) -> String {
     };
     let subtitle = report.date.as_deref().unwrap_or_default();
 
-    shell(DAILY, "AI DAILY", &title, subtitle, &body, FOOT_LINKS)
+    shell(DAILY, theme, "AI DAILY", &title, subtitle, &body, FOOT_LINKS)
 }
 
 /// 把卡片 HTML 截成图，返回 base64（PNG/JPEG 由截图端决定）。
@@ -687,10 +764,29 @@ mod tests {
         };
 
         for (name, html) in [
-            ("brief.html", items_card("AI 资讯速递", "过去 24 小时", &items, &opts)),
-            ("hot.html", hot_topics_card(&topics)),
-            ("daily.html", daily_card(&report, 12)),
-            ("models.html", models_card(&board, 12)),
+            (
+                "brief-light.html",
+                items_card(
+                    "AI 资讯速递",
+                    "过去 24 小时",
+                    &items,
+                    &opts,
+                    CardTheme::Light,
+                ),
+            ),
+            (
+                "brief-dark.html",
+                items_card(
+                    "AI 资讯速递",
+                    "过去 24 小时",
+                    &items,
+                    &opts,
+                    CardTheme::Dark,
+                ),
+            ),
+            ("hot.html", hot_topics_card(&topics, CardTheme::Dark)),
+            ("daily.html", daily_card(&report, 12, CardTheme::Light)),
+            ("models.html", models_card(&board, 12, CardTheme::Dark)),
         ] {
             std::fs::write(format!("{}/{}", dir, name), html).unwrap();
         }
@@ -705,7 +801,7 @@ mod tests {
             return;
         };
         dump_sample_cards();
-        let html = std::fs::read_to_string(format!("{}/brief.html", dir)).unwrap();
+        let html = std::fs::read_to_string(format!("{}/brief-light.html", dir)).unwrap();
 
         let b64 = capture(&html, 3.0).await.expect("截图应当成功");
         assert!(!b64.is_empty());
@@ -747,12 +843,27 @@ mod tests {
             show_reason: true,
             show_original_link: false,
         };
-        let html = items_card("过去 24 小时", "", &[item], &opts);
+        let html = items_card("过去 24 小时", "", &[item], &opts, CardTheme::Dark);
 
         assert!(html.contains("某模型发布"));
         assert!(html.contains("官方博客"));
         assert!(html.contains("08-21 09:00"), "时间应换算为北京时间");
         // 链接只走文本消息，不画进图里
         assert!(!html.contains("aihot.virxact.com/i/1"));
+    }
+
+    #[test]
+    fn auto_theme_follows_beijing_reading_hours() {
+        use chrono::TimeZone;
+
+        let tz = super::super::render::beijing();
+        let morning = tz.with_ymd_and_hms(2026, 9, 5, 7, 0, 0).unwrap();
+        let evening = tz.with_ymd_and_hms(2026, 9, 5, 19, 0, 0).unwrap();
+
+        assert_eq!(resolve_theme_at("auto", morning), CardTheme::Light);
+        assert_eq!(resolve_theme_at("auto", evening), CardTheme::Dark);
+        assert_eq!(resolve_theme_at("light", evening), CardTheme::Light);
+        assert_eq!(resolve_theme_at("dark", morning), CardTheme::Dark);
+        assert_eq!(resolve_theme_at("unexpected", morning), CardTheme::Light);
     }
 }

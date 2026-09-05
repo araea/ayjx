@@ -82,30 +82,32 @@ const SETTINGS: &[SettingSpec] = &[
     s("stats", "weekend_fun_enabled", "周末轻松榜推送", "每周日推送本周表情包榜", Kind::Bool, "true"),
     s("stats", "monthly_recap_enabled", "月度回顾推送", "每月 1 日推送上月回顾", Kind::Bool, "true"),
     // AI 资讯推送
-    s("ai_news", "limit", "资讯推送条数", "单次推送最多展示的资讯条数", Kind::Int, "8"),
+    s("ai_news", "limit", "资讯推送条数", "单次推送最多展示的资讯条数；默认 30 以兼顾完整性", Kind::Int, "30"),
     s("ai_news", "min_items", "资讯推送阈值", "去重后新条目少于此值则本轮不推送", Kind::Int, "1"),
+    s("ai_news", "mode", "手动查询范围", "仅影响 /ai资讯：selected 查精选（推荐），all 查全部；主动推送策略固定", Kind::Str, "selected"),
     s("ai_news", "window", "资讯时间窗", "抓取范围：24h 或 7d", Kind::Str, "24h"),
     s("ai_news", "category", "资讯分类过滤", "ai-models/ai-products/industry/paper/tip，留空为不限", Kind::Str, ""),
     s("ai_news", "show_reason", "显示推荐理由", "是否展示 AIHOT 的推荐理由", Kind::Bool, "true"),
-    s("ai_news", "show_original_link", "显示原文链接", "是否附带第三方原文链接", Kind::Bool, "false"),
+    s("ai_news", "show_original_link", "显示原文链接", "是否附带第三方原文链接；默认开启以保证信息完整", Kind::Bool, "true"),
     s("ai_news", "dedupe_days", "资讯去重天数", "同一条资讯在多少天内不重复推送", Kind::Int, "7"),
     s("ai_news", "image_enabled", "资讯卡片图", "先发一张排版好的卡片图，再补带链接的文本", Kind::Bool, "true"),
-    s("ai_news", "image_max_items", "卡片图条数", "卡片图最多画几条，其余交给文本", Kind::Int, "10"),
+    s("ai_news", "image_max_items", "卡片图条数", "卡片图最多画几条；手机阅读建议 6—8 条", Kind::Int, "10"),
+    s("ai_news", "card_theme", "资讯阅读主题", "auto 按北京时间自动切换，也可设 light 或 dark；即时生效", Kind::Str, "auto"),
     s("ai_news", "forward_threshold_chars", "合并转发阈值", "消息超过多少字改用合并转发防刷屏，0 为永远纯文本", Kind::Int, "500"),
     s("ai_news", "forward_node_chars", "转发节点长度", "合并转发时每个节点的字数软上限", Kind::Int, "300"),
-    s("ai_news", "daily_enabled", "AI 日报推送", "每天推送一期 AIHOT 日报", Kind::Bool, "true"),
+    s("ai_news", "daily_enabled", "AI 日报推送", "每天推送一期 AIHOT 日报；即时生效", Kind::Bool, "true"),
     s("ai_news", "daily_time", "AI 日报时间", "日报推送时间（HH:MM:SS），需重启后生效", Kind::Str, "08:20:00"),
-    s("ai_news", "brief_enabled", "精选速递推送", "每天定时推送 AI 精选资讯", Kind::Bool, "true"),
-    s("ai_news", "hot_topics_enabled", "热点榜推送", "每天推送当前 AI 热点榜", Kind::Bool, "true"),
+    s("ai_news", "brief_enabled", "精选速递推送", "每天定时推送 AI 精选资讯；即时生效", Kind::Bool, "true"),
+    s("ai_news", "hot_topics_enabled", "热点榜推送", "每天推送当前 AI 热点榜；即时生效", Kind::Bool, "true"),
     s("ai_news", "hot_topics_time", "热点榜时间", "热点榜推送时间（HH:MM:SS），需重启后生效", Kind::Str, "21:40:00"),
     // 实时快报：以下各项均即时生效，无需重启
-    s("ai_news", "realtime_enabled", "实时快报", "精选池一有新资讯就推，不必等定时档", Kind::Bool, "true"),
-    s("ai_news", "realtime_interval_seconds", "实时轮询间隔", "每隔多少秒查一次新资讯，低于 60 秒无意义", Kind::Int, "180"),
-    s("ai_news", "realtime_max_age_minutes", "实时保鲜期", "只推收录时间在此分钟数内的条目，避免离线后补发旧闻", Kind::Int, "240"),
-    s("ai_news", "realtime_max_items", "实时单次条数", "一次实时推送最多几条，多的留到下一轮", Kind::Int, "5"),
-    s("ai_news", "realtime_max_per_hour", "实时频次上限", "每个群每小时最多实时推送几次", Kind::Int, "4"),
-    s("ai_news", "realtime_quiet_start", "实时静默起点", "静默时段起点（HH:MM），与终点相同表示不设静默", Kind::Str, "23:30"),
-    s("ai_news", "realtime_quiet_end", "实时静默终点", "静默时段终点（HH:MM），跨午夜按跨天处理", Kind::Str, "07:30"),
+    s("ai_news", "realtime_enabled", "实时快报", "全量动态池一有有效资讯就推，不必等定时档", Kind::Bool, "true"),
+    s("ai_news", "realtime_interval_seconds", "实时轮询间隔", "每隔多少秒查一次新资讯；默认采用上游允许的 60 秒下限", Kind::Int, "60"),
+    s("ai_news", "realtime_max_age_minutes", "实时保鲜期", "只推收录时间在此分钟数内的条目；默认覆盖最近 24 小时", Kind::Int, "1440"),
+    s("ai_news", "realtime_max_items", "实时单次条数", "一次实时推送最多几条，多的进入持久队列", Kind::Int, "30"),
+    s("ai_news", "realtime_max_per_hour", "实时频次容量", "每个群每小时最多实时推送次数；默认 60，正常情况下等同不限制", Kind::Int, "60"),
+    s("ai_news", "realtime_quiet_start", "实时静默起点", "默认留空，表示全天推送；与终点同时设置后启用静默", Kind::Str, ""),
+    s("ai_news", "realtime_quiet_end", "实时静默终点", "默认留空，表示全天推送；跨午夜时按跨天处理", Kind::Str, ""),
     // 自动重启
     s("restart", "time", "每日重启时间", "每日自动重启时间（HH:MM），需重启后生效", Kind::Str, "04:00"),
     s("restart", "memory_threshold_mb", "内存重启阈值", "进程内存超过该值（MB）自动重启，0 关闭", Kind::Int, "0"),
@@ -201,6 +203,25 @@ fn parse_value(kind: Kind, raw: &str) -> Result<Value, String> {
             .map_err(|_| format!("请输入数字（当前输入：{}）", raw)),
         Kind::Str => Ok(Value::String(raw.to_string())),
     }
+}
+
+fn validate_value(spec: &SettingSpec, raw: &str) -> Result<(), String> {
+    if spec.plugin == "ai_news"
+        && spec.key == "mode"
+        && !matches!(raw.trim().to_ascii_lowercase().as_str(), "all" | "selected")
+    {
+        return Err("资讯动态池只能是 all 或 selected。".to_string());
+    }
+    if spec.plugin == "ai_news"
+        && spec.key == "card_theme"
+        && !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "auto" | "light" | "dark" | "day" | "night" | "白天" | "日间" | "夜晚" | "夜间"
+        )
+    {
+        return Err("阅读主题只能是 auto、light 或 dark。".to_string());
+    }
+    Ok(())
 }
 
 fn format_value(v: &Value) -> String {
@@ -329,6 +350,13 @@ pub fn handle(
 
             // 插件+键+值 → 修改（第 3 个 token 起拼接，支持含空格的值）
             let value_raw = tokens[2..].join(" ");
+            if let Err(e) = validate_value(spec, &value_raw) {
+                let reply = Message::new()
+                    .reply(msg.message_id())
+                    .text(format!("❌ {}", e));
+                let _ = send_msg(&ctx, writer, group_id, Some(user_id), reply).await;
+                return Ok(None);
+            }
             let new_value = match parse_value(spec.kind, &value_raw) {
                 Ok(v) => v,
                 Err(e) => {
@@ -376,7 +404,7 @@ pub fn handle(
 
             match save_result {
                 Ok(()) => {
-                    let note = if matches!(spec.key, "time") {
+                    let note = if spec.key == "time" || spec.key.ends_with("_time") {
                         "（需重启后生效）"
                     } else {
                         ""

@@ -7,24 +7,24 @@
 //!
 //! ## 两条推送线并行
 //!
-//! **实时快报**（`realtime.rs`）：每 3 分钟条件轮询一次精选池，
-//! 新资讯进池就发，延迟通常在 3 分钟以内——新闻的即时性由这条线负责。
+//! **实时快报**（`realtime.rs`）：默认每 60 秒条件轮询一次全量动态池，
+//! 有效资讯进池就发，延迟通常在 1 分钟左右——新闻的即时性由这条线负责。
 //! AIHOT 没有 Webhook / 流式订阅，「实时」只能靠带 `ETag` 的条件轮询逼近，
 //! 没有新内容的轮次服务端只回一个 304，几乎不产生流量。
-//! 为免变成刷屏，实时推送有基线、保鲜期、单次条数与每小时频次四道闸，
-//! 外加深夜静默时段，详见 `realtime.rs` 顶部说明。
+//! 默认以完整、及时为先：全分类、全天候、按上游允许的 60 秒下限轮询。
+//! 基线、去重与持久待发队列负责避免重复和丢失；单批与小时容量保留宽松上限，
+//! 防止异常数据造成失控刷屏，详见 `realtime.rs` 顶部说明。
 //!
 //! **定时档**：日报、精选速递、热点榜按固定排期推送，负责节奏与总结。
-//! 两条线共用同一张去重表——实时推过的条目定时档不会再推一遍，
-//! 所以开着实时推送时，定时速递自然退化成「补漏」：
-//! 只发静默时段积压的、以及实时线因频次上限没能发出的那些。
+//! 两条线分别去重：实时线不漏资讯，定时线仍可把其中的精选内容做成回顾；
+//! 同一条内容不会在同一条推送线上反复出现。
 //!
 //! 默认排期（可在配置或 `/设置` 中调整）。时间点与 `stats` 插件的统计推送
 //! 整体错峰，任何一档都不与发言排行榜 / 数据分析撞在同一分钟：
 //!
 //! | 时间 | 插件 | 内容 |
 //! | --- | --- | --- |
-//! | 全天 | ai_news | 实时快报（精选池有新条目就推，深夜静默） |
+//! | 全天 | ai_news | 实时快报（全量池有新条目就推，默认不设静默） |
 //! | 08:20 | ai_news | AI 日报（当期日报，同一期只推一次） |
 //! | 09:00 | stats | 早安回顾（昨日） |
 //! | 10:00 周一 | stats | 上周回顾 |
@@ -56,6 +56,9 @@
 //!   /ai搜索 <关键词>     按关键词检索
 //!   /ai推送开启 · /ai推送关闭 · /ai推送状态 · /ai推送重置
 //!   /ai实时开启 · /ai实时关闭   本群只收定时档还是也收实时快报
+//!   /ai分类 <模型|产品|行业|论文|技巧|全部|默认>
+//!   /ai静默 <HH:MM-HH:MM|关闭|默认>
+//!   /设置 ai_news card_theme auto|light|dark   自动 / 白天 / 夜晚阅读主题
 //!
 //! 使用边界：AIHOT 的匿名接口可用于个人非商业、公益非商业及组织内部使用；
 //! 面向外部的商业产品、数据转售、公开镜像等须先取得 AIHOT 书面授权
@@ -69,7 +72,9 @@ use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config, update_config};
 use futures_util::future::BoxFuture;
+use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value;
 
@@ -91,6 +96,18 @@ const DEFAULT_GROUP: i64 = 175131947;
 
 // ================= 配置定义 =================
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GroupPreference {
+    /// None 继承全局分类；Some("") 表示本群不限分类
+    #[serde(default)]
+    pub category: Option<String>,
+    /// 两项均为 None 时继承全局静默时段；均为空字符串表示本群不静默
+    #[serde(default)]
+    pub quiet_start: Option<String>,
+    #[serde(default)]
+    pub quiet_end: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiNewsConfig {
     #[serde(default = "default_true")]
@@ -101,7 +118,7 @@ pub struct AiNewsConfig {
     pub groups: Vec<i64>,
 
     // —— 抓取参数 ——
-    /// `selected`（精选，推荐）或 `all`（全部公开动态）
+    /// 手动 `/ai资讯` 查询所用动态池；主动推送的数据源策略不受此项影响
     #[serde(default = "default_mode")]
     pub mode: String,
     /// 时间窗，AIHOT v1 只支持 `24h` 与 `7d`
@@ -130,7 +147,7 @@ pub struct AiNewsConfig {
     /// 是否展示 AIHOT 的「推荐理由」
     #[serde(default = "default_true")]
     pub show_reason: bool,
-    /// 是否附带第三方原文链接（默认只给 AIHOT 站内阅读页）
+    /// 是否附带第三方原文链接（默认开启，同时保留 AIHOT 站内阅读页）
     #[serde(default)]
     pub show_original_link: bool,
     /// 日报最多展示的条目数
@@ -152,6 +169,9 @@ pub struct AiNewsConfig {
     /// 2.0 是勉强能看，3.0 在手机上放大也不糊
     #[serde(default = "default_image_scale")]
     pub image_scale: f64,
+    /// 卡片主题：auto（北京时间 07:00—18:59 白天，其余夜晚）/ light / dark
+    #[serde(default = "default_card_theme")]
+    pub card_theme: String,
     /// 多个群之间的最小发送间隔（秒），防风控
     #[serde(default = "default_send_interval")]
     pub send_interval_seconds: u64,
@@ -169,7 +189,7 @@ pub struct AiNewsConfig {
     pub leaderboard_cache_minutes: u64,
 
     // —— 实时推送 ——
-    /// 实时快报总开关：精选池一有新资讯就推，不必等下一个定时档
+    /// 实时快报总开关：全量动态池一有有效资讯就推，不必等下一个定时档
     #[serde(default = "default_true")]
     pub realtime_enabled: bool,
     /// 轮询间隔（秒）。低于 60 秒无意义：AIHOT 的 CDN 缓存就是 60 秒，
@@ -195,6 +215,9 @@ pub struct AiNewsConfig {
     /// 只收定时档、不收实时快报的群；可用 `/ai实时关闭` 在群内增删
     #[serde(default)]
     pub realtime_muted_groups: Vec<i64>,
+    /// 按群覆盖分类与静默时段；未配置的字段继续继承全局值
+    #[serde(default)]
+    pub group_preferences: HashMap<String, GroupPreference>,
 
     // —— 排期 ——
     #[serde(default = "default_true")]
@@ -227,7 +250,7 @@ fn default_window() -> String {
     "24h".to_string()
 }
 fn default_limit() -> u32 {
-    8
+    30
 }
 fn default_min_items() -> u32 {
     1
@@ -256,6 +279,9 @@ fn default_forward_node_chars() -> usize {
 fn default_image_scale() -> f64 {
     3.0
 }
+fn default_card_theme() -> String {
+    "auto".to_string()
+}
 fn default_send_interval() -> u64 {
     8
 }
@@ -269,22 +295,22 @@ fn default_leaderboard_cache_minutes() -> u64 {
     30
 }
 fn default_realtime_interval() -> u64 {
-    180
+    60
 }
 fn default_realtime_max_age() -> i64 {
-    240
+    24 * 60
 }
 fn default_realtime_max_items() -> usize {
-    5
+    30
 }
 fn default_realtime_max_per_hour() -> u32 {
-    4
+    60
 }
 fn default_quiet_start() -> String {
-    "23:30".to_string()
+    String::new()
 }
 fn default_quiet_end() -> String {
-    "07:30".to_string()
+    String::new()
 }
 // 以下时间点与 stats 插件的统计推送错峰，详见模块文档的时间表
 fn default_brief_times() -> Vec<String> {
@@ -311,13 +337,14 @@ impl Default for AiNewsConfig {
             request_timeout_seconds: default_timeout(),
             summary_max_chars: default_summary_chars(),
             show_reason: true,
-            show_original_link: false,
+            show_original_link: true,
             daily_max_blocks: default_daily_blocks(),
             image_enabled: true,
             image_max_items: default_image_max_items(),
             forward_threshold_chars: default_forward_threshold(),
             forward_node_chars: default_forward_node_chars(),
             image_scale: default_image_scale(),
+            card_theme: default_card_theme(),
             send_interval_seconds: default_send_interval(),
             send_interval_max_seconds: default_send_interval_max(),
             leaderboard_max_items: default_leaderboard_items(),
@@ -330,12 +357,46 @@ impl Default for AiNewsConfig {
             realtime_quiet_start: default_quiet_start(),
             realtime_quiet_end: default_quiet_end(),
             realtime_muted_groups: Vec::new(),
+            group_preferences: HashMap::new(),
             brief_enabled: true,
             brief_times: default_brief_times(),
             daily_enabled: true,
             daily_time: default_daily_time(),
             hot_topics_enabled: true,
             hot_topics_time: default_hot_topics_time(),
+        }
+    }
+}
+
+impl AiNewsConfig {
+    fn group_preference(&self, group_id: i64) -> Option<&GroupPreference> {
+        self.group_preferences.get(&group_id.to_string())
+    }
+
+    pub(super) fn category_for_group(&self, group_id: i64) -> &str {
+        self.group_preference(group_id)
+            .and_then(|pref| pref.category.as_deref())
+            .unwrap_or(&self.category)
+            .trim()
+    }
+
+    pub(super) fn quiet_for_group(&self, group_id: i64) -> (&str, &str) {
+        let pref = self.group_preference(group_id);
+        let start = pref
+            .and_then(|p| p.quiet_start.as_deref())
+            .unwrap_or(&self.realtime_quiet_start);
+        let end = pref
+            .and_then(|p| p.quiet_end.as_deref())
+            .unwrap_or(&self.realtime_quiet_end);
+        (start.trim(), end.trim())
+    }
+
+    fn clean_group_preference(&mut self, group_id: i64) {
+        let key = group_id.to_string();
+        if self.group_preferences.get(&key).is_some_and(|pref| {
+            pref.category.is_none() && pref.quiet_start.is_none() && pref.quiet_end.is_none()
+        }) {
+            self.group_preferences.remove(&key);
         }
     }
 }
@@ -378,33 +439,36 @@ pub fn on_connected(
         let config = load_config(&ctx);
         warn_on_schedule_conflicts(&ctx, &config);
 
-        if config.daily_enabled {
+        // 三类任务始终注册，触发时再读取最新开关。这样 `/设置` 修改 enabled
+        // 会即时生效；只有时间点本身的增删改仍需重启后重新排期。
+        schedule(
+            &ctx,
+            &writer,
+            &config.daily_time,
+            "AI 日报",
+            |cfg| cfg.daily_enabled,
+            |c, w, cfg, groups| Box::pin(pusher::push_daily(c, w, cfg, groups)),
+        );
+
+        for time in &config.brief_times {
             schedule(
                 &ctx,
                 &writer,
-                &config.daily_time,
-                "AI 日报",
-                |c, w, cfg, groups| Box::pin(pusher::push_daily(c, w, cfg, groups)),
+                time,
+                "精选速递",
+                |cfg| cfg.brief_enabled,
+                |c, w, cfg, groups| Box::pin(pusher::push_brief(c, w, cfg, groups)),
             );
         }
 
-        if config.brief_enabled {
-            for time in &config.brief_times {
-                schedule(&ctx, &writer, time, "精选速递", |c, w, cfg, groups| {
-                    Box::pin(pusher::push_brief(c, w, cfg, groups))
-                });
-            }
-        }
-
-        if config.hot_topics_enabled {
-            schedule(
-                &ctx,
-                &writer,
-                &config.hot_topics_time,
-                "热点榜",
-                |c, w, cfg, groups| Box::pin(pusher::push_hot_topics(c, w, cfg, groups)),
-            );
-        }
+        schedule(
+            &ctx,
+            &writer,
+            &config.hot_topics_time,
+            "热点榜",
+            |cfg| cfg.hot_topics_enabled,
+            |c, w, cfg, groups| Box::pin(pusher::push_hot_topics(c, w, cfg, groups)),
+        );
 
         // 实时快报：轮询任务常驻，开关与参数在每次节拍时重新读取，
         // 所以这里不看 realtime_enabled——关掉再打开无需重启
@@ -420,37 +484,71 @@ type PushFn = fn(
     AiNewsConfig,
     Vec<i64>,
 ) -> futures_util::future::BoxFuture<'static, ()>;
+type EnabledFn = fn(&AiNewsConfig) -> bool;
 
-/// 注册一个每日定时任务；配置在每次触发时重新读取，改群号无需重启
-fn schedule(ctx: &Context, writer: &LockedWriter, time_str: &str, label: &str, runner: PushFn) {
+/// 注册一个北京时间的每日任务；配置在每次触发时重新读取，改群号无需重启。
+///
+/// 不依赖宿主机时区：容器或服务器即使运行在 UTC，08:20 仍表示北京时间 08:20。
+fn schedule(
+    ctx: &Context,
+    writer: &LockedWriter,
+    time_str: &str,
+    label: &str,
+    enabled: EnabledFn,
+    runner: PushFn,
+) {
     let (h, m, s) = parse_time(time_str);
-    info!(target: LOG_TARGET, "已计划[{}]推送：每日 {:02}:{:02}:{:02}", label, h, m, s);
+    info!(target: LOG_TARGET, "已计划[{}]推送：每日北京时间 {:02}:{:02}:{:02}", label, h, m, s);
 
     let ctx = ctx.clone();
     let writer = writer.clone();
     let label = label.to_string();
 
-    ctx.scheduler.clone().add_daily_at(h, m, s, move || {
-        let ctx = ctx.clone();
-        let writer = writer.clone();
-        let label = label.clone();
+    ctx.scheduler.clone().add_schedule(
+        move |local_now| next_beijing_run(local_now, h, m, s),
+        move || {
+            let ctx = ctx.clone();
+            let writer = writer.clone();
+            let label = label.clone();
 
-        async move {
-            let config = load_config(&ctx);
-            if !config.enabled {
-                return;
-            }
-            let groups: Vec<i64> = config.groups.iter().copied().filter(|g| *g != 0).collect();
-            if groups.is_empty() {
-                info!(target: LOG_TARGET, "[{}] 没有配置推送群，跳过。", label);
-                return;
-            }
+            async move {
+                let config = load_config(&ctx);
+                if !config.enabled || !enabled(&config) {
+                    return;
+                }
+                let groups: Vec<i64> =
+                    config.groups.iter().copied().filter(|g| *g != 0).collect();
+                if groups.is_empty() {
+                    info!(target: LOG_TARGET, "[{}] 没有配置推送群，跳过。", label);
+                    return;
+                }
 
-            info!(target: LOG_TARGET, "开始执行[{}]推送，目标群 {} 个...", label, groups.len());
-            runner(ctx, writer, config, groups).await;
-            info!(target: LOG_TARGET, "[{}] 推送任务完成。", label);
-        }
-    });
+                info!(target: LOG_TARGET, "开始执行[{}]推送，目标群 {} 个...", label, groups.len());
+                runner(ctx, writer, config, groups).await;
+                info!(target: LOG_TARGET, "[{}] 推送任务完成。", label);
+            }
+        },
+    );
+}
+
+fn next_beijing_run(
+    local_now: chrono::DateTime<Local>,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> Option<chrono::DateTime<Local>> {
+    let timezone = render::beijing();
+    let now = local_now.with_timezone(&timezone);
+    let today = now.date_naive();
+    let target_today = timezone
+        .from_local_datetime(&today.and_hms_opt(hour, minute, second)?)
+        .single()?;
+    let target = if target_today > now {
+        target_today
+    } else {
+        target_today + chrono::Duration::days(1)
+    };
+    Some(target.with_timezone(&Local))
 }
 
 /// 启动时检查本插件的排期是否与 `stats` 的统计推送撞在同一分钟。
@@ -560,11 +658,14 @@ pub fn handle(
             "ai推送重置",
             "ai实时开启",
             "ai实时关闭",
+            "ai分类",
+            "ai静默",
         ] {
-            if match_command(&ctx, trigger).is_none() {
+            let Some(matched) = match_command(&ctx, trigger) else {
                 continue;
-            }
-            let reply = handle_push_admin(&ctx, trigger, group_id).await;
+            };
+            let arg = extract_text_arg(&matched.args);
+            let reply = handle_push_admin(&ctx, trigger, group_id, &arg).await;
             let body = Message::new().reply(message_id).text(reply);
             send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
             return Ok(None);
@@ -596,7 +697,7 @@ pub fn handle(
                 "ai模型排行榜" | "ai模型榜" | "ai大模型排行榜" | "模型排行榜" | "模型榜" => {
                     query_models(&config).await
                 }
-                _ => query_brief(&config).await,
+                _ => query_brief(&config, group_id).await,
             };
 
             // 先发卡片图，再补一条带链接的合并转发文本
@@ -622,9 +723,13 @@ fn notice(text: impl Into<String>) -> Payload {
     Payload::text_only(Rendered::plain(text))
 }
 
-async fn query_brief(config: &AiNewsConfig) -> Payload {
+async fn query_brief(config: &AiNewsConfig, group_id: Option<i64>) -> Payload {
+    let mut scoped_config = config.clone();
+    if let Some(group_id) = group_id {
+        scoped_config.category = config.category_for_group(group_id).to_string();
+    }
     let window = pusher::window_label(&config.window);
-    match pusher::fetch_brief(config, api::Poll::Fresh).await {
+    match pusher::fetch_brief(&scoped_config, api::Poll::Fresh).await {
         Ok(Some(items)) if !items.is_empty() => {
             let opts = pusher::render_options(config);
             let rendered =
@@ -634,10 +739,11 @@ async fn query_brief(config: &AiNewsConfig) -> Payload {
                 window,
                 pusher::card_slice(&items, config),
                 &opts,
+                card::resolve_theme(&config.card_theme),
             );
             Payload::build(config, rendered, Some(html)).await
         }
-        Ok(_) => notice(format!("📭 {}内暂无 AI 精选资讯。", window)),
+        Ok(_) => notice(format!("📭 {}内暂无 AI 资讯。", window)),
         Err(e) => {
             warn!(target: LOG_TARGET, "查询精选失败: {}", e);
             notice(format!("❌ 获取 AI 资讯失败：{}", e))
@@ -649,7 +755,10 @@ async fn query_hot_topics(config: &AiNewsConfig) -> Payload {
     match api::fetch_hot_topics(config.request_timeout_seconds, api::Poll::Fresh).await {
         Ok(Some(topics)) if !topics.is_empty() => {
             let rendered = render::render_hot_topics(&topics);
-            let html = card::hot_topics_card(pusher::card_slice(&topics, config));
+            let html = card::hot_topics_card(
+                pusher::card_slice(&topics, config),
+                card::resolve_theme(&config.card_theme),
+            );
             Payload::build(config, rendered, Some(html)).await
         }
         Ok(_) => notice("📭 当前没有热点条目。"),
@@ -664,7 +773,11 @@ async fn query_daily(config: &AiNewsConfig) -> Payload {
     match api::fetch_latest_daily(config.request_timeout_seconds).await {
         Ok(Some(report)) => {
             let rendered = render::render_daily(&report, config.daily_max_blocks);
-            let html = card::daily_card(&report, config.daily_max_blocks);
+            let html = card::daily_card(
+                &report,
+                config.daily_max_blocks,
+                card::resolve_theme(&config.card_theme),
+            );
             Payload::build(config, rendered, Some(html)).await
         }
         Ok(None) => notice("📭 当前没有可用的 AI 日报。"),
@@ -686,7 +799,11 @@ async fn query_models(config: &AiNewsConfig) -> Payload {
     {
         Ok(board) if !board.entries.is_empty() => {
             let rendered = render::render_models(&board, max_items);
-            let html = card::models_card(&board, max_items);
+            let html = card::models_card(
+                &board,
+                max_items,
+                card::resolve_theme(&config.card_theme),
+            );
             Payload::build(config, rendered, Some(html)).await
         }
         Ok(_) => notice("📭 AIHOT 模型榜当前没有可展示的条目。"),
@@ -726,6 +843,7 @@ async fn query_search(config: &AiNewsConfig, keyword: &str) -> Payload {
                 &subtitle,
                 pusher::card_slice(&items, config),
                 &opts,
+                card::resolve_theme(&config.card_theme),
             );
             Payload::build(config, rendered, Some(html)).await
         }
@@ -737,11 +855,22 @@ async fn query_search(config: &AiNewsConfig, keyword: &str) -> Payload {
     }
 }
 
-async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) -> String {
+async fn handle_push_admin(
+    ctx: &Context,
+    trigger: &str,
+    group_id: Option<i64>,
+    arg: &str,
+) -> String {
     let config = load_config(ctx);
 
     if trigger == "ai推送状态" {
-        return render_status(ctx, &config, group_id);
+        let pending = match group_id {
+            Some(group_id) => Some(
+                state::realtime_pending_count(group_id, config.realtime_max_age_minutes).await,
+            ),
+            None => None,
+        };
+        return render_status(ctx, &config, group_id, pending);
     }
 
     let Some(gid) = group_id else {
@@ -751,7 +880,7 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
     match trigger {
         "ai推送开启" => {
             if config.groups.contains(&gid) {
-                return format!("本群（{}）已经在推送列表中了。", gid);
+                return "本群已经开启 AI 资讯推送。".to_string();
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
                 if !cfg.groups.contains(&gid) {
@@ -761,13 +890,16 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
             })
             .await;
             match result {
-                Ok(_) => format!("✅ 已为本群（{}）开启 AI 资讯推送。", gid),
+                Ok(_) => {
+                    state::align_realtime_baseline(gid).await;
+                    "✅ 已开启本群的 AI 资讯推送。".to_string()
+                }
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
         "ai推送关闭" => {
             if !config.groups.contains(&gid) {
-                return format!("本群（{}）当前未开启推送。", gid);
+                return "本群当前未开启 AI 资讯推送。".to_string();
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
                 cfg.groups.retain(|g| *g != gid);
@@ -775,7 +907,7 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
             })
             .await;
             match result {
-                Ok(_) => format!("✅ 已关闭本群（{}）的 AI 资讯推送。", gid),
+                Ok(_) => "✅ 已关闭本群的 AI 资讯推送。".to_string(),
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
@@ -798,13 +930,10 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
                 );
             }
             if !config.groups.contains(&gid) {
-                return format!(
-                    "本群（{}）还没有开启 AI 资讯推送，先用「ai推送开启」把本群加进来。",
-                    gid
-                );
+                return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
             }
             if !config.realtime_muted_groups.contains(&gid) {
-                return format!("本群（{}）已经在接收实时快报了。", gid);
+                return "本群已经在接收实时快报。".to_string();
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
                 cfg.realtime_muted_groups.retain(|g| *g != gid);
@@ -812,13 +941,16 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
             })
             .await;
             match result {
-                Ok(_) => format!("⚡ 已为本群（{}）开启实时快报，新资讯进池即推。", gid),
+                Ok(_) => {
+                    state::align_realtime_baseline(gid).await;
+                    "⚡ 已开启本群的实时快报，从现在起的新资讯将及时送达。".to_string()
+                }
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
         "ai实时关闭" => {
             if config.realtime_muted_groups.contains(&gid) {
-                return format!("本群（{}）当前只接收定时推送。", gid);
+                return "本群当前只接收定时推送。".to_string();
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
                 if !cfg.realtime_muted_groups.contains(&gid) {
@@ -828,18 +960,140 @@ async fn handle_push_admin(ctx: &Context, trigger: &str, group_id: Option<i64>) 
             })
             .await;
             match result {
-                Ok(_) => format!(
-                    "✅ 已关闭本群（{}）的实时快报，定时档（日报 / 精选速递 / 热点榜）照常。",
-                    gid
-                ),
+                Ok(_) => "✅ 已关闭本群的实时快报；日报、精选速递与热点榜照常推送。".to_string(),
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
+        "ai分类" => update_group_category(ctx, gid, arg).await,
+        "ai静默" => update_group_quiet(ctx, gid, arg).await,
         _ => String::new(),
     }
 }
 
-fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) -> String {
+async fn update_group_category(ctx: &Context, group_id: i64, raw: &str) -> String {
+    let config = load_config(ctx);
+    if !config.groups.contains(&group_id) {
+        return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
+    }
+
+    let raw = raw.trim();
+    if raw.is_empty() {
+        let current = config.category_for_group(group_id);
+        let label = if current.is_empty() {
+            "全部分类"
+        } else {
+            api::category_label(current)
+        };
+        return format!(
+            "本群当前接收：{}。\n用法：/ai分类 <模型|产品|行业|论文|技巧|全部|默认>",
+            label
+        );
+    }
+
+    let category = match raw.to_ascii_lowercase().as_str() {
+        "模型" | "ai-models" => Some("ai-models".to_string()),
+        "产品" | "ai-products" => Some("ai-products".to_string()),
+        "行业" | "industry" => Some("industry".to_string()),
+        "论文" | "paper" => Some("paper".to_string()),
+        "技巧" | "tip" => Some("tip".to_string()),
+        "全部" | "不限" | "all" | "off" => Some(String::new()),
+        "默认" | "继承" | "default" | "inherit" => None,
+        _ => {
+            return "未识别该分类。可选：模型、产品、行业、论文、技巧、全部或默认。"
+                .to_string();
+        }
+    };
+    let stored = category.clone();
+    let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
+        cfg.group_preferences
+            .entry(group_id.to_string())
+            .or_default()
+            .category = stored;
+        cfg.clean_group_preference(group_id);
+        cfg
+    })
+    .await;
+
+    match result {
+        Ok(_) => {
+            // 切换分类时从当前时刻重新起算，避免把新分类中的存量资讯当作实时新闻。
+            state::align_realtime_baseline(group_id).await;
+            let updated = load_config(ctx);
+            let current = updated.category_for_group(group_id);
+            let label = if current.is_empty() {
+                "全部分类"
+            } else {
+                api::category_label(current)
+            };
+            format!("✅ 本群资讯分类已设为：{}。", label)
+        }
+        Err(e) => format!("❌ 保存配置失败：{}", e),
+    }
+}
+
+async fn update_group_quiet(ctx: &Context, group_id: i64, raw: &str) -> String {
+    let config = load_config(ctx);
+    if !config.groups.contains(&group_id) {
+        return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
+    }
+
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return format!(
+            "本群实时静默：{}。\n用法：/ai静默 <23:30-07:30|关闭|默认>",
+            quiet_label(&config, Some(group_id))
+        );
+    }
+
+    let lowered = raw.to_ascii_lowercase();
+    let (start, end, message) = if matches!(lowered.as_str(), "默认" | "继承" | "default" | "inherit") {
+        (None, None, "已恢复全局静默时段".to_string())
+    } else if matches!(lowered.as_str(), "关闭" | "全天" | "off" | "none") {
+        (Some(String::new()), Some(String::new()), "已关闭静默，全天可接收实时快报".to_string())
+    } else {
+        let normalized = raw.replace(['—', '–', '~', '～'], "-");
+        let Some((start, end)) = normalized.split_once('-') else {
+            return "时间格式不正确，请使用「23:30-07:30」。".to_string();
+        };
+        let (Some(start), Some(end)) = (
+            realtime::parse_clock(start),
+            realtime::parse_clock(end),
+        ) else {
+            return "时间格式不正确，请使用 00:00—23:59 范围内的时间。".to_string();
+        };
+        if start == end {
+            return "起止时间不能相同；如需全天接收，请发送「/ai静默 关闭」。".to_string();
+        }
+        let start = start.format("%H:%M").to_string();
+        let end = end.format("%H:%M").to_string();
+        let message = format!("实时静默时段已设为 {}—{}", start, end);
+        (Some(start), Some(end), message)
+    };
+
+    let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
+        let preference = cfg
+            .group_preferences
+            .entry(group_id.to_string())
+            .or_default();
+        preference.quiet_start = start;
+        preference.quiet_end = end;
+        cfg.clean_group_preference(group_id);
+        cfg
+    })
+    .await;
+
+    match result {
+        Ok(_) => format!("✅ 本群{}。", message),
+        Err(e) => format!("❌ 保存配置失败：{}", e),
+    }
+}
+
+fn render_status(
+    ctx: &Context,
+    config: &AiNewsConfig,
+    group_id: Option<i64>,
+    pending_items: Option<usize>,
+) -> String {
     let prefix = get_prefixes(ctx)
         .first()
         .cloned()
@@ -847,7 +1101,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
 
     let switch = |on: bool| if on { "✅" } else { "⬜" };
 
-    let mut out = String::from("🤖 AI 资讯推送状态\n———————————————\n");
+    let mut out = String::from("🤖 AI 资讯推送\n");
     out.push_str(&format!(
         "总开关：{} {}\n",
         switch(config.enabled),
@@ -856,8 +1110,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
 
     if let Some(gid) = group_id {
         out.push_str(&format!(
-            "本群（{}）：{}\n",
-            gid,
+            "本群：{}\n",
             if config.groups.contains(&gid) {
                 "已开启推送"
             } else {
@@ -868,7 +1121,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
 
     out.push_str(&format!("推送群数：{} 个\n", config.groups.len()));
 
-    out.push_str("———————————————\n⚡ 实时快报\n");
+    out.push_str("\n⚡ 实时快报\n");
     if config.realtime_enabled {
         let muted = group_id.is_some_and(|gid| config.realtime_muted_groups.contains(&gid));
         out.push_str(&format!(
@@ -890,13 +1143,16 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
             config.realtime_max_age_minutes.max(1),
             config.realtime_max_items.max(1),
             config.realtime_max_per_hour.max(1),
-            quiet_label(config)
+            quiet_label(config, group_id)
         ));
+        if let Some(pending_items) = pending_items {
+            out.push_str(&format!("   待发队列：{} 条\n", pending_items));
+        }
     } else {
         out.push_str("⬜ 已关闭（只按下方排期推送）\n");
     }
 
-    out.push_str("———————————————\n📅 排期\n");
+    out.push_str("\n📅 定时推送\n");
     out.push_str(&format!(
         "{} AI 日报　{}\n",
         switch(config.daily_enabled),
@@ -910,7 +1166,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
         config.limit
     ));
     if config.realtime_enabled && config.brief_enabled {
-        out.push_str("   （实时开启时它只补漏：静默时段与超限的条目）\n");
+        out.push_str("   （与实时线独立去重，用于精选回顾）\n");
     }
     out.push_str(&format!(
         "{} 热点榜　{}\n",
@@ -921,15 +1177,29 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
         "多群间隔 {}—{} 秒随机，不会同一秒齐发\n",
         config.send_interval_seconds, config.send_interval_max_seconds
     ));
-    if !config.category.trim().is_empty() {
+    let theme = card::resolve_theme(&config.card_theme);
+    let theme_mode = match config.card_theme.trim().to_ascii_lowercase().as_str() {
+        "light" | "day" | "白天" | "日间" => "固定白天".to_string(),
+        "dark" | "night" | "夜晚" | "夜间" => "固定夜晚".to_string(),
+        _ => format!("自动（当前{}）", theme.label()),
+    };
+    out.push_str(&format!("阅读主题：{}\n", theme_mode));
+    if let Some(group_id) = group_id {
+        let category = config.category_for_group(group_id);
         out.push_str(&format!(
-            "分类过滤：{}\n",
-            api::category_label(config.category.trim())
+            "本群分类：{}\n",
+            if category.is_empty() {
+                "全部"
+            } else {
+                api::category_label(category)
+            }
         ));
+    } else if !config.category.trim().is_empty() {
+        out.push_str(&format!("全局分类：{}\n", api::category_label(config.category.trim())));
     }
-    out.push_str("———————————————\n");
+    out.push('\n');
     out.push_str(&format!(
-        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai实时开启 · {p}ai实时关闭\n",
+        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai实时开启/关闭 · {p}ai分类 · {p}ai静默\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);
@@ -938,7 +1208,7 @@ fn render_status(ctx: &Context, config: &AiNewsConfig, group_id: Option<i64>) ->
 
 /// 轮询间隔的展示文案：整分钟就说分钟，读起来比「每 180 秒」直观
 fn interval_label(seconds: u64) -> String {
-    if seconds % 60 == 0 {
+    if seconds.is_multiple_of(60) {
         format!(" {} 分钟", seconds / 60)
     } else {
         format!(" {} 秒", seconds)
@@ -946,9 +1216,14 @@ fn interval_label(seconds: u64) -> String {
 }
 
 /// 静默时段的展示文案：起止相同或留空都表示「不设静默」
-fn quiet_label(config: &AiNewsConfig) -> String {
-    let start = config.realtime_quiet_start.trim();
-    let end = config.realtime_quiet_end.trim();
+fn quiet_label(config: &AiNewsConfig, group_id: Option<i64>) -> String {
+    let (start, end) = group_id.map_or_else(
+        || (
+            config.realtime_quiet_start.trim(),
+            config.realtime_quiet_end.trim(),
+        ),
+        |group_id| config.quiet_for_group(group_id),
+    );
     if start.is_empty() || end.is_empty() || start == end {
         return "不设（全天推送）".to_string();
     }
@@ -968,12 +1243,35 @@ mod tests {
     }
 
     #[test]
+    fn schedule_is_pinned_to_beijing_even_when_host_timezone_differs() {
+        use chrono::Utc;
+
+        let before = Utc.with_ymd_and_hms(2026, 9, 5, 0, 19, 0).unwrap();
+        let next = next_beijing_run(before.with_timezone(&Local), 8, 20, 0).unwrap();
+        assert_eq!(next.with_timezone(&Utc), Utc.with_ymd_and_hms(2026, 9, 5, 0, 20, 0).unwrap());
+
+        let after = Utc.with_ymd_and_hms(2026, 9, 5, 0, 21, 0).unwrap();
+        let next = next_beijing_run(after.with_timezone(&Local), 8, 20, 0).unwrap();
+        assert_eq!(next.with_timezone(&Utc), Utc.with_ymd_and_hms(2026, 9, 6, 0, 20, 0).unwrap());
+    }
+
+    #[test]
     fn default_config_targets_the_requested_group() {
         let config = AiNewsConfig::default();
         assert_eq!(config.groups, vec![DEFAULT_GROUP]);
         assert!(config.enabled);
         assert_eq!(config.mode, "selected");
         assert_eq!(config.window, "24h");
+        assert!(config.category.is_empty());
+        assert!(config.show_reason && config.show_original_link && config.image_enabled);
+        assert!(config.daily_enabled && config.brief_enabled && config.hot_topics_enabled);
+        assert!(config.realtime_enabled);
+        assert_eq!(config.realtime_interval_seconds, 60);
+        assert_eq!(config.realtime_max_items, 30);
+        assert_eq!(config.realtime_max_per_hour, 60);
+        assert!(config.realtime_quiet_start.is_empty());
+        assert!(config.realtime_quiet_end.is_empty());
+        assert!(config.group_preferences.is_empty());
     }
 
     #[test]
@@ -982,6 +1280,7 @@ mod tests {
         let parsed: AiNewsConfig = value.try_into().expect("默认配置应能反序列化");
         assert_eq!(parsed.groups, vec![DEFAULT_GROUP]);
         assert_eq!(parsed.brief_times.len(), 2);
+        assert_eq!(parsed.card_theme, "auto");
         // 实时快报默认开启，且轮询间隔不低于 AIHOT 的缓存时长
         assert!(parsed.realtime_enabled);
         assert!(parsed.realtime_interval_seconds >= realtime::MIN_INTERVAL_SECONDS);
@@ -1006,19 +1305,45 @@ mod tests {
         assert!(parsed.realtime_enabled);
         assert_eq!(parsed.realtime_max_items, default_realtime_max_items());
         assert_eq!(parsed.realtime_quiet_start, default_quiet_start());
+        assert_eq!(parsed.card_theme, default_card_theme());
     }
 
     #[test]
     fn quiet_label_reads_as_off_when_bounds_are_empty_or_equal() {
         let mut cfg = AiNewsConfig::default();
-        assert_eq!(quiet_label(&cfg), "23:30—07:30");
+        assert!(quiet_label(&cfg, None).contains("不设"));
+
+        cfg.realtime_quiet_start = "23:30".into();
+        cfg.realtime_quiet_end = "07:30".into();
+        assert_eq!(quiet_label(&cfg, None), "23:30—07:30");
 
         cfg.realtime_quiet_start = String::new();
-        assert!(quiet_label(&cfg).contains("不设"));
+        assert!(quiet_label(&cfg, None).contains("不设"));
 
         cfg.realtime_quiet_start = "08:00".into();
         cfg.realtime_quiet_end = "08:00".into();
-        assert!(quiet_label(&cfg).contains("不设"));
+        assert!(quiet_label(&cfg, None).contains("不设"));
+    }
+
+    #[test]
+    fn group_preferences_override_and_inherit_global_values() {
+        let mut cfg = AiNewsConfig {
+            category: "paper".into(),
+            ..Default::default()
+        };
+        cfg.group_preferences.insert(
+            "42".into(),
+            GroupPreference {
+                category: Some("ai-models".into()),
+                quiet_start: Some(String::new()),
+                quiet_end: Some(String::new()),
+            },
+        );
+
+        assert_eq!(cfg.category_for_group(42), "ai-models");
+        assert_eq!(cfg.category_for_group(43), "paper");
+        assert!(quiet_label(&cfg, Some(42)).contains("不设"));
+        assert!(quiet_label(&cfg, Some(43)).contains("不设"));
     }
 
     /// 联网冒烟测试：默认 `#[ignore]`，不参与常规 `cargo test`。
@@ -1051,6 +1376,23 @@ mod tests {
             println!(
                 "{}",
                 render::render_items(&header, &items, &pusher::render_options(&cfg)).to_text()
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "需要访问 aihot.virxact.com"]
+        async fn realtime_endpoint_reads_all_pool() {
+            let cfg = config();
+            let items = pusher::fetch_realtime_for_push(&cfg, api::Poll::Fresh)
+                .await
+                .expect("全量动态接口应可访问")
+                .expect("非条件请求必然带响应体");
+
+            assert!(!items.is_empty(), "过去 24 小时的全量动态不应为空");
+            assert!(items.len() <= 100, "实时抓取不应超过接口上限");
+            assert!(
+                items.iter().all(|i| i.dedupe_key().is_some()),
+                "每条都应能算出去重键"
             );
         }
 
