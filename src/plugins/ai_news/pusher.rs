@@ -1,13 +1,13 @@
-//! 主动推送任务：一次抓取，多群分发。
+//! 主动推送任务：一次抓取，多会话分发。
 //!
-//! 每个定时任务只向 AIHOT 发起一次请求，再把结果分发到各目标群，
-//! 既满足官方「同一端点定时任务至少间隔 60 秒」的要求，也避免群数增长时把请求量放大。
+//! 每个定时任务只向 AIHOT 发起一次请求，再把结果分发到各目标会话，
+//! 既满足官方「同一端点定时任务至少间隔 60 秒」的要求，也避免目标数增长时放大请求量。
 
 use super::api::{self, Item};
 use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
-use super::{AiNewsConfig, LOG_TARGET};
+use super::{AiNewsConfig, LOG_TARGET, PushTarget};
 use crate::adapters::satori::{LockedWriter, send_msg, send_msg_ack};
 use crate::event::Context;
 use crate::message::Message;
@@ -53,8 +53,11 @@ fn card_theme(cfg: &AiNewsConfig) -> card::CardTheme {
     card::resolve_theme(&cfg.card_theme)
 }
 
-/// 全局过滤：白名单模式下只发白名单群，否则跳过黑名单群
-pub(super) fn is_allowed(ctx: &Context, group_id: i64) -> bool {
+/// 全局频道过滤只约束群聊；显式加入的私聊目标不属于频道黑白名单。
+pub(super) fn is_allowed(ctx: &Context, target: PushTarget) -> bool {
+    let PushTarget::Group(group_id) = target else {
+        return true;
+    };
     let guard = ctx.config.read().unwrap();
     let filter = &guard.global_filter;
     if filter.enable_whitelist {
@@ -214,7 +217,7 @@ pub(super) struct Headline<'a> {
 pub(super) async fn deliver_items(
     ctx: &Context,
     writer: LockedWriter,
-    group_id: i64,
+    target: PushTarget,
     cfg: &AiNewsConfig,
     headline: Headline<'_>,
     items: &[Item],
@@ -230,7 +233,16 @@ pub(super) async fn deliver_items(
     );
     let payload = Payload::build(cfg, rendered, Some(card_html)).await;
 
-    deliver(ctx, writer, Some(group_id), None, cfg, &payload, None).await
+    deliver(
+        ctx,
+        writer,
+        target.group_id(),
+        target.user_id(),
+        cfg,
+        &payload,
+        None,
+    )
+    .await
 }
 
 /// 卡片图只画前 `image_max_items` 条，剩下的交给文本；图太长反而不好读
@@ -281,8 +293,8 @@ pub async fn fetch_brief(
     .await
 }
 
-/// 主动推送需要兼顾按群分类覆盖：只要有群设置了独立分类，就抓取未筛选的
-/// 动态池，再在本地按群过滤；仍然只发起一次请求，不随群数放大流量。
+/// 主动推送需要兼顾按目标分类覆盖：只要有目标设置了独立分类，就抓取未筛选的
+/// 动态池，再在本地按目标过滤；仍然只发起一次请求，不随目标数放大流量。
 async fn fetch_feed_for_push(
     cfg: &AiNewsConfig,
     poll: api::Poll,
@@ -326,8 +338,8 @@ pub async fn fetch_realtime_for_push(
     fetch_feed_for_push(cfg, poll, PushFeed::Realtime).await
 }
 
-pub(super) fn item_matches_group(cfg: &AiNewsConfig, group_id: i64, item: &Item) -> bool {
-    let category = cfg.category_for_group(group_id);
+pub(super) fn item_matches_target(cfg: &AiNewsConfig, target: PushTarget, item: &Item) -> bool {
+    let category = cfg.category_for_target(target);
     category.is_empty() || item.category.as_deref() == Some(category)
 }
 
@@ -370,8 +382,13 @@ pub async fn search(
 
 // ================= 定时推送 =================
 
-/// 精选速递：只推该群没见过的条目
-pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, groups: Vec<i64>) {
+/// 精选速递：只推该目标没见过的条目
+pub async fn push_brief(
+    ctx: Context,
+    writer: LockedWriter,
+    cfg: AiNewsConfig,
+    targets: Vec<PushTarget>,
+) {
     let items = match fetch_brief_for_push(&cfg, api::Poll::Cached("brief")).await {
         Ok(Some(items)) => items,
         Ok(None) => {
@@ -397,24 +414,24 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
     let header = format!("🤖 AI 资讯速递 · {}", subtitle);
 
     let mut attempted_any = false;
-    for group_id in &groups {
-        if !is_allowed(&ctx, *group_id) {
+    for target in targets {
+        if !is_allowed(&ctx, target) {
             continue;
         }
 
         let group_items: Vec<&(String, Item)> = keyed
             .iter()
-            .filter(|(_, item)| item_matches_group(&cfg, *group_id, item))
+            .filter(|(_, item)| item_matches_target(&cfg, target, item))
             .take(cfg.limit.clamp(1, 100) as usize)
             .collect();
         let keys: Vec<String> = group_items.iter().map(|(key, _)| key.clone()).collect();
-        let fresh = state::unseen_brief_keys(*group_id, keys, cfg.dedupe_days).await;
+        let fresh = state::unseen_brief_keys(target.state_id(), keys, cfg.dedupe_days).await;
 
         if (fresh.len() as u32) < cfg.min_items.max(1) {
             info!(
                 target: LOG_TARGET,
-                "群 {} 新增条目 {} 条，低于阈值 {}，跳过。",
-                group_id, fresh.len(), cfg.min_items.max(1)
+                "{} 新增条目 {} 条，低于阈值 {}，跳过。",
+                target, fresh.len(), cfg.min_items.max(1)
             );
             continue;
         }
@@ -433,7 +450,7 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         let sent = deliver_items(
             &ctx,
             writer.clone(),
-            *group_id,
+            target,
             &cfg,
             Headline {
                 text: &header,
@@ -446,14 +463,19 @@ pub async fn push_brief(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
 
         // 只有真正发出去了才记入去重，发送失败的条目下次继续推
         if sent {
-            state::mark_brief_seen(*group_id, fresh).await;
+            state::mark_brief_seen(target.state_id(), fresh).await;
         }
 
     }
 }
 
 /// AI 日报：先查索引拿到实际日期，再取当期正文；同一期只推一次
-pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, groups: Vec<i64>) {
+pub async fn push_daily(
+    ctx: Context,
+    writer: LockedWriter,
+    cfg: AiNewsConfig,
+    targets: Vec<PushTarget>,
+) {
     let report = match api::fetch_latest_daily(cfg.request_timeout_seconds).await {
         Ok(Some(report)) => report,
         Ok(None) => {
@@ -480,12 +502,12 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
     let payload = Payload::build(&cfg, rendered, card_html).await;
 
     let mut attempted_any = false;
-    for group_id in &groups {
-        if !is_allowed(&ctx, *group_id) {
+    for target in targets {
+        if !is_allowed(&ctx, target) {
             continue;
         }
-        if state::has_pushed_daily(*group_id, &date).await {
-            info!(target: LOG_TARGET, "群 {} 已推送过 {} 的日报，跳过。", group_id, date);
+        if state::has_pushed_daily(target.state_id(), &date).await {
+            info!(target: LOG_TARGET, "{} 已推送过 {} 的日报，跳过。", target, date);
             continue;
         }
 
@@ -497,15 +519,15 @@ pub async fn push_daily(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig, g
         if deliver(
             &ctx,
             writer.clone(),
-            Some(*group_id),
-            None,
+            target.group_id(),
+            target.user_id(),
             &cfg,
             &payload,
             None,
         )
         .await
         {
-            state::mark_daily(*group_id, &date).await;
+            state::mark_daily(target.state_id(), &date).await;
         }
 
     }
@@ -516,7 +538,7 @@ pub async fn push_hot_topics(
     ctx: Context,
     writer: LockedWriter,
     cfg: AiNewsConfig,
-    groups: Vec<i64>,
+    targets: Vec<PushTarget>,
 ) {
     let poll = api::Poll::Cached("hot");
     let topics = match api::fetch_hot_topics(cfg.request_timeout_seconds, poll).await {
@@ -544,8 +566,8 @@ pub async fn push_hot_topics(
     let payload = Payload::build(&cfg, rendered, card_html).await;
 
     let mut attempted_any = false;
-    for group_id in &groups {
-        if !is_allowed(&ctx, *group_id) {
+    for target in targets {
+        if !is_allowed(&ctx, target) {
             continue;
         }
         if attempted_any {
@@ -555,8 +577,8 @@ pub async fn push_hot_topics(
         let _ = deliver(
             &ctx,
             writer.clone(),
-            Some(*group_id),
-            None,
+            target.group_id(),
+            target.user_id(),
             &cfg,
             &payload,
             None,

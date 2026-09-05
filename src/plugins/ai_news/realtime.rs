@@ -1,4 +1,4 @@
-//! 实时推送：有效资讯一进 AIHOT 全量动态池就发到群里，而不是等下一个定时档。
+//! 实时推送：有效资讯一进 AIHOT 全量动态池就发到目标会话，而不是等下一个定时档。
 //!
 //! ## 为什么是轮询
 //!
@@ -15,31 +15,31 @@
 //! 官方另有 `/api/v1/selected/snapshot` + `/changes` 增量账本，语义比窗口查询更准，
 //! 但它是给「在本地保留一份完整精选副本」的镜像客户端用的：要先分页拉完几千条做基线，
 //! 而且按官方说明**不返回 `reason`（推荐理由）字段**——那是卡片上最该先被看见的一句。
-//! 群里只需要「刚出的几条」，官方文档也直接建议这类客户端用 `/api/v1/items`，故不采用。
+//! 会话里只需要「刚出的几条」，官方文档也直接建议这类客户端用 `/api/v1/items`，故不采用。
 //!
 //! ## 怎么保证不吵
 //!
 //! 实时的代价是节奏不可预期，因此推送前有五道闸：
 //!
-//!   1. **基线**：每个群第一次被轮询到时只记录时间线（[`state::realtime_status`]），
-//!      不推送。否则新装机器或刚开启推送的群会把时间窗里的存量资讯一次性倒出来；
+//!   1. **基线**：每个目标第一次被轮询到时只记录时间线（[`state::realtime_status`]），
+//!      不推送。否则新装机器或刚开启推送的目标会把时间窗里的存量资讯一次性倒出来；
 //!   2. **保鲜期**：只推收录时间在 `realtime_max_age_minutes` 内的条目。
 //!      Bot 离线一整天再上线时，不会把这一天的旧闻当成「刚刚发生」补发一遍；
 //!   3. **单次条数**：一次最多 `realtime_max_items` 条，多出来的留到下一轮；
-//!   4. **容量护栏**：每个群每小时最多 `realtime_max_per_hour` 次；默认值 60
-//!      在正常数据量下等同不限制。静默时段默认关闭，可按群主动设置。
+//!   4. **容量护栏**：每个目标每小时最多 `realtime_max_per_hour` 次；默认值 60
+//!      在正常数据量下等同不限制。静默时段默认关闭，可按目标主动设置。
 //!   5. **持久待发队列**：超过单次条数、撞上频次上限或发送失败的内容先落盘；
 //!      后续即使接口一直返回 304 或进程重启，也会继续按节奏投递，过期内容自动淘汰。
 //!
 //! 实时与定时各自去重：实时线保证每条有效资讯及时送达，定时线仍可把其中的
 //! 精选内容整理成回顾；同一条内容不会在同一条推送线上重复出现。
 //! 静默时段积压下来的资讯会保留在实时待发队列，恢复后继续投递。
-//! 分类和静默时段可按群覆盖，全局配置仍作为没有覆盖时的默认值。
+//! 分类和静默时段可按目标覆盖，全局配置仍作为没有覆盖时的默认值。
 
 use super::api::{self, Item};
 use super::pusher;
 use super::state;
-use super::{AiNewsConfig, LOG_TARGET, load_config};
+use super::{AiNewsConfig, LOG_TARGET, PushTarget, load_config};
 use crate::adapters::satori::LockedWriter;
 use crate::event::Context;
 use chrono::{NaiveTime, Utc};
@@ -59,7 +59,7 @@ const ETAG_SCOPE: &str = "realtime";
 
 /// 上次真正发起抓取的时刻（Unix 秒）
 static LAST_POLL: AtomicI64 = AtomicI64::new(0);
-/// 上一轮是否仍在逐群发送中（群多时一轮可能跨好几分钟）
+/// 上一轮是否仍在逐目标发送中（目标多时一轮可能跨好几分钟）
 static RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// 确保无论从哪条路径返回，重入标记都会被放开
@@ -90,7 +90,7 @@ pub fn spawn(ctx: &Context, writer: &LockedWriter) {
         };
         info!(
             target: LOG_TARGET,
-            "已启用[实时推送]：每 {} 秒条件轮询一次动态池（保鲜 {} 分钟 · 单次容量 {} 条 · 每群每小时容量 {} 次 · 静默 {}）",
+            "已启用[实时推送]：每 {} 秒条件轮询一次动态池（保鲜 {} 分钟 · 单次容量 {} 条 · 每目标每小时容量 {} 次 · 静默 {}）",
             interval,
             cfg.realtime_max_age_minutes.max(1),
             cfg.realtime_max_items.max(1),
@@ -132,7 +132,7 @@ async fn tick(ctx: Context, writer: LockedWriter) {
         return;
     }
 
-    // 上一轮还在逐群发送（群多 + 群间隔）时不重入
+    // 上一轮还在逐目标发送（目标多 + 目标间隔）时不重入
     if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -142,18 +142,17 @@ async fn tick(ctx: Context, writer: LockedWriter) {
     poll_once(ctx, writer, cfg).await;
 }
 
-/// 抓一次全量动态池，把够新的条目发给还没看过它们的群
+/// 抓一次全量动态池，把够新的条目发给还没看过它们的目标
 async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
     let clock_now = Utc::now().with_timezone(&super::render::beijing()).time();
-    let targets: Vec<i64> = cfg
-        .groups
-        .iter()
-        .copied()
-        .filter(|group_id| {
-            if *group_id == 0 || cfg.realtime_muted_groups.contains(group_id) {
+    let targets: Vec<PushTarget> = cfg
+        .targets()
+        .into_iter()
+        .filter(|target| {
+            if cfg.target_realtime_muted(*target) {
                 return false;
             }
-            let (start, end) = cfg.quiet_for_group(*group_id);
+            let (start, end) = cfg.quiet_for_target(*target);
             !in_quiet_hours(clock_now, start, end)
         })
         .collect();
@@ -161,22 +160,22 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
         return;
     }
 
-    // 先为每个有效群建立时间线，再请求接口。这样即便接口本轮返回 304，
-    // 新加入或刚重新开启实时推送的群也已经完成基线对齐；下一条真正的新资讯
+    // 先为每个有效目标建立时间线，再请求接口。这样即便接口本轮返回 304，
+    // 新加入或刚重新开启实时推送的目标也已经完成基线对齐；下一条真正的新资讯
     // 会正常送达，不会在“第一次看到内容变化”时才建基线并被吃掉。
     let mut statuses = HashMap::with_capacity(targets.len());
-    for group_id in &targets {
-        if !pusher::is_allowed(&ctx, *group_id) {
+    for target in &targets {
+        if !pusher::is_allowed(&ctx, *target) {
             continue;
         }
-        let status = state::realtime_status(*group_id).await;
+        let status = state::realtime_status(target.state_id()).await;
         if status.just_primed {
             info!(
                 target: LOG_TARGET,
-                "群 {} 已建立实时基线，从此刻后的新资讯开始推送。", group_id
+                "{} 已建立实时基线，从此刻后的新资讯开始推送。", target
             );
         }
-        statuses.insert(*group_id, status);
+        statuses.insert(*target, status);
     }
     if statuses.is_empty() {
         return;
@@ -214,8 +213,8 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
     let max_per_hour = cfg.realtime_max_per_hour.max(1);
     let mut pushed_any = false;
 
-    for group_id in targets {
-        let Some(status) = statuses.get(&group_id).copied() else {
+    for target in targets {
+        let Some(status) = statuses.get(&target).copied() else {
             continue;
         };
 
@@ -223,29 +222,30 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
             .iter()
             .filter(|stamped| {
                 stamped.ts > status.since
-                    && pusher::item_matches_group(&cfg, group_id, &stamped.item)
+                    && pusher::item_matches_target(&cfg, target, &stamped.item)
             })
             .map(|stamped| (stamped.key.clone(), stamped.item.clone(), stamped.ts))
             .collect();
         if !candidates.is_empty() {
-            let added = state::enqueue_realtime(group_id, candidates, cfg.dedupe_days).await;
+            let added =
+                state::enqueue_realtime(target.state_id(), candidates, cfg.dedupe_days).await;
             if added > 0 {
-                info!(target: LOG_TARGET, "实时推送：群 {} 新增 {} 条待发资讯。", group_id, added);
+                info!(target: LOG_TARGET, "实时推送：{} 新增 {} 条待发资讯。", target, added);
             }
         }
 
         if status.pushes_last_hour >= max_per_hour {
             info!(
                 target: LOG_TARGET,
-                "群 {} 本小时已实时推送 {} 次，达到上限，剩余条目留给下一小时或定时档。",
-                group_id, status.pushes_last_hour
+                "{} 本小时已实时推送 {} 次，达到上限，剩余条目留给下一小时或定时档。",
+                target, status.pushes_last_hour
             );
             continue;
         }
 
         // 一次只取一批；发送成功才出队，失败则留到下一轮重试。
         let picked = state::realtime_pending(
-            group_id,
+            target.state_id(),
             max_items,
             cfg.realtime_max_age_minutes,
         )
@@ -256,7 +256,7 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
         let picked_keys: Vec<String> = picked.iter().map(|(key, _)| key.clone()).collect();
         let picked_items: Vec<Item> = picked.into_iter().map(|(_, item)| item).collect();
 
-        // 群间隔：和定时档一样错开，不让多个群在同一秒收到同一张图
+        // 目标间隔：和定时档一样错开，不让多个会话在同一秒收到同一张图
         if pushed_any {
             pusher::pace(&cfg).await;
         }
@@ -269,7 +269,7 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
         let sent = pusher::deliver_items(
             &ctx,
             writer.clone(),
-            group_id,
+            target,
             &cfg,
             pusher::Headline {
                 text: &format!("⚡ AI 资讯快报 · {}", clock),
@@ -283,9 +283,9 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
         if sent {
             info!(
                 target: LOG_TARGET,
-                "实时推送：群 {} 收到 {} 条新资讯。", group_id, picked_items.len()
+                "实时推送：{} 收到 {} 条新资讯。", target, picked_items.len()
             );
-            state::mark_realtime_sent(group_id, picked_keys).await;
+            state::mark_realtime_sent(target.state_id(), picked_keys).await;
         }
     }
 }

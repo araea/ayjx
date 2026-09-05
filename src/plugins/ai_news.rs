@@ -54,10 +54,12 @@
 //!   /ai日报             最新一期 AI 日报
 //!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
-//!   /ai推送开启 · /ai推送关闭 · /ai推送状态 · /ai推送重置
-//!   /ai实时开启 · /ai实时关闭   本群只收定时档还是也收实时快报
-//!   /ai分类 <模型|产品|行业|论文|技巧|全部|默认>
-//!   /ai静默 <HH:MM-HH:MM|关闭|默认>
+//!   /ai推送添加 <群|私聊> <ID> · /ai推送删除 <群|私聊> <ID>
+//!   /ai推送开启 · /ai推送关闭   不带参数时管理当前会话
+//!   /ai推送列表 · /ai推送状态 · /ai推送重置
+//!   /ai实时开启 · /ai实时关闭   当前或指定目标只收定时档还是也收实时快报
+//!   /ai分类 <模型|产品|行业|论文|技巧|全部|默认>   设置当前目标
+//!   /ai静默 <HH:MM-HH:MM|关闭|默认>              设置当前目标
 //!   /设置 ai_news card_theme auto|light|dark   自动 / 白天 / 夜晚阅读主题
 //!
 //! 使用边界：AIHOT 的匿名接口可用于个人非商业、公益非商业及组织内部使用；
@@ -75,6 +77,7 @@ use futures_util::future::BoxFuture;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value;
 
@@ -98,10 +101,10 @@ const DEFAULT_GROUP: i64 = 175131947;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GroupPreference {
-    /// None 继承全局分类；Some("") 表示本群不限分类
+    /// None 继承全局分类；Some("") 表示该目标不限分类
     #[serde(default)]
     pub category: Option<String>,
-    /// 两项均为 None 时继承全局静默时段；均为空字符串表示本群不静默
+    /// 两项均为 None 时继承全局静默时段；均为空字符串表示该目标不静默
     #[serde(default)]
     pub quiet_start: Option<String>,
     #[serde(default)]
@@ -113,9 +116,12 @@ pub struct AiNewsConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// 推送目标群号列表；可用 `/ai推送开启` 在群内增删
+    /// 推送目标群号列表；可用 `/ai推送添加 群 <群号>` 在任意会话增删
     #[serde(default = "default_groups")]
     pub groups: Vec<i64>,
+    /// 推送目标私聊 QQ 号列表；与群聊目标分别存储，避免同号目标混淆
+    #[serde(default)]
+    pub private_users: Vec<i64>,
 
     // —— 抓取参数 ——
     /// 手动 `/ai资讯` 查询所用动态池；主动推送的数据源策略不受此项影响
@@ -215,7 +221,10 @@ pub struct AiNewsConfig {
     /// 只收定时档、不收实时快报的群；可用 `/ai实时关闭` 在群内增删
     #[serde(default)]
     pub realtime_muted_groups: Vec<i64>,
-    /// 按群覆盖分类与静默时段；未配置的字段继续继承全局值
+    /// 只收定时档、不收实时快报的私聊目标
+    #[serde(default)]
+    pub realtime_muted_private_users: Vec<i64>,
+    /// 按目标覆盖分类与静默时段；群聊键沿用群号，私聊键使用 `private:<QQ号>`
     #[serde(default)]
     pub group_preferences: HashMap<String, GroupPreference>,
 
@@ -328,6 +337,7 @@ impl Default for AiNewsConfig {
         Self {
             enabled: true,
             groups: default_groups(),
+            private_users: Vec::new(),
             mode: default_mode(),
             window: default_window(),
             category: String::new(),
@@ -357,6 +367,7 @@ impl Default for AiNewsConfig {
             realtime_quiet_start: default_quiet_start(),
             realtime_quiet_end: default_quiet_end(),
             realtime_muted_groups: Vec::new(),
+            realtime_muted_private_users: Vec::new(),
             group_preferences: HashMap::new(),
             brief_enabled: true,
             brief_times: default_brief_times(),
@@ -369,19 +380,19 @@ impl Default for AiNewsConfig {
 }
 
 impl AiNewsConfig {
-    fn group_preference(&self, group_id: i64) -> Option<&GroupPreference> {
-        self.group_preferences.get(&group_id.to_string())
+    fn target_preference(&self, target: PushTarget) -> Option<&GroupPreference> {
+        self.group_preferences.get(&target.preference_key())
     }
 
-    pub(super) fn category_for_group(&self, group_id: i64) -> &str {
-        self.group_preference(group_id)
+    pub(super) fn category_for_target(&self, target: PushTarget) -> &str {
+        self.target_preference(target)
             .and_then(|pref| pref.category.as_deref())
             .unwrap_or(&self.category)
             .trim()
     }
 
-    pub(super) fn quiet_for_group(&self, group_id: i64) -> (&str, &str) {
-        let pref = self.group_preference(group_id);
+    pub(super) fn quiet_for_target(&self, target: PushTarget) -> (&str, &str) {
+        let pref = self.target_preference(target);
         let start = pref
             .and_then(|p| p.quiet_start.as_deref())
             .unwrap_or(&self.realtime_quiet_start);
@@ -391,12 +402,96 @@ impl AiNewsConfig {
         (start.trim(), end.trim())
     }
 
-    fn clean_group_preference(&mut self, group_id: i64) {
-        let key = group_id.to_string();
+    fn clean_target_preference(&mut self, target: PushTarget) {
+        let key = target.preference_key();
         if self.group_preferences.get(&key).is_some_and(|pref| {
             pref.category.is_none() && pref.quiet_start.is_none() && pref.quiet_end.is_none()
         }) {
             self.group_preferences.remove(&key);
+        }
+    }
+
+    fn targets(&self) -> Vec<PushTarget> {
+        let mut targets = Vec::with_capacity(self.groups.len() + self.private_users.len());
+        for id in self.groups.iter().copied().filter(|id| *id > 0) {
+            let target = PushTarget::Group(id);
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        for id in self.private_users.iter().copied().filter(|id| *id > 0) {
+            let target = PushTarget::Private(id);
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+
+    fn contains_target(&self, target: PushTarget) -> bool {
+        match target {
+            PushTarget::Group(id) => self.groups.contains(&id),
+            PushTarget::Private(id) => self.private_users.contains(&id),
+        }
+    }
+
+    fn target_realtime_muted(&self, target: PushTarget) -> bool {
+        match target {
+            PushTarget::Group(id) => self.realtime_muted_groups.contains(&id),
+            PushTarget::Private(id) => self.realtime_muted_private_users.contains(&id),
+        }
+    }
+}
+
+/// 一个可主动投递的会话。私聊用负数作为内部状态 ID，避免与同号群聊共享去重记录。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum PushTarget {
+    Group(i64),
+    Private(i64),
+}
+
+impl PushTarget {
+    fn current(group_id: Option<i64>, user_id: i64) -> Option<Self> {
+        group_id
+            .filter(|id| *id > 0)
+            .map(Self::Group)
+            .or_else(|| (user_id > 0).then_some(Self::Private(user_id)))
+    }
+
+    pub(super) fn group_id(self) -> Option<i64> {
+        match self {
+            Self::Group(id) => Some(id),
+            Self::Private(_) => None,
+        }
+    }
+
+    pub(super) fn user_id(self) -> Option<i64> {
+        match self {
+            Self::Group(_) => None,
+            Self::Private(id) => Some(id),
+        }
+    }
+
+    pub(super) fn state_id(self) -> i64 {
+        match self {
+            Self::Group(id) => id,
+            Self::Private(id) => -id,
+        }
+    }
+
+    fn preference_key(self) -> String {
+        match self {
+            Self::Group(id) => id.to_string(),
+            Self::Private(id) => format!("private:{}", id),
+        }
+    }
+}
+
+impl fmt::Display for PushTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Group(id) => write!(f, "群聊 {}", id),
+            Self::Private(id) => write!(f, "私聊 {}", id),
         }
     }
 }
@@ -419,8 +514,8 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         state::preload().await;
 
         let config = load_config(&ctx);
-        if config.groups.is_empty() {
-            warn!(target: LOG_TARGET, "尚未配置推送群，定时推送不会发送任何消息。");
+        if config.targets().is_empty() {
+            warn!(target: LOG_TARGET, "尚未配置推送会话，定时推送不会发送任何消息。");
         }
         Ok(())
     })
@@ -482,11 +577,11 @@ type PushFn = fn(
     Context,
     LockedWriter,
     AiNewsConfig,
-    Vec<i64>,
+    Vec<PushTarget>,
 ) -> futures_util::future::BoxFuture<'static, ()>;
 type EnabledFn = fn(&AiNewsConfig) -> bool;
 
-/// 注册一个北京时间的每日任务；配置在每次触发时重新读取，改群号无需重启。
+/// 注册一个北京时间的每日任务；配置在每次触发时重新读取，改目标无需重启。
 ///
 /// 不依赖宿主机时区：容器或服务器即使运行在 UTC，08:20 仍表示北京时间 08:20。
 fn schedule(
@@ -516,15 +611,14 @@ fn schedule(
                 if !config.enabled || !enabled(&config) {
                     return;
                 }
-                let groups: Vec<i64> =
-                    config.groups.iter().copied().filter(|g| *g != 0).collect();
-                if groups.is_empty() {
-                    info!(target: LOG_TARGET, "[{}] 没有配置推送群，跳过。", label);
+                let targets = config.targets();
+                if targets.is_empty() {
+                    info!(target: LOG_TARGET, "[{}] 没有配置推送会话，跳过。", label);
                     return;
                 }
 
-                info!(target: LOG_TARGET, "开始执行[{}]推送，目标群 {} 个...", label, groups.len());
-                runner(ctx, writer, config, groups).await;
+                info!(target: LOG_TARGET, "开始执行[{}]推送，目标会话 {} 个...", label, targets.len());
+                runner(ctx, writer, config, targets).await;
                 info!(target: LOG_TARGET, "[{}] 推送任务完成。", label);
             }
         },
@@ -649,11 +743,15 @@ pub fn handle(
         let group_id = msg.group_id();
         let user_id = msg.user_id();
         let message_id = msg.message_id();
+        let current_target = PushTarget::current(group_id, user_id);
 
         // 先匹配更长的「推送管理」类指令，避免与查询指令混淆
         for trigger in [
+            "ai推送添加",
+            "ai推送删除",
             "ai推送开启",
             "ai推送关闭",
+            "ai推送列表",
             "ai推送状态",
             "ai推送重置",
             "ai实时开启",
@@ -665,7 +763,7 @@ pub fn handle(
                 continue;
             };
             let arg = extract_text_arg(&matched.args);
-            let reply = handle_push_admin(&ctx, trigger, group_id, &arg).await;
+            let reply = handle_push_admin(&ctx, trigger, current_target, &arg).await;
             let body = Message::new().reply(message_id).text(reply);
             send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
             return Ok(None);
@@ -697,7 +795,7 @@ pub fn handle(
                 "ai模型排行榜" | "ai模型榜" | "ai大模型排行榜" | "模型排行榜" | "模型榜" => {
                     query_models(&config).await
                 }
-                _ => query_brief(&config, group_id).await,
+                _ => query_brief(&config, current_target).await,
             };
 
             // 先发卡片图，再补一条带链接的合并转发文本
@@ -723,10 +821,10 @@ fn notice(text: impl Into<String>) -> Payload {
     Payload::text_only(Rendered::plain(text))
 }
 
-async fn query_brief(config: &AiNewsConfig, group_id: Option<i64>) -> Payload {
+async fn query_brief(config: &AiNewsConfig, target: Option<PushTarget>) -> Payload {
     let mut scoped_config = config.clone();
-    if let Some(group_id) = group_id {
-        scoped_config.category = config.category_for_group(group_id).to_string();
+    if let Some(target) = target {
+        scoped_config.category = config.category_for_target(target).to_string();
     }
     let window = pusher::window_label(&config.window);
     match pusher::fetch_brief(&scoped_config, api::Poll::Fresh).await {
@@ -858,64 +956,101 @@ async fn query_search(config: &AiNewsConfig, keyword: &str) -> Payload {
 async fn handle_push_admin(
     ctx: &Context,
     trigger: &str,
-    group_id: Option<i64>,
+    current_target: Option<PushTarget>,
     arg: &str,
 ) -> String {
     let config = load_config(ctx);
 
+    if trigger == "ai推送列表" {
+        return render_target_list(&config);
+    }
+
     if trigger == "ai推送状态" {
-        let pending = match group_id {
-            Some(group_id) => Some(
-                state::realtime_pending_count(group_id, config.realtime_max_age_minutes).await,
+        let target = if arg.trim().is_empty() {
+            current_target
+        } else {
+            match parse_push_target(arg, current_target) {
+                Ok(target) => Some(target),
+                Err(message) => return message,
+            }
+        };
+        let pending = match target {
+            Some(target) => Some(
+                state::realtime_pending_count(target.state_id(), config.realtime_max_age_minutes)
+                    .await,
             ),
             None => None,
         };
-        return render_status(ctx, &config, group_id, pending);
+        return render_status(ctx, &config, target, pending);
     }
 
-    let Some(gid) = group_id else {
-        return "该指令只能在群聊中使用。".to_string();
+    let target = if matches!(trigger, "ai分类" | "ai静默") {
+        let Some(target) = current_target else {
+            return "无法识别当前会话。".to_string();
+        };
+        target
+    } else {
+        match parse_push_target(arg, current_target) {
+            Ok(target) => target,
+            Err(message) => return message,
+        }
     };
 
     match trigger {
-        "ai推送开启" => {
-            if config.groups.contains(&gid) {
-                return "本群已经开启 AI 资讯推送。".to_string();
+        "ai推送添加" | "ai推送开启" => {
+            if config.contains_target(target) {
+                return format!("{} 已经开启 AI 资讯推送。", target);
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
-                if !cfg.groups.contains(&gid) {
-                    cfg.groups.push(gid);
+                match target {
+                    PushTarget::Group(id) if !cfg.groups.contains(&id) => cfg.groups.push(id),
+                    PushTarget::Private(id) if !cfg.private_users.contains(&id) => {
+                        cfg.private_users.push(id)
+                    }
+                    _ => {}
                 }
                 cfg
             })
             .await;
             match result {
                 Ok(_) => {
-                    state::align_realtime_baseline(gid).await;
-                    "✅ 已开启本群的 AI 资讯推送。".to_string()
+                    state::align_realtime_baseline(target.state_id()).await;
+                    format!("✅ 已添加 {} 的 AI 资讯推送权限。", target)
                 }
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
-        "ai推送关闭" => {
-            if !config.groups.contains(&gid) {
-                return "本群当前未开启 AI 资讯推送。".to_string();
+        "ai推送删除" | "ai推送关闭" => {
+            if !config.contains_target(target) {
+                return format!("{} 当前未开启 AI 资讯推送。", target);
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
-                cfg.groups.retain(|g| *g != gid);
+                match target {
+                    PushTarget::Group(id) => {
+                        cfg.groups.retain(|item| *item != id);
+                        cfg.realtime_muted_groups.retain(|item| *item != id);
+                    }
+                    PushTarget::Private(id) => {
+                        cfg.private_users.retain(|item| *item != id);
+                        cfg.realtime_muted_private_users.retain(|item| *item != id);
+                    }
+                }
+                cfg.group_preferences.remove(&target.preference_key());
                 cfg
             })
             .await;
             match result {
-                Ok(_) => "✅ 已关闭本群的 AI 资讯推送。".to_string(),
+                Ok(_) => format!("✅ 已删除 {} 的 AI 资讯推送权限。", target),
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
         "ai推送重置" => {
-            state::reset_group(gid).await;
-            "✅ 已清空本群的推送去重记录，下次推送会重新发送近期资讯。\
-             实时快报会重新建立基线，只推此刻之后的新资讯。"
-                .to_string()
+            state::reset_group(target.state_id()).await;
+            format!(
+                "✅ 已清空 {} 的推送去重记录，下次推送会重新发送近期资讯。\
+                 实时快报会重新建立基线，只推此刻之后的新资讯。",
+                target
+            )
         }
         "ai实时开启" => {
             if !config.realtime_enabled {
@@ -925,68 +1060,184 @@ async fn handle_push_admin(
                     .unwrap_or_else(|| "/".into());
                 return format!(
                     "⚠️ 实时推送的总开关当前是关闭的。\
-                     可用 {}设置 ai_news realtime_enabled true 打开，本群随即生效。",
+                     可用 {}设置 ai_news realtime_enabled true 打开，目标随即生效。",
                     prefix
                 );
             }
-            if !config.groups.contains(&gid) {
-                return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
+            if !config.contains_target(target) {
+                return format!("{} 尚未开启 AI 资讯推送，请先添加该目标。", target);
             }
-            if !config.realtime_muted_groups.contains(&gid) {
-                return "本群已经在接收实时快报。".to_string();
+            if !config.target_realtime_muted(target) {
+                return format!("{} 已经在接收实时快报。", target);
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
-                cfg.realtime_muted_groups.retain(|g| *g != gid);
+                match target {
+                    PushTarget::Group(id) => cfg.realtime_muted_groups.retain(|g| *g != id),
+                    PushTarget::Private(id) => {
+                        cfg.realtime_muted_private_users.retain(|user| *user != id)
+                    }
+                }
                 cfg
             })
             .await;
             match result {
                 Ok(_) => {
-                    state::align_realtime_baseline(gid).await;
-                    "⚡ 已开启本群的实时快报，从现在起的新资讯将及时送达。".to_string()
+                    state::align_realtime_baseline(target.state_id()).await;
+                    format!("⚡ 已开启 {} 的实时快报，从现在起的新资讯将及时送达。", target)
                 }
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
         "ai实时关闭" => {
-            if config.realtime_muted_groups.contains(&gid) {
-                return "本群当前只接收定时推送。".to_string();
+            if config.target_realtime_muted(target) {
+                return format!("{} 当前只接收定时推送。", target);
             }
             let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
-                if !cfg.realtime_muted_groups.contains(&gid) {
-                    cfg.realtime_muted_groups.push(gid);
+                match target {
+                    PushTarget::Group(id) if !cfg.realtime_muted_groups.contains(&id) => {
+                        cfg.realtime_muted_groups.push(id)
+                    }
+                    PushTarget::Private(id)
+                        if !cfg.realtime_muted_private_users.contains(&id) =>
+                    {
+                        cfg.realtime_muted_private_users.push(id)
+                    }
+                    _ => {}
                 }
                 cfg
             })
             .await;
             match result {
-                Ok(_) => "✅ 已关闭本群的实时快报；日报、精选速递与热点榜照常推送。".to_string(),
+                Ok(_) => format!("✅ 已关闭 {} 的实时快报；日报、精选速递与热点榜照常推送。", target),
                 Err(e) => format!("❌ 保存配置失败：{}", e),
             }
         }
-        "ai分类" => update_group_category(ctx, gid, arg).await,
-        "ai静默" => update_group_quiet(ctx, gid, arg).await,
+        "ai分类" => update_target_category(ctx, target, arg).await,
+        "ai静默" => update_target_quiet(ctx, target, arg).await,
         _ => String::new(),
     }
 }
 
-async fn update_group_category(ctx: &Context, group_id: i64, raw: &str) -> String {
+fn parse_push_target(raw: &str, current: Option<PushTarget>) -> Result<PushTarget, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || matches!(raw, "当前" | "本群" | "本会话") {
+        return current.ok_or_else(|| "无法识别当前会话，请显式指定目标。".to_string());
+    }
+
+    let normalized = raw.replace(['：', ':', ',', '，'], " ");
+    let parts: Vec<&str> = normalized.split_whitespace().collect();
+    let usage = || {
+        "目标格式不正确。用法：/ai推送添加 <群|私聊> <ID>（如：/ai推送添加 群 123456）。"
+            .to_string()
+    };
+
+    if parts.len() == 1 {
+        if let Ok(id) = parse_positive_id(parts[0]) {
+            return Ok(PushTarget::Group(id));
+        }
+        let lowered = parts[0].to_ascii_lowercase();
+        for (prefix, private) in [
+            ("群聊", false),
+            ("群", false),
+            ("group", false),
+            ("私聊", true),
+            ("私信", true),
+            ("好友", true),
+            ("private", true),
+            ("user", true),
+        ] {
+            if let Some(id) = lowered.strip_prefix(prefix) {
+                let id = parse_positive_id(id).map_err(|_| usage())?;
+                return Ok(if private {
+                    PushTarget::Private(id)
+                } else {
+                    PushTarget::Group(id)
+                });
+            }
+        }
+        return Err(usage());
+    }
+
+    if parts.len() != 2 {
+        return Err(usage());
+    }
+    let kind = parts[0].to_ascii_lowercase();
+    let id = parse_positive_id(parts[1]).map_err(|_| usage())?;
+    match kind.as_str() {
+        "群" | "群聊" | "group" | "g" => Ok(PushTarget::Group(id)),
+        "私聊" | "私信" | "好友" | "private" | "user" | "u" | "qq" => {
+            Ok(PushTarget::Private(id))
+        }
+        _ => Err(usage()),
+    }
+}
+
+fn parse_positive_id(raw: &str) -> Result<i64, ()> {
+    raw.parse::<i64>().ok().filter(|id| *id > 0).ok_or(())
+}
+
+fn render_target_list(config: &AiNewsConfig) -> String {
+    let groups: Vec<i64> = config
+        .groups
+        .iter()
+        .copied()
+        .filter(|id| *id > 0)
+        .collect();
+    let private_users: Vec<i64> = config
+        .private_users
+        .iter()
+        .copied()
+        .filter(|id| *id > 0)
+        .collect();
+    let mut out = format!(
+        "🤖 AI 资讯推送目标（{} 个群聊，{} 个私聊）",
+        groups.len(),
+        private_users.len()
+    );
+    if groups.is_empty() && private_users.is_empty() {
+        out.push_str("\n暂无目标。可发送：/ai推送添加 群 <群号>");
+        return out;
+    }
+    if !groups.is_empty() {
+        out.push_str("\n群聊：");
+        out.push_str(
+            &groups
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("、"),
+        );
+    }
+    if !private_users.is_empty() {
+        out.push_str("\n私聊：");
+        out.push_str(
+            &private_users
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("、"),
+        );
+    }
+    out
+}
+
+async fn update_target_category(ctx: &Context, target: PushTarget, raw: &str) -> String {
     let config = load_config(ctx);
-    if !config.groups.contains(&group_id) {
-        return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
+    if !config.contains_target(target) {
+        return format!("{} 尚未开启 AI 资讯推送，请先添加该目标。", target);
     }
 
     let raw = raw.trim();
     if raw.is_empty() {
-        let current = config.category_for_group(group_id);
+        let current = config.category_for_target(target);
         let label = if current.is_empty() {
             "全部分类"
         } else {
             api::category_label(current)
         };
         return format!(
-            "本群当前接收：{}。\n用法：/ai分类 <模型|产品|行业|论文|技巧|全部|默认>",
-            label
+            "{} 当前接收：{}。\n用法：/ai分类 <模型|产品|行业|论文|技巧|全部|默认>",
+            target, label
         );
     }
 
@@ -1006,10 +1257,10 @@ async fn update_group_category(ctx: &Context, group_id: i64, raw: &str) -> Strin
     let stored = category.clone();
     let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
         cfg.group_preferences
-            .entry(group_id.to_string())
+            .entry(target.preference_key())
             .or_default()
             .category = stored;
-        cfg.clean_group_preference(group_id);
+        cfg.clean_target_preference(target);
         cfg
     })
     .await;
@@ -1017,31 +1268,32 @@ async fn update_group_category(ctx: &Context, group_id: i64, raw: &str) -> Strin
     match result {
         Ok(_) => {
             // 切换分类时从当前时刻重新起算，避免把新分类中的存量资讯当作实时新闻。
-            state::align_realtime_baseline(group_id).await;
+            state::align_realtime_baseline(target.state_id()).await;
             let updated = load_config(ctx);
-            let current = updated.category_for_group(group_id);
+            let current = updated.category_for_target(target);
             let label = if current.is_empty() {
                 "全部分类"
             } else {
                 api::category_label(current)
             };
-            format!("✅ 本群资讯分类已设为：{}。", label)
+            format!("✅ {} 的资讯分类已设为：{}。", target, label)
         }
         Err(e) => format!("❌ 保存配置失败：{}", e),
     }
 }
 
-async fn update_group_quiet(ctx: &Context, group_id: i64, raw: &str) -> String {
+async fn update_target_quiet(ctx: &Context, target: PushTarget, raw: &str) -> String {
     let config = load_config(ctx);
-    if !config.groups.contains(&group_id) {
-        return "本群尚未开启 AI 资讯推送，请先发送「ai推送开启」。".to_string();
+    if !config.contains_target(target) {
+        return format!("{} 尚未开启 AI 资讯推送，请先添加该目标。", target);
     }
 
     let raw = raw.trim();
     if raw.is_empty() {
         return format!(
-            "本群实时静默：{}。\n用法：/ai静默 <23:30-07:30|关闭|默认>",
-            quiet_label(&config, Some(group_id))
+            "{} 的实时静默：{}。\n用法：/ai静默 <23:30-07:30|关闭|默认>",
+            target,
+            quiet_label(&config, Some(target))
         );
     }
 
@@ -1073,17 +1325,17 @@ async fn update_group_quiet(ctx: &Context, group_id: i64, raw: &str) -> String {
     let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
         let preference = cfg
             .group_preferences
-            .entry(group_id.to_string())
+            .entry(target.preference_key())
             .or_default();
         preference.quiet_start = start;
         preference.quiet_end = end;
-        cfg.clean_group_preference(group_id);
+        cfg.clean_target_preference(target);
         cfg
     })
     .await;
 
     match result {
-        Ok(_) => format!("✅ 本群{}。", message),
+        Ok(_) => format!("✅ {} {}。", target, message),
         Err(e) => format!("❌ 保存配置失败：{}", e),
     }
 }
@@ -1091,7 +1343,7 @@ async fn update_group_quiet(ctx: &Context, group_id: i64, raw: &str) -> String {
 fn render_status(
     ctx: &Context,
     config: &AiNewsConfig,
-    group_id: Option<i64>,
+    target: Option<PushTarget>,
     pending_items: Option<usize>,
 ) -> String {
     let prefix = get_prefixes(ctx)
@@ -1108,10 +1360,11 @@ fn render_status(
         if config.enabled { "已启用" } else { "已禁用" }
     ));
 
-    if let Some(gid) = group_id {
+    if let Some(target) = target {
         out.push_str(&format!(
-            "本群：{}\n",
-            if config.groups.contains(&gid) {
+            "目标：{} · {}\n",
+            target,
+            if config.contains_target(target) {
                 "已开启推送"
             } else {
                 "未开启推送"
@@ -1119,16 +1372,23 @@ fn render_status(
         ));
     }
 
-    out.push_str(&format!("推送群数：{} 个\n", config.groups.len()));
+    out.push_str(&format!(
+        "推送目标：{} 个群聊 · {} 个私聊\n",
+        config.groups.len(),
+        config.private_users.len()
+    ));
 
     out.push_str("\n⚡ 实时快报\n");
     if config.realtime_enabled {
-        let muted = group_id.is_some_and(|gid| config.realtime_muted_groups.contains(&gid));
+        let target_enabled = target.is_none_or(|target| config.contains_target(target));
+        let muted = target.is_some_and(|target| config.target_realtime_muted(target));
         out.push_str(&format!(
             "{} {}\n",
-            switch(!muted),
-            if muted {
-                "本群已关闭，只收定时档"
+            switch(target_enabled && !muted),
+            if !target_enabled {
+                "该目标未开启推送"
+            } else if muted {
+                "该目标已关闭，只收定时档"
             } else {
                 "新资讯进池即推"
             }
@@ -1143,7 +1403,7 @@ fn render_status(
             config.realtime_max_age_minutes.max(1),
             config.realtime_max_items.max(1),
             config.realtime_max_per_hour.max(1),
-            quiet_label(config, group_id)
+            quiet_label(config, target)
         ));
         if let Some(pending_items) = pending_items {
             out.push_str(&format!("   待发队列：{} 条\n", pending_items));
@@ -1174,7 +1434,7 @@ fn render_status(
         config.hot_topics_time
     ));
     out.push_str(&format!(
-        "多群间隔 {}—{} 秒随机，不会同一秒齐发\n",
+        "多目标间隔 {}—{} 秒随机，不会同一秒齐发\n",
         config.send_interval_seconds, config.send_interval_max_seconds
     ));
     let theme = card::resolve_theme(&config.card_theme);
@@ -1184,10 +1444,10 @@ fn render_status(
         _ => format!("自动（当前{}）", theme.label()),
     };
     out.push_str(&format!("阅读主题：{}\n", theme_mode));
-    if let Some(group_id) = group_id {
-        let category = config.category_for_group(group_id);
+    if let Some(target) = target {
+        let category = config.category_for_target(target);
         out.push_str(&format!(
-            "本群分类：{}\n",
+            "目标分类：{}\n",
             if category.is_empty() {
                 "全部"
             } else {
@@ -1199,7 +1459,7 @@ fn render_status(
     }
     out.push('\n');
     out.push_str(&format!(
-        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai实时开启/关闭 · {p}ai分类 · {p}ai静默\n",
+        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai推送添加/删除 <群|私聊> <ID>\n   {p}ai推送列表 · {p}ai实时开启/关闭 · {p}ai分类 · {p}ai静默\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);
@@ -1216,13 +1476,13 @@ fn interval_label(seconds: u64) -> String {
 }
 
 /// 静默时段的展示文案：起止相同或留空都表示「不设静默」
-fn quiet_label(config: &AiNewsConfig, group_id: Option<i64>) -> String {
-    let (start, end) = group_id.map_or_else(
+fn quiet_label(config: &AiNewsConfig, target: Option<PushTarget>) -> String {
+    let (start, end) = target.map_or_else(
         || (
             config.realtime_quiet_start.trim(),
             config.realtime_quiet_end.trim(),
         ),
-        |group_id| config.quiet_for_group(group_id),
+        |target| config.quiet_for_target(target),
     );
     if start.is_empty() || end.is_empty() || start == end {
         return "不设（全天推送）".to_string();
@@ -1271,6 +1531,8 @@ mod tests {
         assert_eq!(config.realtime_max_per_hour, 60);
         assert!(config.realtime_quiet_start.is_empty());
         assert!(config.realtime_quiet_end.is_empty());
+        assert!(config.private_users.is_empty());
+        assert!(config.realtime_muted_private_users.is_empty());
         assert!(config.group_preferences.is_empty());
     }
 
@@ -1306,6 +1568,8 @@ mod tests {
         assert_eq!(parsed.realtime_max_items, default_realtime_max_items());
         assert_eq!(parsed.realtime_quiet_start, default_quiet_start());
         assert_eq!(parsed.card_theme, default_card_theme());
+        assert!(parsed.private_users.is_empty());
+        assert!(parsed.realtime_muted_private_users.is_empty());
     }
 
     #[test]
@@ -1340,10 +1604,43 @@ mod tests {
             },
         );
 
-        assert_eq!(cfg.category_for_group(42), "ai-models");
-        assert_eq!(cfg.category_for_group(43), "paper");
-        assert!(quiet_label(&cfg, Some(42)).contains("不设"));
-        assert!(quiet_label(&cfg, Some(43)).contains("不设"));
+        assert_eq!(cfg.category_for_target(PushTarget::Group(42)), "ai-models");
+        assert_eq!(cfg.category_for_target(PushTarget::Group(43)), "paper");
+        assert!(quiet_label(&cfg, Some(PushTarget::Group(42))).contains("不设"));
+        assert!(quiet_label(&cfg, Some(PushTarget::Group(43))).contains("不设"));
+    }
+
+    #[test]
+    fn parses_current_group_and_explicit_group_or_private_targets() {
+        let current_group = Some(PushTarget::Group(42));
+        assert_eq!(parse_push_target("", current_group).unwrap(), PushTarget::Group(42));
+        assert_eq!(
+            parse_push_target("群 123456", current_group).unwrap(),
+            PushTarget::Group(123456)
+        );
+        assert_eq!(
+            parse_push_target("group:123456", current_group).unwrap(),
+            PushTarget::Group(123456)
+        );
+        assert_eq!(
+            parse_push_target("私聊 654321", current_group).unwrap(),
+            PushTarget::Private(654321)
+        );
+        assert_eq!(
+            parse_push_target("private:654321", current_group).unwrap(),
+            PushTarget::Private(654321)
+        );
+        assert!(parse_push_target("私聊 0", current_group).is_err());
+        assert!(parse_push_target("不知道 123", current_group).is_err());
+    }
+
+    #[test]
+    fn group_and_private_targets_have_distinct_state_and_preference_keys() {
+        let group = PushTarget::Group(42);
+        let private = PushTarget::Private(42);
+        assert_eq!(group.state_id(), 42);
+        assert_eq!(private.state_id(), -42);
+        assert_ne!(group.preference_key(), private.preference_key());
     }
 
     /// 联网冒烟测试：默认 `#[ignore]`，不参与常规 `cargo test`。
