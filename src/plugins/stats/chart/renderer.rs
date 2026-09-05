@@ -805,22 +805,22 @@ pub fn draw_line_chart(
         }
 
         // 4.6 峰值标注 (仅单系列：在最高点上方标注数值)
-        if !multi && max_val > 0 {
-            if let Some(peak) = series_list[0].points.iter().max_by_key(|p| p.value) {
-                if let Some(&i) = label_index.get(peak.label.as_str()) {
-                    let px = x_pos(i);
-                    let py = y_pos(peak.value);
-                    let text = peak.value.to_string();
-                    let peak_style = get_font_with_color(config, axis_font_size, &colors.text_primary)
-                        .pos(Pos::new(HPos::Center, VPos::Bottom));
-                    root.draw_text(
-                        &text,
-                        &peak_style,
-                        (px.round() as i32, (py - (10 * s) as f64).round() as i32),
-                    )
-                    .map_err(|e| e.to_string())?;
-                }
-            }
+        if !multi
+            && max_val > 0
+            && let Some(peak) = series_list[0].points.iter().max_by_key(|p| p.value)
+            && let Some(&i) = label_index.get(peak.label.as_str())
+        {
+            let px = x_pos(i);
+            let py = y_pos(peak.value);
+            let text = peak.value.to_string();
+            let peak_style = get_font_with_color(config, axis_font_size, &colors.text_primary)
+                .pos(Pos::new(HPos::Center, VPos::Bottom));
+            root.draw_text(
+                &text,
+                &peak_style,
+                (px.round() as i32, (py - (10 * s) as f64).round() as i32),
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         root.present().map_err(|e| e.to_string())?;
@@ -840,4 +840,3 @@ pub fn draw_line_chart(
 
     save_rgba_to_base64(rgba_image)
 }
-

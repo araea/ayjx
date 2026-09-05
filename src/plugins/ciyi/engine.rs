@@ -357,12 +357,12 @@ pub async fn commit_guess(
                 .words_rank_list
                 .get(index.wrapping_sub(1))
                 .and_then(|w| w.chars().nth(1))
-                .map_or('？', |c| c);
+                .unwrap_or('？');
             let next_char = state
                 .words_rank_list
                 .get(index + 1)
                 .and_then(|w| w.chars().next())
-                .map_or('？', |c| c);
+                .unwrap_or('？');
             let hint_text = format!("？{prev_char} ) {guess_word} ( {next_char}？ #{rank}");
             state.hints.push(Hint {
                 text: hint_text,
