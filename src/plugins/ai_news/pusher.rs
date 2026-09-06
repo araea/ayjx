@@ -8,7 +8,7 @@ use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET, PushTarget};
-use crate::adapters::satori::{LockedWriter, send_msg, send_msg_id};
+use crate::adapters::satori::{BotError, LockedWriter, send_msg, send_msg_id};
 use crate::event::Context;
 use crate::message::Message;
 use rand::RngExt;
@@ -153,6 +153,61 @@ pub fn build_message(
     forward
 }
 
+fn retryable_pre_send_error(error: &str) -> bool {
+    // 这些错误都发生在 Satori 进入 QQ sendMsg 之前，重试不会重复发送。
+    error.contains("QQ kernel offline or not ready")
+        || error.contains("QQ session stabilizing")
+        || error.contains("outbound queue full")
+        || error.contains("outbound queue timeout")
+        || error.contains("outbound circuit open")
+        || error.contains("outbound rate budget exhausted")
+}
+
+async fn send_card_with_recovery(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    b64: &str,
+    reply_to: Option<i64>,
+) -> Result<Option<String>, BotError> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        let mut msg = match reply_to {
+            Some(id) => Message::new().reply(id),
+            None => Message::new(),
+        };
+        msg = msg.image(format!("base64://{b64}"));
+
+        match send_msg_id(ctx, writer.clone(), group_id, user_id, msg).await {
+            Ok(id) => return Ok(id),
+            Err(error) => {
+                let detail = error.to_string();
+                if attempt == 2 || !retryable_pre_send_error(&detail) {
+                    return Err(error);
+                }
+                let delay = if detail.contains("session stabilizing") {
+                    32
+                } else {
+                    5
+                };
+                warn!(
+                    target: LOG_TARGET,
+                    "卡片发送遇到可恢复的 Satori 状态（第 {}/3 次）: {}；{} 秒后重试",
+                    attempt + 1,
+                    detail,
+                    delay
+                );
+                last_error = Some(detail);
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| "卡片发送重试耗尽".to_string())
+        .into())
+}
+
 /// 投递一次推送。卡片成功发送时一级内容只有图片，并保存图片消息 ID 与文本的
 /// 映射；用户之后引用该图执行提取指令时，才发送正文和链接。
 ///
@@ -171,13 +226,7 @@ pub async fn deliver(
     let mut extraction_saved = false;
 
     if let Some(b64) = &payload.image {
-        let mut msg = match reply_to {
-            Some(id) => Message::new().reply(id),
-            None => Message::new(),
-        };
-        msg = msg.image(format!("base64://{}", b64));
-
-        match send_msg_id(ctx, writer.clone(), group_id, user_id, msg).await {
+        match send_card_with_recovery(ctx, writer.clone(), group_id, user_id, b64, reply_to).await {
             Ok(Some(message_id)) => {
                 image_sent = true;
                 let target_id = group_id.or_else(|| user_id.map(|id| -id)).unwrap_or_default();
@@ -636,4 +685,14 @@ mod tests {
         assert_eq!(PushFeed::Curated.request_limit(&cfg, false, true), 100);
     }
 
+    #[test]
+    fn only_pre_send_failures_are_retryable() {
+        assert!(retryable_pre_send_error("QQ kernel offline or not ready"));
+        assert!(retryable_pre_send_error(
+            "QQ session stabilizing; retry after 12s"
+        ));
+        assert!(retryable_pre_send_error("outbound queue timeout"));
+        assert!(!retryable_pre_send_error("request timed out"));
+        assert!(!retryable_pre_send_error("connection reset"));
+    }
 }

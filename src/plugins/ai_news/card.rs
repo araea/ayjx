@@ -614,7 +614,9 @@ pub async fn capture(html: &str, scale: f64) -> Result<String> {
     let browser = Browser::instance().await;
     let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?;
 
-    let result = async {
+    // CDP/Chromium 在 Android 锁屏或进程调度异常时可能永远等不到响应。
+    // 给整段截图流程设硬上限，确保定时推送最终能进入文本兜底而非永久卡住。
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
         tab.set_viewport(&Viewport::new(WIDTH, 600).with_device_scale_factor(scale))
             .await?;
         tab.set_content(html).await?;
@@ -633,10 +635,11 @@ pub async fn capture(html: &str, scale: f64) -> Result<String> {
         let opts = CaptureOptions::new().with_viewport(viewport).with_quality(92);
         let b64 = tab.find_element(".shot").await?.screenshot_with_options(opts).await?;
         Ok::<String, anyhow::Error>(b64)
-    }
-    .await;
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("卡片截图超时（45 秒）"))?;
 
-    let _ = tab.close().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), tab.close()).await;
     result
 }
 

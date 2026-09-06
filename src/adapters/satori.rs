@@ -102,7 +102,9 @@ impl SatoriClient {
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await?;
+        // QQ/Satori 主进程若被 OEM freezer 暂停，loopback HTTP 也可能无限等待。
+        // 65 秒覆盖默认 30 秒出站排队和 QQ 侧 20 秒回调窗口，并保证最终可恢复。
+        let response = request.timeout(Duration::from_secs(65)).send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
         if !status.is_success() {
@@ -144,7 +146,7 @@ impl SatoriClient {
         if let Some(token) = &self.token {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await?;
+        let response = request.timeout(Duration::from_secs(65)).send().await?;
         let status = response.status();
         let bytes = response.bytes().await?;
         if !status.is_success() {
