@@ -4,6 +4,7 @@
 //! 超过保留期的记录会在每次写入时清理，文件不会无限增长。
 
 use super::api::Item;
+use super::render::Rendered;
 use crate::plugins::get_data_dir;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 const LOG_TARGET: &str = "Plugin/AiNews";
 const STATE_FILE: &str = "state.json";
+const EXTRACTION_RETAIN_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeenEntry {
@@ -55,10 +57,22 @@ pub struct GroupState {
     pub realtime_pending: Vec<PendingEntry>,
 }
 
+/// 一张已发送资讯卡片对应的可提取文本。消息 ID 与会话 ID 共同定位，避免
+/// 不同实现端的局部消息 ID 碰撞。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionRecord {
+    pub target_id: i64,
+    pub message_id: String,
+    pub created_ts: i64,
+    pub rendered: Rendered,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub groups: HashMap<String, GroupState>,
+    #[serde(default)]
+    pub extractions: Vec<ExtractionRecord>,
 }
 
 static STORE: OnceLock<AsyncMutex<Option<State>>> = OnceLock::new();
@@ -368,6 +382,42 @@ pub async fn reset_group(group_id: i64) {
     .await
 }
 
+/// 保存图片消息与其文本/链接的映射，供用户稍后引用图片提取。
+pub async fn remember_extraction(target_id: i64, message_id: String, rendered: Rendered) {
+    let now = Utc::now().timestamp();
+    let cutoff = now - EXTRACTION_RETAIN_DAYS * 86_400;
+    with_state(move |state| {
+        state.extractions.retain(|record| {
+            record.created_ts >= cutoff
+                && !(record.target_id == target_id && record.message_id == message_id)
+        });
+        state.extractions.push(ExtractionRecord {
+            target_id,
+            message_id,
+            created_ts: now,
+            rendered,
+        });
+    })
+    .await
+}
+
+/// 读取被引用卡片的可提取内容。超过 30 天的映射会顺手清理。
+pub async fn extraction(target_id: i64, message_id: &str) -> Option<Rendered> {
+    let message_id = message_id.to_string();
+    let cutoff = Utc::now().timestamp() - EXTRACTION_RETAIN_DAYS * 86_400;
+    with_state(move |state| {
+        state
+            .extractions
+            .retain(|record| record.created_ts >= cutoff);
+        state
+            .extractions
+            .iter()
+            .find(|record| record.target_id == target_id && record.message_id == message_id)
+            .map(|record| record.rendered.clone())
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +469,31 @@ mod tests {
         assert!(state.groups["42"].realtime_pending.is_empty());
         assert_eq!(state.groups["42"].realtime_seen.len(), 1);
         assert_eq!(state.groups["42"].brief_seen.len(), 1);
+        assert!(state.extractions.is_empty());
+    }
+
+    #[test]
+    fn extraction_records_roundtrip_and_default_for_legacy_state() {
+        let state = State {
+            extractions: vec![ExtractionRecord {
+                target_id: 42,
+                message_id: "9001".into(),
+                created_ts: 123,
+                rendered: Rendered {
+                    header: "AI 资讯".into(),
+                    entries: vec!["1. 测试\n   🔗 https://example.com".into()],
+                    footer: "AIHOT".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let parsed = parse_state(&json).unwrap();
+        assert_eq!(parsed.extractions[0].message_id, "9001");
+        assert_eq!(parsed.extractions[0].rendered.entries.len(), 1);
+
+        let legacy = parse_state(r#"{"groups":{}}"#).unwrap();
+        assert!(legacy.extractions.is_empty());
     }
 
     #[test]

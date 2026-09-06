@@ -57,9 +57,9 @@ token 取值顺序：环境变量 `AYJX_SATORI_TOKEN`、`config.toml` 中 Satori
 | 合并转发读取 | `internal/get_forward` |
 | 资源代理 | `GET /v1/proxy/{url}` |
 
-HTTP RPC 自带同步响应：需要「先图后文」时直接等待 `message.create` 返回即可，
-无需 WebSocket echo 匹配器。`guild.list` 等标准分页列表跟随响应里的 `next`
-令牌翻页。
+HTTP RPC 自带同步响应：需要把后续引用与已发送消息关联时，可直接读取
+`message.create` 返回的消息 ID，无需 WebSocket echo 匹配器。`guild.list` 等标准
+分页列表跟随响应里的 `next` 令牌翻页。
 
 ## 事件规范化
 

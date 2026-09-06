@@ -8,7 +8,7 @@ use super::card;
 use super::render::{self, RenderOptions, Rendered};
 use super::state;
 use super::{AiNewsConfig, LOG_TARGET, PushTarget};
-use crate::adapters::satori::{LockedWriter, send_msg, send_msg_ack};
+use crate::adapters::satori::{LockedWriter, send_msg, send_msg_id};
 use crate::event::Context;
 use crate::message::Message;
 use rand::RngExt;
@@ -77,7 +77,7 @@ pub(super) fn is_allowed(ctx: &Context, target: PushTarget) -> bool {
     true
 }
 
-/// 一次推送的成品：一张排版好的卡片图 + 一条带链接的文本。
+/// 一次推送的成品：一张排版好的卡片图，以及仅在用户引用提取时发送的文本。
 ///
 /// 图片在进入分群循环前只截一次，多个群共用同一份 base64，
 /// 免得每个群都去跑一遍无头浏览器。
@@ -112,10 +112,9 @@ impl Payload {
     }
 }
 
-/// 把渲染结果装配成待发消息。
+/// 把渲染结果装配成待发文本消息（截图失败兜底、或按需提取时使用）。
 ///
 /// 短内容照旧发一条纯文本；一旦整体超过 `forward_threshold_chars`，
-/// 或者前面已经发过卡片图（此时文本只是链接附录），
 /// 就按条目拆成合并转发的节点——群里只留一个折叠卡片，不刷屏。
 /// 合并转发的消息链里只能放 node 段，因此这种情况下会舍弃回复引用。
 pub fn build_message(
@@ -154,13 +153,11 @@ pub fn build_message(
     forward
 }
 
-/// 先图后文地投递一次推送：卡片图负责好看，随后的合并转发负责链接与检索。
+/// 投递一次推送。卡片成功发送时一级内容只有图片，并保存图片消息 ID 与文本的
+/// 映射；用户之后引用该图执行提取指令时，才发送正文和链接。
 ///
-/// 「先图后文」是真的先后——图片的 Satori HTTP 调用完成后再发文本，
-/// 不靠运气赌两条消息的落地顺序。
-///
-/// 返回「对方是否收到了内容」——两条都没发出去才算失败，
-/// 失败的条目不记入去重，留待下一轮补推。
+/// 卡片渲染/发送失败，或实现端没有返回可关联的消息 ID 时，退回纯文本，避免
+/// 用户看到一张无法提取链接的孤立图片。
 pub async fn deliver(
     ctx: &Context,
     writer: LockedWriter,
@@ -171,6 +168,7 @@ pub async fn deliver(
     reply_to: Option<i64>,
 ) -> bool {
     let mut image_sent = false;
+    let mut extraction_saved = false;
 
     if let Some(b64) = &payload.image {
         let mut msg = match reply_to {
@@ -179,24 +177,32 @@ pub async fn deliver(
         };
         msg = msg.image(format!("base64://{}", b64));
 
-        // 等回执再发文本：图片要先上传，即发即忘会让文本抢在图片前面落地，
-        // 卡片上「完整链接见下方合并转发」的指引就成了假话
-        match send_msg_ack(ctx, writer.clone(), group_id, user_id, msg).await {
-            Ok(true) => image_sent = true,
-            Ok(false) => {
-                warn!(target: LOG_TARGET, "卡片图未收到发送回执，文本改回独立成条。")
+        match send_msg_id(ctx, writer.clone(), group_id, user_id, msg).await {
+            Ok(Some(message_id)) => {
+                image_sent = true;
+                let target_id = group_id.or_else(|| user_id.map(|id| -id)).unwrap_or_default();
+                state::remember_extraction(target_id, message_id, payload.rendered.clone()).await;
+                extraction_saved = true;
+            }
+            Ok(None) => {
+                image_sent = true;
+                warn!(target: LOG_TARGET, "卡片图未返回消息 ID，无法关联引用提取，改由文本兜底。")
             }
             Err(e) => warn!(target: LOG_TARGET, "卡片图发送失败，改由文本兜底: {}", e),
         }
     }
 
-    // 图片已经带上了引用，文本就不必再引用一次
+    if extraction_saved {
+        return true;
+    }
+
+    // 图片若已发出但无法登记映射，兜底文本不再重复引用原指令。
     let body = build_message(
         ctx,
         cfg,
         &payload.rendered,
         if image_sent { None } else { reply_to },
-        image_sent,
+        false,
     );
     let text_sent = match send_msg(ctx, writer, group_id, user_id, body).await {
         Ok(_) => true,
@@ -216,10 +222,10 @@ pub(super) struct Headline<'a> {
     pub card_subtitle: &'a str,
 }
 
-/// 把一批资讯渲染成卡片图 + 文本，投递给某一个群。
+/// 把一批资讯渲染成卡片图并投递给某一个群。
 ///
 /// 定时速递与实时快报都走这里：两者的差别只在标题与挑选条目的规则，
-/// 排版、截图、先图后文的投递顺序完全一致。
+/// 排版、截图和引用提取的投递逻辑完全一致。
 ///
 /// 每个群去重后的条目各不相同，卡片只能逐群渲染，无法像日报那样共用一张图。
 pub(super) async fn deliver_items(
@@ -253,7 +259,7 @@ pub(super) async fn deliver_items(
     .await
 }
 
-/// 卡片图只画前 `image_max_items` 条，剩下的交给文本；图太长反而不好读
+/// 卡片图只画前 `image_max_items` 条；其余条目仍保留在“提取全部”的文本中。
 pub fn card_slice<'a, T>(items: &'a [T], cfg: &AiNewsConfig) -> &'a [T] {
     let max = cfg.image_max_items.clamp(1, 30);
     &items[..items.len().min(max)]
@@ -629,4 +635,5 @@ mod tests {
         assert_eq!(PushFeed::Curated.request_limit(&cfg, true, false), 40);
         assert_eq!(PushFeed::Curated.request_limit(&cfg, false, true), 100);
     }
+
 }

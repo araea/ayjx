@@ -7,7 +7,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -174,6 +174,10 @@ pub struct SendPacket {
     /// 原始触发事件（不参与序列化发送给 Bot）
     #[serde(skip)]
     pub original_event: Option<Event>,
+    /// `message.create` 成功后由适配器写入实际消息 ID，供需要建立引用关系的
+    /// 调用方读取。使用共享容器是因为发送包会经过多个插件并被克隆。
+    #[serde(skip)]
+    pub receipt_message_ids: Arc<Mutex<Vec<String>>>,
 }
 
 impl SendPacket {

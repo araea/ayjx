@@ -41,13 +41,10 @@
 //! （`send_interval_seconds` — `send_interval_max_seconds`），
 //! 不会所有群在同一秒收到同一张图。
 //!
-//! 呈现方式：定时推送与指令回复共用一套投递逻辑，先图后文——
-//! 先发一张排版好的卡片图（见 `card.rs`），负责好看、好读、好转发；
-//! 图片确认发出后再补一条文本，带上每条的 AIHOT 阅读链接，能点能搜能复制。
-//!
-//! 文本部分超过 `forward_threshold_chars`（默认 500 字）、或前面已经发过图，
-//! 就折叠成合并转发，群里只留一个卡片，不刷屏。
-//! 卡片渲染失败（浏览器不可用等）会自动退回纯文本，不影响推送。
+//! 呈现方式：定时推送与指令回复共用一套投递逻辑。一级内容只发一张排版好的
+//! 卡片图（见 `card.rs`），负责好看、好读、好转发；用户引用图片执行
+//! `/ai提取 <序号|全部>` 后，才发送对应的资讯文本与原文链接。多个序号与范围
+//! 可一次批量提取。卡片渲染或消息关联失败时自动退回纯文本，不影响阅读。
 //!
 //! 指令：
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
@@ -55,6 +52,7 @@
 //!   /ai日报             最新一期 AI 日报
 //!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
+//!   /ai提取 <序号|全部>  引用资讯图片后提取正文与链接；支持 1,3-5
 //!   /ai推送添加 <群|私聊> <ID> · /ai推送删除 <群|私聊> <ID>
 //!   /ai推送开启 · /ai推送关闭   不带参数时管理当前会话
 //!   /ai推送列表 · /ai推送状态 · /ai推送重置
@@ -78,7 +76,7 @@ use crate::plugins::{PluginError, get_config, update_config};
 use futures_util::future::BoxFuture;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use toml::Value;
@@ -161,16 +159,16 @@ pub struct AiNewsConfig {
     /// 日报最多展示的条目数
     #[serde(default = "default_daily_blocks")]
     pub daily_max_blocks: usize,
-    /// 是否把资讯排版成卡片图先发一张（随后仍会补一条带链接的文本）
+    /// 是否把资讯排版成卡片图；开启时一级推送只发图片，链接由引用提取
     #[serde(default = "default_true")]
     pub image_enabled: bool,
-    /// 卡片图最多画几条，其余交给文本；图太长反而不好读
+    /// 卡片图最多展示几条；其余条目可通过“提取全部”一并获取
     #[serde(default = "default_image_max_items")]
     pub image_max_items: usize,
-    /// 整条消息超过多少字符就改用合并转发（折叠成一个卡片，避免刷屏）；0 表示永远发纯文本
+    /// 提取/纯文本兜底超过多少字符时改用合并转发；0 表示永远发纯文本
     #[serde(default = "default_forward_threshold")]
     pub forward_threshold_chars: usize,
-    /// 合并转发时单个节点的字符软上限，单条超长的资讯不会被切断
+    /// 提取内容使用合并转发时，单个节点的字符软上限
     #[serde(default = "default_forward_node_chars")]
     pub forward_node_chars: usize,
     /// 卡片图的渲染倍率（1.0—4.0）。倍率越高出图越清晰，字也越"实"；
@@ -770,6 +768,42 @@ pub fn handle(
         let message_id = msg.message_id();
         let current_target = PushTarget::current(group_id, user_id);
 
+        // 链接按需提取：必须引用本插件此前发出的资讯图片，消息 ID 才能精确
+        // 对上当时那批内容。空参数等同“全部”，也支持多个序号与范围。
+        for trigger in ["ai提取", "ai链接"] {
+            let Some(matched) = match_command(&ctx, trigger) else {
+                continue;
+            };
+            let config = load_config(&ctx);
+            let reply = match (current_target, matched.reply_id.as_deref()) {
+                (Some(target), Some(quoted_id)) => {
+                    match state::extraction(target.state_id(), quoted_id).await {
+                        Some(rendered) => {
+                            let arg = extract_text_arg(&matched.args);
+                            match select_extraction(&rendered, &arg) {
+                                Ok(selected) => pusher::build_message(
+                                    &ctx,
+                                    &config,
+                                    &selected,
+                                    Some(message_id),
+                                    selected.entries.len() > 1,
+                                ),
+                                Err(message) => Message::new().reply(message_id).text(message),
+                            }
+                        }
+                        None => Message::new().reply(message_id).text(
+                            "没有找到这张卡片对应的资讯。请确认引用的是本插件近 30 天发送的 AI 资讯图片。",
+                        ),
+                    }
+                }
+                _ => Message::new().reply(message_id).text(
+                    "请先引用一张 AI 资讯卡片，再发送 /ai提取 <序号|全部>。例如：/ai提取 2 或 /ai提取 1,3-5。",
+                ),
+            };
+            send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
+            return Ok(None);
+        }
+
         // 先匹配更长的「推送管理」类指令，避免与查询指令混淆
         for trigger in [
             "ai推送添加",
@@ -824,7 +858,7 @@ pub fn handle(
                 _ => query_brief(&config, current_target).await,
             };
 
-            // 先发卡片图，再补一条带链接的合并转发文本
+            // 卡片成功时只发图片；正文和链接由用户引用图片后按需提取
             pusher::deliver(
                 &ctx,
                 writer,
@@ -840,6 +874,72 @@ pub fn handle(
 
         Ok(Some(ctx))
     })
+}
+
+/// 从已保存的卡片内容中选出用户需要的条目。序号从 1 开始，支持逗号、空格
+/// 和闭区间（如 `1,3-5`）；空参数与“全部”都返回整批。
+fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, String> {
+    let total = rendered.entries.len();
+    if total == 0 {
+        return Err("这张卡片没有可提取的资讯条目。".to_string());
+    }
+
+    let input = input.trim();
+    let all = input.is_empty() || matches!(input.to_ascii_lowercase().as_str(), "all" | "全部" | "所有");
+    let indices: Vec<usize> = if all {
+        (0..total).collect()
+    } else {
+        parse_extraction_indices(input, total)?
+    };
+
+    Ok(Rendered {
+        header: rendered.header.clone(),
+        entries: indices
+            .iter()
+            .map(|index| rendered.entries[*index].clone())
+            .collect(),
+        footer: format!("{}\n已提取 {} / {} 条", rendered.footer, indices.len(), total),
+    })
+}
+
+fn parse_extraction_indices(input: &str, total: usize) -> Result<Vec<usize>, String> {
+    let normalized = input
+        .replace(['，', '、'], ",")
+        .replace(['—', '–', '～', '~'], "-");
+    let mut selected = BTreeSet::new();
+
+    for token in normalized.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if let Some((start, end)) = token.split_once('-') {
+            let start = parse_extraction_index(start, total)?;
+            let end = parse_extraction_index(end, total)?;
+            if start > end {
+                return Err(format!("序号范围 {} 无效：起始序号不能大于结束序号。", token));
+            }
+            selected.extend(start..=end);
+        } else {
+            selected.insert(parse_extraction_index(token, total)?);
+        }
+    }
+
+    if selected.is_empty() {
+        return Err("请输入要提取的序号，例如 /ai提取 2、/ai提取 1,3-5，或 /ai提取 全部。".to_string());
+    }
+    Ok(selected.into_iter().map(|index| index - 1).collect())
+}
+
+fn parse_extraction_index(input: &str, total: usize) -> Result<usize, String> {
+    let index = input
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("无法识别序号“{}”。", input.trim()))?;
+    if !(1..=total).contains(&index) {
+        return Err(format!("序号 {} 超出范围，这张卡片共有 {} 条。", index, total));
+    }
+    Ok(index)
 }
 
 /// 提示类回复：只有文本，不配图
@@ -1567,6 +1667,30 @@ mod tests {
         assert_eq!(parse_time("12:30"), (12, 30, 0));
         assert_eq!(parse_time("25:00:00"), (9, 0, 0));
         assert_eq!(parse_time("abc"), (9, 0, 0));
+    }
+
+    #[test]
+    fn extraction_selection_supports_single_batch_ranges_and_all() {
+        let rendered = Rendered {
+            header: "AI 资讯".into(),
+            entries: (1..=6).map(|index| format!("{}. 资讯", index)).collect(),
+            footer: "AIHOT · 共 6 条".into(),
+        };
+
+        let one = select_extraction(&rendered, "2").unwrap();
+        assert_eq!(one.entries, vec!["2. 资讯"]);
+
+        let batch = select_extraction(&rendered, "1，3-5 3").unwrap();
+        assert_eq!(
+            batch.entries,
+            vec!["1. 资讯", "3. 资讯", "4. 资讯", "5. 资讯"]
+        );
+
+        assert_eq!(select_extraction(&rendered, "").unwrap().entries.len(), 6);
+        assert_eq!(select_extraction(&rendered, "ALL").unwrap().entries.len(), 6);
+        assert!(select_extraction(&rendered, "0").is_err());
+        assert!(select_extraction(&rendered, "3-2").is_err());
+        assert!(select_extraction(&rendered, "7").is_err());
     }
 
     #[test]

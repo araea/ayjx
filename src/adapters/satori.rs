@@ -577,7 +577,9 @@ pub async fn send_msg<M>(
 where
     M: Serialize,
 {
-    dispatch_send(ctx, writer, group_id, user_id, message).await
+    dispatch_send(ctx, writer, group_id, user_id, message)
+        .await
+        .map(|_| ())
 }
 
 /// Satori 的 message.create 是同步 HTTP RPC，成功返回即视为已确认。
@@ -595,13 +597,33 @@ where
     Ok(true)
 }
 
+/// 发送消息并返回实现端分配的第一条消息 ID。
+///
+/// AI News 等需要让后续引用回复精确关联原消息的功能应使用此接口；普通发送
+/// 仍使用 [`send_msg`]，无需关心回执内容。
+pub async fn send_msg_id<M>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+) -> Result<Option<String>, BotError>
+where
+    M: Serialize,
+{
+    Ok(dispatch_send(ctx, writer, group_id, user_id, message)
+        .await?
+        .into_iter()
+        .next())
+}
+
 async fn dispatch_send<M>(
     ctx: &Context,
     writer: LockedWriter,
     group_id: Option<i64>,
     user_id: Option<i64>,
     message: M,
-) -> Result<(), BotError>
+) -> Result<Vec<String>, BotError>
 where
     M: Serialize,
 {
@@ -610,7 +632,7 @@ where
     } else if let Some(id) = user_id.filter(|id| *id != 0) {
         ("private", None, Some(id))
     } else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let params = simd_json::serde::to_owned_value(json!({
         "message_type": message_type,
@@ -623,10 +645,12 @@ where
         EventType::BeforeSend(packet) => packet.original_event.clone(),
         EventType::Init => None,
     };
+    let receipt_message_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
     let packet = SendPacket {
         action: "message.create".to_string(),
         params,
         original_event,
+        receipt_message_ids: receipt_message_ids.clone(),
     };
     let next = Context {
         event: EventType::BeforeSend(packet),
@@ -639,7 +663,10 @@ where
         bot: ctx.bot.clone(),
     };
     plugins::run(next, writer).await?;
-    Ok(())
+    Ok(receipt_message_ids
+        .lock()
+        .map_err(|_| "发送回执锁已损坏")?
+        .clone())
 }
 
 /// 执行插件修改后的发送包。
@@ -664,13 +691,22 @@ pub async fn dispatch_packet(
         .message()
         .map(message::to_content)
         .unwrap_or_default();
-    let _: Vec<Value> = writer
+    let created: Vec<Value> = writer
         .call(
             ctx,
             "message.create",
             json!({"channel_id": channel_id, "content": content}),
         )
         .await?;
+    let ids = created
+        .iter()
+        .map(|message| raw_id(message.get("id")))
+        .filter(|id| !id.is_empty())
+        .collect();
+    *packet
+        .receipt_message_ids
+        .lock()
+        .map_err(|_| "发送回执锁已损坏")? = ids;
     Ok(())
 }
 

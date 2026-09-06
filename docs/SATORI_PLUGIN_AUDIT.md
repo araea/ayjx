@@ -23,7 +23,7 @@
 | `ciyi` | 群消息、引用、图片 | 指令与 base64 图片发送正常 |
 | `webshot` | 文本 URL、引用回复 | 规范化文本段与回复正常 |
 | `oai` | 引用消息、图像、表态、文件 | `message.get`、reaction 与 multipart 上传正常 |
-| `ai_news` | 主动推送、合并转发 | HTTP 响应保证先图后文，重连不重复注册任务 |
+| `ai_news` | 主动推送、引用提取、合并转发 | 一级推送仅图片，HTTP 回执 ID 精确关联按需提取内容；重连不重复注册任务 |
 | `settings` | 指令与配置持久化 | 不受协议迁移影响 |
 | `help` | 回复、图片 | `<quote>` 与 base64 图片发送正常 |
 | `restart` | 回复、进程生命周期 | 走 `on_init`，不受 connected 去重影响 |

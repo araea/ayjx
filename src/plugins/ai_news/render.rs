@@ -14,11 +14,12 @@
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{self, Board};
 use chrono::{DateTime, FixedOffset};
+use serde::{Deserialize, Serialize};
 
 const DIVIDER: &str = "———————————————";
 
 /// 一次渲染的产物。分段保存，以便按需要合成纯文本或拆成转发节点。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Rendered {
     /// 标题行
     pub header: String,

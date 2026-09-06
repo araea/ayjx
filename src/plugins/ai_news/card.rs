@@ -12,8 +12,8 @@
 //!     一眼扫过先看到标题与数字，细节再往下沉；
 //!   - 一条一格，格与格之间用 26px 上下留白而非重分割线。
 //!
-//! 图片只承载「读」的部分：链接一概不画进图里，改由随后的合并转发文本承载，
-//! 这样图好看、链接又能点能搜。
+//! 图片只承载「读」的部分：链接一概不画进图里。需要查看全文时，用户引用
+//! 卡片执行提取指令，再按需取得正文与链接。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{Board, Trend};
@@ -234,8 +234,7 @@ const CSS: &str = r#"
 
 /// 套上统一的卡片外壳：页眉（主色标签 + 出图时间）、大标题、正文、页脚。
 ///
-/// `foot_note` 是页脚右侧那句提示。它对应的是随后真的会发出去的那条消息，
-/// 别写成图里说一套、群里发另一套。
+/// `foot_note` 是页脚右侧的操作提示。
 fn shell(
     accent: Accent,
     theme: CardTheme,
@@ -277,8 +276,8 @@ fn shell(
     )
 }
 
-/// 图后必定跟一条带链接的文本，页脚据此措辞
-const FOOT_LINKS: &str = "链接与完整内容见随附消息";
+/// 一级推送只发图；用户引用图片后按序号或批量提取链接。
+const FOOT_LINKS: &str = "引用本图回复 /ai提取 1 或 /ai提取 全部";
 
 /// 一条资讯的元信息行：来源 · 分类 · 时间
 fn meta_html(item: &Item) -> String {
@@ -507,7 +506,7 @@ pub fn models_card(board: &Board, max_items: usize, theme: CardTheme) -> String 
         "AIHOT 大模型排行榜",
         &subtitle.join(" · "),
         &body,
-        "榜单链接见随附消息",
+        FOOT_LINKS,
     )
 }
 
@@ -850,6 +849,7 @@ mod tests {
         assert!(html.contains("某模型发布"));
         assert!(html.contains("官方博客"));
         assert!(html.contains("08-21 09:00"), "时间应换算为北京时间");
+        assert!(html.contains("/ai提取 1"));
         // 链接只走文本消息，不画进图里
         assert!(!html.contains("aihot.virxact.com/i/1"));
     }
