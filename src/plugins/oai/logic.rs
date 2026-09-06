@@ -14,7 +14,7 @@ use async_openai::{
         ChatCompletionRequestMessageContentPartImageArgs,
         ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
         ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, ImageUrlArgs, ReasoningEffort,
+        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ImageUrlArgs,
     },
 };
 use regex::Regex;
@@ -172,6 +172,23 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
 ///
 /// 和 pi-agent / Rig 的手动工具循环一致，只把最终自然语言写入房间历史；中间的
 /// assistant/tool 消息仅属于本次推理，避免把可能很大的终端输出永久落盘。
+fn build_chat_request(
+    model: &str,
+    messages: Vec<ChatCompletionRequestMessage>,
+    with_tools: bool,
+) -> anyhow::Result<CreateChatCompletionRequest> {
+    let mut builder = CreateChatCompletionRequestArgs::default();
+    builder.model(model).messages(messages);
+    if with_tools {
+        // Chat Completions 的工具支持是跨模型/中转的公共能力，而 reasoning_effort
+        // 属于模型和端点相关的可选扩展。不要把后者附加到工具请求：部分服务（如
+        // Luna）只在 Responses API 支持两者组合，且同一模型在不同中转上的行为也
+        // 可能不同。让服务端采用该模型的默认推理策略是最可移植的请求契约。
+        builder.tools(super::harness::tool_definitions());
+    }
+    Ok(builder.build()?)
+}
+
 async fn complete(
     client: &Client<OpenAIConfig>,
     model: &str,
@@ -179,14 +196,7 @@ async fn complete(
     harness: Option<super::harness::HarnessConfig>,
 ) -> anyhow::Result<String> {
     for _ in 0..super::harness::MAX_TOOL_ROUNDS {
-        let mut builder = CreateChatCompletionRequestArgs::default();
-        builder.model(model).messages(messages.clone());
-        if harness.is_some() {
-            builder
-                .tools(super::harness::tool_definitions())
-                .reasoning_effort(ReasoningEffort::Medium);
-        }
-        let request = builder.build()?;
+        let request = build_chat_request(model, messages.clone(), harness.is_some())?;
         let response = client.chat().create(request).await?;
         let choice = response
             .choices
@@ -1602,5 +1612,30 @@ pub async fn handle_create(
             format!("🤖 已创建 {}（模型：{}）", name, model),
         )
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_tool_request_omits_model_specific_reasoning_options() {
+        let request = build_chat_request(
+            "gpt-5.6-luna",
+            vec![
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content("test")
+                    .build()
+                    .unwrap()
+                    .into(),
+            ],
+            true,
+        )
+        .unwrap();
+        let serialized = serde_json::to_value(request).unwrap();
+
+        assert!(serialized.get("tools").is_some());
+        assert!(serialized.get("reasoning_effort").is_none());
     }
 }
