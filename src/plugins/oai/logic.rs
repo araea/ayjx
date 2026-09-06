@@ -9,10 +9,12 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
+        ChatCompletionRequestMessage,
         ChatCompletionRequestMessageContentPartImageArgs,
         ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs, ImageUrlArgs,
+        ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs, ImageUrlArgs,
     },
 };
 use regex::Regex;
@@ -166,6 +168,80 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// 执行标准的模型 → tool calls → tool results → 模型循环。
+///
+/// 和 pi-agent / Rig 的手动工具循环一致，只把最终自然语言写入房间历史；中间的
+/// assistant/tool 消息仅属于本次推理，避免把可能很大的终端输出永久落盘。
+async fn complete(
+    client: &Client<OpenAIConfig>,
+    model: &str,
+    mut messages: Vec<ChatCompletionRequestMessage>,
+    harness: Option<super::harness::HarnessConfig>,
+) -> anyhow::Result<String> {
+    for _ in 0..super::harness::MAX_TOOL_ROUNDS {
+        let mut builder = CreateChatCompletionRequestArgs::default();
+        builder.model(model).messages(messages.clone());
+        if harness.is_some() {
+            builder.tools(super::harness::tool_definitions());
+        }
+        let request = builder.build()?;
+        let response = client.chat().create(request).await?;
+        let choice = response
+            .choices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("API 未返回任何候选回复"))?;
+        let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
+
+        if tool_calls.is_empty() {
+            return choice
+                .message
+                .content
+                .clone()
+                .filter(|content| !content.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("API 返回了空回复"));
+        }
+
+        let harness = harness.ok_or_else(|| anyhow::anyhow!("模型请求了未启用的工具"))?;
+        let mut assistant = ChatCompletionRequestAssistantMessageArgs::default();
+        assistant.tool_calls(tool_calls.clone());
+        if let Some(content) = choice.message.content.clone().filter(|value| !value.is_empty()) {
+            assistant.content(content);
+        }
+        messages.push(assistant.build()?.into());
+
+        let executions = tool_calls.iter().map(|call| async move {
+            match call {
+                ChatCompletionMessageToolCalls::Function(call) => {
+                    let output = super::harness::execute_tool(
+                        &call.function.name,
+                        &call.function.arguments,
+                        harness,
+                    )
+                    .await;
+                    (call.id.clone(), output)
+                }
+                ChatCompletionMessageToolCalls::Custom(call) => (
+                    call.id.clone(),
+                    format!("Tool error: unsupported custom tool {}", call.custom_tool.name),
+                ),
+            }
+        });
+        for (call_id, output) in futures_util::future::join_all(executions).await {
+            messages.push(
+                ChatCompletionRequestToolMessageArgs::default()
+                    .tool_call_id(call_id)
+                    .content(output)
+                    .build()?
+                    .into(),
+            );
+        }
+    }
+    anyhow::bail!(
+        "工具调用超过 {} 轮，已停止以避免无限循环",
+        super::harness::MAX_TOOL_ROUNDS
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn chat(
     name: &str,
@@ -223,8 +299,6 @@ async fn chat(
         reply_text(ctx, writer, &event, "❌ API 未配置。").await;
         return;
     }
-
-    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
 
     let mut hist = if temp_mode {
         Vec::new()
@@ -389,27 +463,16 @@ async fn chat(
         );
     }
 
-    let req = match CreateChatCompletionRequestArgs::default()
-        .model(&agent.model)
-        .messages(msgs)
-        .build()
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if !temp_mode {
-                mgr.generating
-                    .write()
-                    .await
-                    .set_generating(name, is_priv_ctx, &uid, false);
-            }
-            reply_text(ctx, writer, &event, format!("❌ 请求构建失败：{}", e)).await;
-            return;
-        }
-    };
+    let harness = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
+        .harness_for(name, is_priv_ctx);
+    let annotate = !event.is_manual_self();
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    }
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(300),
-        client.chat().create(req),
+        complete(&client, &agent.model, msgs, harness),
     )
     .await
     {
@@ -429,7 +492,7 @@ async fn chat(
             .await;
         }
         Ok(result) => match result {
-            Ok(res) => {
+            Ok(content) => {
                 if !temp_mode {
                     mgr.generating
                         .write()
@@ -442,12 +505,21 @@ async fn chat(
                     if let Some(a) = c.agents.iter().find(|a| a.name == name)
                         && a.generation_id != gen_id
                     {
+                        drop(c);
+                        if annotate {
+                            let _ = api::set_msg_emoji_like(
+                                ctx,
+                                writer.clone(),
+                                event.message_id(),
+                                124,
+                                false,
+                            )
+                            .await;
+                        }
                         return;
                     }
                 }
 
-                if let Some(choice) = res.choices.first()
-                    && let Some(content) = &choice.message.content
                 {
                     let msg_index = if temp_mode {
                         0
@@ -465,14 +537,14 @@ async fn chat(
                         if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
                             a.history_mut(is_priv_ctx, &uid).push(ChatMessage::new(
                                 "assistant",
-                                content,
+                                &content,
                                 vec![],
                             ));
                         }
                         mgr.save(&c);
                     }
 
-                    let image_urls = extract_image_urls(content);
+                    let image_urls = extract_image_urls(&content);
                     let header = if temp_mode {
                         format!("{} (临时会话)", agent.name)
                     } else {
@@ -504,7 +576,7 @@ async fn chat(
                     let reply_text_content = if cmd.text_mode && !image_urls.is_empty() {
                         let re =
                             Regex::new(r"!\[.*?\]\(((?:https?://|data:image/)[^\s\)]+)\)").unwrap();
-                        re.replace_all(content, |caps: &regex::Captures| {
+                        re.replace_all(&content, |caps: &regex::Captures| {
                             let url = &caps[1];
                             if url.starts_with("data:") {
                                 "[图片]".to_string()
@@ -551,7 +623,7 @@ async fn chat(
                         }
                     }
 
-                    let video_urls = extract_video_urls(content);
+                    let video_urls = extract_video_urls(&content);
                     for url in video_urls {
                         let _ = send_msg(
                             ctx,
@@ -574,6 +646,9 @@ async fn chat(
                 reply_text(ctx, writer, &event, format!("❌ API 错误：{}", e)).await;
             }
         },
+    };
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
     }
 }
 
@@ -1315,6 +1390,13 @@ pub async fn execute(
 | `&智能体 内容` | 私有历史对话 |
 | `智能体~` | 重新生成上一条 |
 | `智能体!` | 停止生成 |
+
+## 工具增强房间
+| 房间 | 能力 |
+|------|------|
+| `pi` | 公有对话可直接执行终端命令并搜索实时网页；终端无需确认 |
+
+> 高权限工具仅对 `[oai].harness_rooms` 中列出的公有房间生效，`&` 私有模式不启用工具。
 
 ## MJ 绘图房间
 | 房间模型 | 直接操作 |

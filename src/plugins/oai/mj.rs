@@ -152,7 +152,10 @@ pub async fn handle_agent(
         return;
     }
 
-    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    let annotate = !event.is_manual_self();
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    }
     let bases = api_bases(&configured_base);
     let result = async {
         let body = match mode {
@@ -181,7 +184,9 @@ pub async fn handle_agent(
     }
     .await;
 
-    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    }
     match result {
         Ok((base, task)) => {
             deliver_task(ctx, writer, mgr, mode, &base, &task, event.message_id()).await
@@ -460,7 +465,10 @@ pub async fn try_handle_upscale_reply(
     } else {
         vec![source.api_base.clone()]
     };
-    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    let annotate = !event.is_manual_self();
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    }
 
     for index in indices {
         let cache_key = format!("{}:{index}", source.task_id);
@@ -523,7 +531,9 @@ pub async fn try_handle_upscale_reply(
             }
         }
     }
-    let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    }
     true
 }
 

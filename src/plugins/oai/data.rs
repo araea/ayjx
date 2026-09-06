@@ -30,7 +30,7 @@ impl Manager {
             ..Default::default()
         };
 
-        let config = if path.exists() {
+        let mut config = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(s) => serde_json::from_str(&s).unwrap_or(default),
                 Err(_) => default,
@@ -38,6 +38,31 @@ impl Manager {
         } else {
             default
         };
+
+        // 老配置只迁移一次；之后若管理员主动删除 `pi`，尊重这一选择。
+        if !config.pi_room_initialized {
+            if !config
+                .agents
+                .iter()
+                .any(|agent| agent.name.eq_ignore_ascii_case("pi"))
+            {
+                let model = if config.default_model.trim().is_empty() {
+                    "gpt-4o"
+                } else {
+                    &config.default_model
+                };
+                config.agents.push(super::types::Agent::new(
+                    "pi",
+                    model,
+                    "You are pi, a capable general assistant. In this public room you can use a full-permission shell and live web search. Use tools whenever they make the answer more accurate; never invent tool results. For web research, include the source URLs you relied on.",
+                    "终端与联网工具助手",
+                ));
+            }
+            config.pi_room_initialized = true;
+            if let Ok(serialized) = serde_json::to_string_pretty(&config) {
+                let _ = std::fs::write(&path, serialized);
+            }
+        }
 
         let mj_cache = std::fs::read_to_string(&mj_cache_path)
             .ok()
@@ -165,5 +190,34 @@ impl Manager {
             .iter()
             .map(|a| a.name.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initializes_pi_room_once() {
+        let unique = format!(
+            "ayjx-oai-pi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let manager = Manager::new(dir.clone());
+        let serialized = std::fs::read_to_string(&manager.path).unwrap();
+        let config: Config = serde_json::from_str(&serialized).unwrap();
+        let pi = config.agents.iter().find(|agent| agent.name == "pi").unwrap();
+        assert_eq!(pi.description, "终端与联网工具助手");
+        assert!(pi.public_history.is_empty());
+        assert!(config.pi_room_initialized);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

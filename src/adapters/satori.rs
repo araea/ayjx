@@ -784,6 +784,11 @@ fn normalize_event(
             );
         }
         out["user_id"] = json!(user_id);
+        out["manual_self"] = json!(
+            body.pointer("/satori_qq/manual_self")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        );
         out["message_id"] = json!(message_id);
         out["message_id_str"] = json!(message_id_str);
         out["raw_message"] = json!(raw_message);
@@ -968,6 +973,7 @@ mod tests {
         let normalized = normalize_event(&event, &bot, &Default::default()).unwrap();
         assert_eq!(normalized.get_i64("user_id"), Some(10000));
         assert_eq!(normalized.get_i64("group_id"), Some(123));
+        assert_eq!(normalized.get_bool("manual_self"), Some(true));
     }
 
     /// 加群申请的 `message.id` 是审批 flag，不是数字 ID，必须原样留住。

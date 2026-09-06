@@ -121,6 +121,9 @@ pub struct Config {
     pub default_model: String,
     #[serde(default)]
     pub default_prompt: String,
+    /// 记录内置 `pi` 房间已经迁移过，用户主动删除后不会在每次启动时复活。
+    #[serde(default)]
+    pub pi_room_initialized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use toml::Value;
 
 pub mod data;
+pub mod harness;
 pub mod logic;
 pub mod mj;
 pub mod parser;
@@ -20,13 +21,42 @@ use data::MANAGER;
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
-struct OaiConfig {
+pub(crate) struct OaiConfig {
     enabled: bool,
+    /// 仅这些公有房间启用本机工具；私有历史模式不会获得工具权限。
+    harness_rooms: Vec<String>,
+    shell_timeout_seconds: u64,
+    shell_max_output_bytes: usize,
+    web_search_results: usize,
 }
 
 impl Default for OaiConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            harness_rooms: vec!["pi".to_string()],
+            shell_timeout_seconds: 300,
+            shell_max_output_bytes: 64 * 1024,
+            web_search_results: 8,
+        }
+    }
+}
+
+impl OaiConfig {
+    pub(crate) fn harness_for(&self, room: &str, private: bool) -> Option<harness::HarnessConfig> {
+        if private
+            || !self
+                .harness_rooms
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(room))
+        {
+            return None;
+        }
+        Some(harness::HarnessConfig {
+            shell_timeout_seconds: self.shell_timeout_seconds.clamp(1, 3_600),
+            shell_max_output_bytes: self.shell_max_output_bytes.clamp(1_024, 1024 * 1024),
+            web_search_results: self.web_search_results.clamp(1, 20),
+        })
     }
 }
 
@@ -173,4 +203,18 @@ pub fn handle(
 
         Ok(Some(ctx))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harness_is_enabled_only_for_pi_public_room_by_default() {
+        let config = OaiConfig::default();
+        assert!(config.harness_for("pi", false).is_some());
+        assert!(config.harness_for("PI", false).is_some());
+        assert!(config.harness_for("pi", true).is_none());
+        assert!(config.harness_for("other", false).is_none());
+    }
 }

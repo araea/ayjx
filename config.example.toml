@@ -16,3 +16,11 @@ protocol = "satori"
 url = "http://127.0.0.1:3001"
 # 留空表示不鉴权；也可设置环境变量 AYJX_SATORI_TOKEN（优先级更高）。
 access_token = ""
+
+[oai]
+enabled = true
+# 仅列出的公有房间拥有本机工具权限；默认 `pi`。终端命令不请求确认并拥有进程权限。
+harness_rooms = ["pi"]
+shell_timeout_seconds = 300
+shell_max_output_bytes = 65536
+web_search_results = 8
