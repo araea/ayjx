@@ -1,4 +1,5 @@
-//! 实时推送：有效资讯一进 AIHOT 全量动态池就发到目标会话，而不是等下一个定时档。
+//! 实时推送：有效资讯一进 AIHOT 动态池就发到目标会话，而不是等下一个定时档。
+//! 默认只轮询精选池以减少信息干扰；需要完整信息流时可显式切换到全量池。
 //!
 //! ## 为什么是轮询
 //!
@@ -26,9 +27,10 @@
 //!   2. **保鲜期**：只推收录时间在 `realtime_max_age_minutes` 内的条目。
 //!      Bot 离线一整天再上线时，不会把这一天的旧闻当成「刚刚发生」补发一遍；
 //!   3. **单次条数**：一次最多 `realtime_max_items` 条，多出来的留到下一轮；
-//!   4. **容量护栏**：每个目标每小时最多 `realtime_max_per_hour` 次；默认值 60
+//!   4. **来源闸门**：默认只读精选池；`/ai实时模式 全部` 才会启用全量池；
+//!   5. **容量护栏**：每个目标每小时最多 `realtime_max_per_hour` 次；默认值 60
 //!      在正常数据量下等同不限制。静默时段默认关闭，可按目标主动设置。
-//!   5. **持久待发队列**：超过单次条数、撞上频次上限或发送失败的内容先落盘；
+//!   6. **持久待发队列**：超过单次条数、撞上频次上限或发送失败的内容先落盘；
 //!      后续即使接口一直返回 304 或进程重启，也会继续按节奏投递，过期内容自动淘汰。
 //!
 //! 实时与定时各自去重：实时线保证每条有效资讯及时送达，定时线仍可把其中的
@@ -90,7 +92,8 @@ pub fn spawn(ctx: &Context, writer: &LockedWriter) {
         };
         info!(
             target: LOG_TARGET,
-            "已启用[实时推送]：每 {} 秒条件轮询一次动态池（保鲜 {} 分钟 · 单次容量 {} 条 · 每目标每小时容量 {} 次 · 静默 {}）",
+            "已启用[实时推送]：仅推送{}，每 {} 秒条件轮询一次动态池（保鲜 {} 分钟 · 单次容量 {} 条 · 每目标每小时容量 {} 次 · 静默 {}）",
+            cfg.realtime_mode_label(),
             interval,
             cfg.realtime_max_age_minutes.max(1),
             cfg.realtime_max_items.max(1),
@@ -142,7 +145,7 @@ async fn tick(ctx: Context, writer: LockedWriter) {
     poll_once(ctx, writer, cfg).await;
 }
 
-/// 抓一次全量动态池，把够新的条目发给还没看过它们的目标
+/// 抓一次配置的数据源，把够新的条目发给还没看过它们的目标
 async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
     let clock_now = Utc::now().with_timezone(&super::render::beijing()).time();
     let targets: Vec<PushTarget> = cfg

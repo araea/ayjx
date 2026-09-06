@@ -8,7 +8,7 @@
 //! 排版参数是按「群聊里被缩略图裹一层再点开看」这个真实场景定的：
 //!   - 版心 720 CSS px 配合 `image_scale`（默认 3 倍）出图，2160px 宽，放大不糊；
 //!   - 标题 26px、正文 18.5px——相对版心足够大，缩略图状态下也能读出标题；
-//!   - 文字明度分三档（标题近白 / 正文 #BFC9D9 / 元信息 #8A94A8），
+//!   - 夜间文字采用偏暖的中性灰，标题、正文、元信息保持稳定的三级明度，
 //!     一眼扫过先看到标题与数字，细节再往下沉；
 //!   - 一条一格，格与格之间用 26px 上下留白而非重分割线。
 //!
@@ -33,26 +33,26 @@ pub struct Accent {
 }
 
 const BRIEF: Accent = Accent {
-    dark_hex: "#8296FF",
-    dark_rgb: "130,150,255",
+    dark_hex: "#9AA8E8",
+    dark_rgb: "154,168,232",
     light_hex: "#5268D8",
     light_rgb: "82,104,216",
 };
 const HOT: Accent = Accent {
-    dark_hex: "#FF8A5B",
-    dark_rgb: "255,138,91",
+    dark_hex: "#E9A07B",
+    dark_rgb: "233,160,123",
     light_hex: "#C9562B",
     light_rgb: "201,86,43",
 };
 const DAILY: Accent = Accent {
-    dark_hex: "#3FD6AC",
-    dark_rgb: "63,214,172",
+    dark_hex: "#72C9AE",
+    dark_rgb: "114,201,174",
     light_hex: "#168668",
     light_rgb: "22,134,104",
 };
 const MODELS: Accent = Accent {
-    dark_hex: "#FFC24B",
-    dark_rgb: "255,194,75",
+    dark_hex: "#DDBB74",
+    dark_rgb: "221,187,116",
     light_hex: "#A86400",
     light_rgb: "168,100,0",
 };
@@ -68,13 +68,14 @@ impl CardTheme {
     fn vars(self) -> &'static str {
         match self {
             Self::Dark => r#"color-scheme:dark;
-  --canvas:#04060A;--surface:#0C1017;--title:#FFFFFF;--body:#BFC9D9;
-  --strong:#F2F5FA;--subtle:#98A3B8;--muted:#8A94A8;--faint:#6B7689;
-  --line:rgba(255,255,255,.07);--strong-line:rgba(255,255,255,.09);
-  --pattern:rgba(255,255,255,.04);--panel:rgba(255,255,255,.05);
-  --panel-border:rgba(255,255,255,.07);--plain-chip:rgba(255,255,255,.07);
-  --sep:rgba(255,255,255,.16);--top-rank:#0A0D13;--up:#4ADE80;--down:#FF7A7A;
-  --shadow:none"#,
+  --canvas:#11151C;--surface:#1A202A;--title:#F2F0EA;--body:#D1D0CB;
+  --strong:#E8E6E0;--subtle:#B8BBC2;--muted:#A2A8B2;--faint:#8992A0;
+  --line:rgba(226,229,235,.09);--strong-line:rgba(226,229,235,.12);
+  --pattern:rgba(226,229,235,.022);--panel:rgba(238,234,224,.045);
+  --panel-border:rgba(226,229,235,.09);--plain-chip:rgba(226,229,235,.07);
+  --sep:rgba(226,229,235,.18);--top-rank:#151A22;--up:#75C995;--down:#E38A8D;
+  --glow-alpha:.10;--dot-alpha:.12;--chip-alpha:.11;--quote-alpha:.065;
+  --shadow:0 18px 48px rgba(0,0,0,.24)"#,
             Self::Light => r#"color-scheme:light;
   --canvas:#E9EDF3;--surface:#FBFCFE;--title:#17202E;--body:#3D4858;
   --strong:#202A38;--subtle:#596679;--muted:#687487;--faint:#7A8596;
@@ -82,6 +83,7 @@ impl CardTheme {
   --pattern:rgba(31,48,72,.045);--panel:rgba(38,54,78,.045);
   --panel-border:rgba(29,43,63,.10);--plain-chip:rgba(37,51,72,.07);
   --sep:rgba(31,44,63,.20);--top-rank:#FFFFFF;--up:#168447;--down:#C33E46;
+  --glow-alpha:.20;--dot-alpha:.16;--chip-alpha:.14;--quote-alpha:.09;
   --shadow:0 16px 42px rgba(35,47,65,.10)"#,
         }
     }
@@ -146,14 +148,14 @@ const CSS: &str = r#"
   overflow-wrap:anywhere;word-break:normal}
 /* 左上角一团主色微光，给深底一点纵深，不喧宾夺主 */
 .card::before{content:"";position:absolute;top:-230px;left:-130px;width:480px;height:480px;
-  border-radius:50%;background:rgba(__RGB__,.20);filter:blur(95px);pointer-events:none}
+  border-radius:50%;background:rgba(__RGB__,var(--glow-alpha));filter:blur(95px);pointer-events:none}
 .card>*{position:relative}
 
 .eyebrow{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
 .kicker{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:800;
   letter-spacing:.18em;color:__ACCENT__}
 .dot{width:9px;height:9px;border-radius:50%;background:__ACCENT__;
-  box-shadow:0 0 0 5px rgba(__RGB__,.16)}
+  box-shadow:0 0 0 5px rgba(__RGB__,var(--dot-alpha))}
 .stamp{font-size:14px;color:var(--faint);letter-spacing:.04em;font-variant-numeric:tabular-nums}
 
 .title{font-size:42px;line-height:1.25;font-weight:800;letter-spacing:-.015em;color:var(--title)}
@@ -179,12 +181,12 @@ const CSS: &str = r#"
   font-size:16px;font-weight:500;color:var(--muted)}
 .sep{color:var(--sep)}
 .chip{padding:3px 11px;border-radius:7px;font-size:14px;font-weight:700;letter-spacing:.02em;
-  color:__ACCENT__;background:rgba(__RGB__,.14)}
+  color:__ACCENT__;background:rgba(__RGB__,var(--chip-alpha))}
 .chip.plain{color:var(--subtle);background:var(--plain-chip)}
 .sum{margin-top:13px;font-size:19.5px;line-height:1.76;color:var(--body);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .why{margin-top:14px;padding:12px 16px;border-left:4px solid __ACCENT__;
-  border-radius:0 10px 10px 0;background:rgba(__RGB__,.09);
+  border-radius:0 10px 10px 0;background:rgba(__RGB__,var(--quote-alpha));
   font-size:18px;line-height:1.7;color:var(--body);
   display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .why b{color:__ACCENT__;font-weight:800;letter-spacing:.02em}

@@ -7,11 +7,12 @@
 //!
 //! ## 两条推送线并行
 //!
-//! **实时快报**（`realtime.rs`）：默认每 60 秒条件轮询一次全量动态池，
-//! 有效资讯进池就发，延迟通常在 1 分钟左右——新闻的即时性由这条线负责。
+//! **实时快报**（`realtime.rs`）：默认每 60 秒条件轮询一次精选动态池，
+//! 精选资讯进池就发，延迟通常在 1 分钟左右——新闻的即时性由这条线负责。
 //! AIHOT 没有 Webhook / 流式订阅，「实时」只能靠带 `ETag` 的条件轮询逼近，
 //! 没有新内容的轮次服务端只回一个 304，几乎不产生流量。
-//! 默认以完整、及时为先：全分类、全天候、按上游允许的 60 秒下限轮询。
+//! 默认以低干扰为先：只推精选、全分类、按上游允许的 60 秒下限轮询；
+//! 确实需要完整信息流时，可用 `/ai实时模式 全部` 临时切回全量池。
 //! 基线、去重与持久待发队列负责避免重复和丢失；单批与小时容量保留宽松上限，
 //! 防止异常数据造成失控刷屏，详见 `realtime.rs` 顶部说明。
 //!
@@ -24,7 +25,7 @@
 //!
 //! | 时间 | 插件 | 内容 |
 //! | --- | --- | --- |
-//! | 全天 | ai_news | 实时快报（全量池有新条目就推，默认不设静默） |
+//! | 全天 | ai_news | 实时快报（精选池有新条目就推，默认不设静默） |
 //! | 08:20 | ai_news | AI 日报（当期日报，同一期只推一次） |
 //! | 09:00 | stats | 早安回顾（昨日） |
 //! | 10:00 周一 | stats | 上周回顾 |
@@ -58,6 +59,7 @@
 //!   /ai推送开启 · /ai推送关闭   不带参数时管理当前会话
 //!   /ai推送列表 · /ai推送状态 · /ai推送重置
 //!   /ai实时开启 · /ai实时关闭   当前或指定目标只收定时档还是也收实时快报
+//!   /ai实时模式 <精选|全部>      控制实时快报读取精选池还是全量池
 //!   /ai分类 <模型|产品|行业|论文|技巧|全部|默认>   设置当前目标
 //!   /ai静默 <HH:MM-HH:MM|关闭|默认>              设置当前目标
 //!   /设置 ai_news card_theme auto|light|dark   自动 / 白天 / 夜晚阅读主题
@@ -195,9 +197,12 @@ pub struct AiNewsConfig {
     pub leaderboard_cache_minutes: u64,
 
     // —— 实时推送 ——
-    /// 实时快报总开关：全量动态池一有有效资讯就推，不必等下一个定时档
+    /// 实时快报总开关：动态池一有有效资讯就推，不必等下一个定时档
     #[serde(default = "default_true")]
     pub realtime_enabled: bool,
+    /// 实时快报来源：selected（精选，默认低干扰）/ all（全量）
+    #[serde(default = "default_realtime_mode")]
+    pub realtime_mode: String,
     /// 轮询间隔（秒）。低于 60 秒无意义：AIHOT 的 CDN 缓存就是 60 秒，
     /// 更密只会拿到同一份副本
     #[serde(default = "default_realtime_interval")]
@@ -306,6 +311,9 @@ fn default_leaderboard_cache_minutes() -> u64 {
 fn default_realtime_interval() -> u64 {
     60
 }
+fn default_realtime_mode() -> String {
+    "selected".to_string()
+}
 fn default_realtime_max_age() -> i64 {
     24 * 60
 }
@@ -360,6 +368,7 @@ impl Default for AiNewsConfig {
             leaderboard_max_items: default_leaderboard_items(),
             leaderboard_cache_minutes: default_leaderboard_cache_minutes(),
             realtime_enabled: true,
+            realtime_mode: default_realtime_mode(),
             realtime_interval_seconds: default_realtime_interval(),
             realtime_max_age_minutes: default_realtime_max_age(),
             realtime_max_items: default_realtime_max_items(),
@@ -439,6 +448,22 @@ impl AiNewsConfig {
         match target {
             PushTarget::Group(id) => self.realtime_muted_groups.contains(&id),
             PushTarget::Private(id) => self.realtime_muted_private_users.contains(&id),
+        }
+    }
+
+    /// 未知值安全回退到精选，避免手改配置时意外开启全量轰炸。
+    pub(super) fn realtime_uses_all(&self) -> bool {
+        matches!(
+            self.realtime_mode.trim().to_ascii_lowercase().as_str(),
+            "all" | "full" | "全部" | "全量"
+        )
+    }
+
+    fn realtime_mode_label(&self) -> &'static str {
+        if self.realtime_uses_all() {
+            "全部资讯"
+        } else {
+            "精选资讯"
         }
     }
 }
@@ -756,6 +781,7 @@ pub fn handle(
             "ai推送重置",
             "ai实时开启",
             "ai实时关闭",
+            "ai实时模式",
             "ai分类",
             "ai静默",
         ] {
@@ -982,6 +1008,46 @@ async fn handle_push_admin(
             None => None,
         };
         return render_status(ctx, &config, target, pending);
+    }
+
+    if trigger == "ai实时模式" {
+        let normalized = match arg.trim().to_ascii_lowercase().as_str() {
+            "精选" | "精选资讯" | "selected" | "curated" => "selected",
+            "全部" | "全量" | "全部资讯" | "all" | "full" => "all",
+            "" | "状态" => {
+                return format!(
+                    "当前实时快报仅推送{}。用法：/ai实时模式 <精选|全部>。",
+                    config.realtime_mode_label()
+                );
+            }
+            _ => return "模式无效。用法：/ai实时模式 <精选|全部>。".to_string(),
+        };
+        if (normalized == "all") == config.realtime_uses_all() {
+            return format!("实时快报当前已经只推送{}。", config.realtime_mode_label());
+        }
+
+        let mode = normalized.to_string();
+        let targets = config.targets();
+        let result = update_config::<AiNewsConfig, _>(ctx, "ai_news", move |mut cfg| {
+            cfg.realtime_mode = mode;
+            cfg
+        })
+        .await;
+        return match result {
+            Ok(_) => {
+                // 切换数据源时丢弃旧来源留下的待发队列，并从此刻重新建基线，
+                // 避免从全量切到精选后仍把先前积压的普通资讯发出去。
+                for target in targets {
+                    state::align_realtime_baseline(target.state_id()).await;
+                }
+                if normalized == "all" {
+                    "⚠️ 实时快报已切换为全部资讯；消息量会明显增加，可随时用 /ai实时模式 精选 恢复低干扰模式。".to_string()
+                } else {
+                    "✅ 实时快报已切换为精选资讯，并已清理旧待发队列；日报、精选速递与热点榜不受影响。".to_string()
+                }
+            }
+            Err(e) => format!("❌ 保存配置失败：{}", e),
+        };
     }
 
     let target = if matches!(trigger, "ai分类" | "ai静默") {
@@ -1394,7 +1460,8 @@ fn render_status(
             }
         ));
         out.push_str(&format!(
-            "   每{}查一次 · 保鲜 {} 分钟\n   单次至多 {} 条 · 每小时至多 {} 次\n   静默时段：{}\n",
+            "   来源：{}（/ai实时模式 精选|全部）\n   每{}查一次 · 保鲜 {} 分钟\n   单次至多 {} 条 · 每小时至多 {} 次\n   静默时段：{}\n",
+            config.realtime_mode_label(),
             interval_label(
                 config
                     .realtime_interval_seconds
@@ -1459,7 +1526,7 @@ fn render_status(
     }
     out.push('\n');
     out.push_str(&format!(
-        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai推送添加/删除 <群|私聊> <ID>\n   {p}ai推送列表 · {p}ai实时开启/关闭 · {p}ai分类 · {p}ai静默\n",
+        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai推送添加/删除 <群|私聊> <ID>\n   {p}ai推送列表 · {p}ai实时开启/关闭 · {p}ai实时模式 精选|全部\n   {p}ai分类 · {p}ai静默\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);
@@ -1526,6 +1593,8 @@ mod tests {
         assert!(config.show_reason && config.show_original_link && config.image_enabled);
         assert!(config.daily_enabled && config.brief_enabled && config.hot_topics_enabled);
         assert!(config.realtime_enabled);
+        assert_eq!(config.realtime_mode, "selected");
+        assert!(!config.realtime_uses_all());
         assert_eq!(config.realtime_interval_seconds, 60);
         assert_eq!(config.realtime_max_items, 30);
         assert_eq!(config.realtime_max_per_hour, 60);
@@ -1545,6 +1614,7 @@ mod tests {
         assert_eq!(parsed.card_theme, "auto");
         // 实时快报默认开启，且轮询间隔不低于 AIHOT 的缓存时长
         assert!(parsed.realtime_enabled);
+        assert_eq!(parsed.realtime_mode, "selected");
         assert!(parsed.realtime_interval_seconds >= realtime::MIN_INTERVAL_SECONDS);
         assert!(parsed.realtime_muted_groups.is_empty());
     }
@@ -1565,6 +1635,7 @@ mod tests {
         let parsed: AiNewsConfig = legacy.try_into().expect("缺字段时应退回默认值");
         assert_eq!(parsed.groups, vec![123]);
         assert!(parsed.realtime_enabled);
+        assert_eq!(parsed.realtime_mode, default_realtime_mode());
         assert_eq!(parsed.realtime_max_items, default_realtime_max_items());
         assert_eq!(parsed.realtime_quiet_start, default_quiet_start());
         assert_eq!(parsed.card_theme, default_card_theme());
@@ -1587,6 +1658,19 @@ mod tests {
         cfg.realtime_quiet_start = "08:00".into();
         cfg.realtime_quiet_end = "08:00".into();
         assert!(quiet_label(&cfg, None).contains("不设"));
+    }
+
+    #[test]
+    fn realtime_mode_only_enables_all_for_explicit_values() {
+        let mut cfg = AiNewsConfig::default();
+        for mode in ["selected", "curated", "精选", "unexpected", ""] {
+            cfg.realtime_mode = mode.into();
+            assert!(!cfg.realtime_uses_all(), "{mode} 不应开启全量模式");
+        }
+        for mode in ["all", "FULL", "全部", "全量"] {
+            cfg.realtime_mode = mode.into();
+            assert!(cfg.realtime_uses_all(), "{mode} 应开启全量模式");
+        }
     }
 
     #[test]
@@ -1678,14 +1762,15 @@ mod tests {
 
         #[tokio::test]
         #[ignore = "需要访问 aihot.virxact.com"]
-        async fn realtime_endpoint_reads_all_pool() {
+        async fn realtime_endpoint_defaults_to_selected_pool() {
             let cfg = config();
             let items = pusher::fetch_realtime_for_push(&cfg, api::Poll::Fresh)
                 .await
-                .expect("全量动态接口应可访问")
+                .expect("精选动态接口应可访问")
                 .expect("非条件请求必然带响应体");
 
-            assert!(!items.is_empty(), "过去 24 小时的全量动态不应为空");
+            assert!(!cfg.realtime_uses_all(), "默认实时模式应为精选");
+            assert!(!items.is_empty(), "过去 24 小时的精选动态不应为空");
             assert!(items.len() <= 100, "实时抓取不应超过接口上限");
             assert!(
                 items.iter().all(|i| i.dedupe_key().is_some()),

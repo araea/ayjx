@@ -85,6 +85,7 @@ const SETTINGS: &[SettingSpec] = &[
     s("ai_news", "limit", "资讯推送条数", "单次推送最多展示的资讯条数；默认 30 以兼顾完整性", Kind::Int, "30"),
     s("ai_news", "min_items", "资讯推送阈值", "去重后新条目少于此值则本轮不推送", Kind::Int, "1"),
     s("ai_news", "mode", "手动查询范围", "仅影响 /ai资讯：selected 查精选（推荐），all 查全部；主动推送策略固定", Kind::Str, "selected"),
+    s("ai_news", "realtime_mode", "实时资讯范围", "selected 仅推精选（推荐、低干扰），all 推送全部资讯；也可用 /ai实时模式切换", Kind::Str, "selected"),
     s("ai_news", "window", "资讯时间窗", "抓取范围：24h 或 7d", Kind::Str, "24h"),
     s("ai_news", "category", "资讯分类过滤", "ai-models/ai-products/industry/paper/tip，留空为不限", Kind::Str, ""),
     s("ai_news", "show_reason", "显示推荐理由", "是否展示 AIHOT 的推荐理由", Kind::Bool, "true"),
@@ -101,7 +102,7 @@ const SETTINGS: &[SettingSpec] = &[
     s("ai_news", "hot_topics_enabled", "热点榜推送", "每天推送当前 AI 热点榜；即时生效", Kind::Bool, "true"),
     s("ai_news", "hot_topics_time", "热点榜时间", "热点榜推送时间（HH:MM:SS），需重启后生效", Kind::Str, "21:40:00"),
     // 实时快报：以下各项均即时生效，无需重启
-    s("ai_news", "realtime_enabled", "实时快报", "全量动态池一有有效资讯就推，不必等定时档", Kind::Bool, "true"),
+    s("ai_news", "realtime_enabled", "实时快报", "配置的数据源一有有效资讯就推，不必等定时档", Kind::Bool, "true"),
     s("ai_news", "realtime_interval_seconds", "实时轮询间隔", "每隔多少秒查一次新资讯；默认采用上游允许的 60 秒下限", Kind::Int, "60"),
     s("ai_news", "realtime_max_age_minutes", "实时保鲜期", "只推收录时间在此分钟数内的条目；默认覆盖最近 24 小时", Kind::Int, "1440"),
     s("ai_news", "realtime_max_items", "实时单次条数", "一次实时推送最多几条，多的进入持久队列", Kind::Int, "30"),

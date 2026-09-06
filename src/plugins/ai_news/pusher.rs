@@ -14,8 +14,8 @@ use crate::message::Message;
 use rand::RngExt;
 use std::time::Duration;
 
-/// 两条推送线的数据源是产品语义，不跟随通用 `mode` 配置：
-/// 实时线追求完整与及时，定时线负责精选回顾。
+/// 两条推送线的数据源是产品语义，不跟随手动查询的通用 `mode` 配置：
+/// 定时线固定精选；实时线默认精选，也可显式切到全量。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PushFeed {
     Realtime,
@@ -30,10 +30,18 @@ impl PushFeed {
         }
     }
 
-    fn request_limit(self, cfg: &AiNewsConfig, has_group_override: bool) -> u32 {
-        match self {
+    fn request_limit(
+        self,
+        cfg: &AiNewsConfig,
+        has_group_override: bool,
+        realtime: bool,
+    ) -> u32 {
+        if realtime {
             // 实时抓取固定取接口上限，再交给持久队列分批发送。这里若沿用展示
             // 条数，突发时排在 limit 之后的条目会因下一轮 304 而永久漏掉。
+            return 100;
+        }
+        match self {
             Self::Realtime => 100,
             Self::Curated if has_group_override => cfg.limit.saturating_mul(5).clamp(1, 100),
             Self::Curated => cfg.limit.clamp(1, 100),
@@ -299,6 +307,7 @@ async fn fetch_feed_for_push(
     cfg: &AiNewsConfig,
     poll: api::Poll,
     feed: PushFeed,
+    realtime: bool,
 ) -> Result<Option<Vec<Item>>, api::ApiError> {
     let has_group_override = cfg
         .group_preferences
@@ -315,7 +324,7 @@ async fn fetch_feed_for_push(
             Some(category)
         },
         None,
-        feed.request_limit(cfg, has_group_override),
+        feed.request_limit(cfg, has_group_override, realtime),
         cfg.request_timeout_seconds,
         poll,
     )
@@ -327,15 +336,21 @@ pub async fn fetch_brief_for_push(
     cfg: &AiNewsConfig,
     poll: api::Poll,
 ) -> Result<Option<Vec<Item>>, api::ApiError> {
-    fetch_feed_for_push(cfg, poll, PushFeed::Curated).await
+    fetch_feed_for_push(cfg, poll, PushFeed::Curated, false).await
 }
 
-/// 实时快报固定读取全部公开动态，并以接口上限抓取，避免突发资讯遗漏。
+/// 实时快报默认读取精选动态；显式配置为 `all` 时读取全部公开动态。
+/// 两种模式都以接口上限抓取，避免突发资讯遗漏。
 pub async fn fetch_realtime_for_push(
     cfg: &AiNewsConfig,
     poll: api::Poll,
 ) -> Result<Option<Vec<Item>>, api::ApiError> {
-    fetch_feed_for_push(cfg, poll, PushFeed::Realtime).await
+    let feed = if cfg.realtime_uses_all() {
+        PushFeed::Realtime
+    } else {
+        PushFeed::Curated
+    };
+    fetch_feed_for_push(cfg, poll, feed, true).await
 }
 
 pub(super) fn item_matches_target(cfg: &AiNewsConfig, target: PushTarget, item: &Item) -> bool {
@@ -600,7 +615,7 @@ mod tests {
 
     #[test]
     fn realtime_and_scheduled_feeds_have_distinct_fixed_policies() {
-        // 即使手动查询配置改成 all，定时推送仍然只取精选；实时则始终取全量。
+        // 即使手动查询配置改成 all，主动推送仍遵循各自独立的数据源策略。
         let cfg = AiNewsConfig {
             limit: 8,
             mode: "all".into(),
@@ -609,8 +624,9 @@ mod tests {
 
         assert_eq!(PushFeed::Realtime.mode(), "all");
         assert_eq!(PushFeed::Curated.mode(), "selected");
-        assert_eq!(PushFeed::Realtime.request_limit(&cfg, false), 100);
-        assert_eq!(PushFeed::Curated.request_limit(&cfg, false), 8);
-        assert_eq!(PushFeed::Curated.request_limit(&cfg, true), 40);
+        assert_eq!(PushFeed::Realtime.request_limit(&cfg, false, true), 100);
+        assert_eq!(PushFeed::Curated.request_limit(&cfg, false, false), 8);
+        assert_eq!(PushFeed::Curated.request_limit(&cfg, true, false), 40);
+        assert_eq!(PushFeed::Curated.request_limit(&cfg, false, true), 100);
     }
 }
