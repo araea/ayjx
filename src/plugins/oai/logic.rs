@@ -1,7 +1,7 @@
 use super::data::Manager;
 use super::parser::{Action, Command, Scope};
 use super::types::{Agent, ChatMessage};
-use super::utils::{escape_markdown_special, format_export_txt, format_history, render_md};
+use super::utils::{escape_markdown_special, format_export_txt, format_history};
 use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
@@ -45,6 +45,21 @@ async fn reply(
     text_mode: bool,
     header: &str,
 ) {
+    reply_card(ctx, writer, event, text, text_mode, header, &[], None).await;
+}
+
+/// 把回复渲染成卡片图片发出；`text_mode` 或渲染失败时退回纯文本。
+#[allow(clippy::too_many_arguments)]
+async fn reply_card(
+    ctx: &Context,
+    writer: &LockedWriter,
+    event: &MessageEvent<'_>,
+    text: &str,
+    text_mode: bool,
+    header: &str,
+    sources: &[super::agent::Source],
+    footer: Option<String>,
+) {
     let msg = Message::new().reply(event.message_id());
 
     if text_mode {
@@ -58,7 +73,14 @@ async fn reply(
         .await;
         return;
     }
-    match render_md(text, header).await {
+
+    let card = super::render::Card {
+        title: header,
+        markdown: text,
+        sources,
+        footer,
+    };
+    match super::render::render_card(card).await {
         Ok(b64) => {
             let _ = send_msg(
                 ctx,
@@ -69,7 +91,8 @@ async fn reply(
             )
             .await;
         }
-        Err(_) => {
+        Err(error) => {
+            warn!(target: "Plugin/OAI", "回复卡片渲染失败，退回纯文本：{error:#}");
             let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
             let clean_text = re.replace_all(text, "[图片渲染失败]").to_string();
             let _ = send_msg(
@@ -109,9 +132,45 @@ pub(crate) async fn to_data_url(url: &str) -> String {
     if url.starts_with("data:") {
         return url.to_string();
     }
+    // 历史里的图片每一轮都会重新入参，没有缓存就意味着每轮重下一遍：多图会话里
+    // 这部分等待往往比模型本身还久。
+    if let Some(cached) = cached_data_url(url) {
+        return cached;
+    }
     match download_image_to_data_url(url).await {
-        Some(data_url) => data_url,
+        Some(data_url) => {
+            remember_data_url(url, &data_url);
+            data_url
+        }
         None => url.to_string(),
+    }
+}
+
+/// 远程图片 → data URL 的进程内缓存。
+///
+/// QQ 图片链接带签名且很快失效，缓存同时兼作「这张图还能用」的保底：链接过期后
+/// 历史里的图仍然可以继续参与对话。容量到顶时整体清空——命中率远比精确淘汰重要，
+/// 也省下维护 LRU 链表的复杂度。
+fn data_url_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 缓存条目上限，按每张图数 MB 的量级留出余量。
+const DATA_URL_CACHE_CAPACITY: usize = 64;
+
+fn cached_data_url(url: &str) -> Option<String> {
+    data_url_cache().lock().ok()?.get(url).cloned()
+}
+
+fn remember_data_url(url: &str, data_url: &str) {
+    if let Ok(mut cache) = data_url_cache().lock() {
+        if cache.len() >= DATA_URL_CACHE_CAPACITY {
+            cache.clear();
+        }
+        cache.insert(url.to_string(), data_url.to_string());
     }
 }
 
@@ -175,16 +234,16 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
 fn build_chat_request(
     model: &str,
     messages: Vec<ChatCompletionRequestMessage>,
-    with_tools: bool,
+    harness: Option<super::harness::HarnessConfig>,
 ) -> anyhow::Result<CreateChatCompletionRequest> {
     let mut builder = CreateChatCompletionRequestArgs::default();
     builder.model(model).messages(messages);
-    if with_tools {
+    if let Some(harness) = harness {
         // Chat Completions 的工具支持是跨模型/中转的公共能力，而 reasoning_effort
         // 属于模型和端点相关的可选扩展。不要把后者附加到工具请求：部分服务（如
         // Luna）只在 Responses API 支持两者组合，且同一模型在不同中转上的行为也
         // 可能不同。让服务端采用该模型的默认推理策略是最可移植的请求契约。
-        builder.tools(super::harness::tool_definitions());
+        builder.tools(super::harness::chat_tool_definitions(harness));
     }
     Ok(builder.build()?)
 }
@@ -196,7 +255,7 @@ async fn complete(
     harness: Option<super::harness::HarnessConfig>,
 ) -> anyhow::Result<String> {
     for _ in 0..super::harness::MAX_TOOL_ROUNDS {
-        let request = build_chat_request(model, messages.clone(), harness.is_some())?;
+        let request = build_chat_request(model, messages.clone(), harness)?;
         let response = client.chat().create(request).await?;
         let choice = response
             .choices
@@ -224,13 +283,13 @@ async fn complete(
         let executions = tool_calls.iter().map(|call| async move {
             match call {
                 ChatCompletionMessageToolCalls::Function(call) => {
-                    let output = super::harness::execute_tool(
+                    let run = super::harness::execute_tool(
                         &call.function.name,
                         &call.function.arguments,
                         harness,
                     )
                     .await;
-                    (call.id.clone(), output)
+                    (call.id.clone(), run.output)
                 }
                 ChatCompletionMessageToolCalls::Custom(call) => (
                     call.id.clone(),
@@ -356,14 +415,358 @@ async fn chat(
         generating.set_generating(name, is_priv_ctx, &uid, true);
     }
 
+    let api_base = super::utils::openai_api_base(&api.0);
     let client = Client::with_config(
         OpenAIConfig::new()
-            .with_api_base(super::utils::openai_api_base(&api.0))
-            .with_api_key(api.1),
+            .with_api_base(api_base.clone())
+            .with_api_key(api.1.clone()),
     )
     .with_http_client(crate::http::client());
-    let mut msgs: Vec<ChatCompletionRequestMessage> = vec![];
 
+    let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+    let harness = oai.harness_for(name, is_priv_ctx);
+    let annotate = !event.is_manual_self();
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+    }
+
+    let started = std::time::Instant::now();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // 三件事在同一个任务里赛跑：出结果、到总预算、到进度提示时刻。用 select 而不是
+    // 另起任务，是因为发消息要用借来的 ctx/event，搬进 spawn 就得整套克隆一遍。
+    let work = respond(
+        &client,
+        &agent,
+        &hist,
+        harness,
+        &oai,
+        &api_base,
+        &api.1,
+        name,
+        progress_tx,
+    );
+    let mut work = std::pin::pin!(work);
+    let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
+    let notice_delay = harness.and_then(|_| oai.progress_notice());
+    let mut notice = std::pin::pin!(async move {
+        match notice_delay {
+            Some(delay) => tokio::time::sleep(delay).await,
+            None => std::future::pending::<()>().await,
+        }
+    });
+    let mut noticed = false;
+
+    let outcome = loop {
+        tokio::select! {
+            result = &mut work => break Some(result),
+            _ = &mut budget => break None,
+            _ = &mut notice, if !noticed => {
+                noticed = true;
+                let mut done = Vec::new();
+                while let Ok(progress) = progress_rx.try_recv() {
+                    done.push(match progress {
+                        super::agent::Progress::HostedSearch(query) => format!("搜索「{query}」"),
+                        super::agent::Progress::Tool(summary) => summary,
+                    });
+                }
+                let detail = if done.is_empty() {
+                    "正在思考".to_string()
+                } else {
+                    format!("已完成 {}", done.join("、"))
+                };
+                reply_text(
+                    ctx,
+                    writer,
+                    &event,
+                    format!("⏳ 还在处理（{detail}），稍等一下…"),
+                )
+                .await;
+            }
+        }
+    };
+
+    if !temp_mode {
+        mgr.generating
+            .write()
+            .await
+            .set_generating(name, is_priv_ctx, &uid, false);
+    }
+
+    match outcome {
+        None => {
+            reply_text(
+                ctx,
+                writer,
+                &event,
+                format!(
+                    "⏳ 请求超时：模型响应超过 {} 秒，已强制停止。",
+                    oai.request_timeout().as_secs()
+                ),
+            )
+            .await;
+        }
+        Some(Err(error)) => {
+            reply_text(ctx, writer, &event, format!("❌ API 错误：{error:#}")).await;
+        }
+        Some(Ok(reply_data)) => {
+            let content = reply_data.text;
+
+            // 期间被「智能体!」打断或历史被改写过，这次结果就作废。
+            if !temp_mode {
+                let stale = {
+                    let c = mgr.config.read().await;
+                    c.agents
+                        .iter()
+                        .find(|a| a.name == name)
+                        .is_some_and(|a| a.generation_id != gen_id)
+                };
+                if stale {
+                    if annotate {
+                        let _ = api::set_msg_emoji_like(
+                            ctx,
+                            writer.clone(),
+                            event.message_id(),
+                            124,
+                            false,
+                        )
+                        .await;
+                    }
+                    return;
+                }
+            }
+
+            let msg_index = if temp_mode {
+                0
+            } else {
+                let c = mgr.config.read().await;
+                c.agents
+                    .iter()
+                    .find(|a| a.name == name)
+                    .map(|a| a.history(is_priv_ctx, &uid).len() + 1)
+                    .unwrap_or(0)
+            };
+
+            if !temp_mode {
+                let mut c = mgr.config.write().await;
+                if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
+                    a.history_mut(is_priv_ctx, &uid)
+                        .push(ChatMessage::new("assistant", &content, vec![]));
+                }
+                mgr.save(&c);
+            }
+
+            let image_urls = extract_image_urls(&content);
+            let header = if temp_mode {
+                format!("{} (临时会话)", agent.name)
+            } else {
+                format!(
+                    "{} #{}回复{}",
+                    agent.name,
+                    msg_index,
+                    if cmd.private_reply { " (私有)" } else { "" }
+                )
+            };
+
+            let display_content = if !image_urls.is_empty() && !cmd.text_mode {
+                let urls_text = image_urls
+                    .iter()
+                    .map(|u| {
+                        if u.starts_with("data:") {
+                            "- [Base64 Image]".to_string()
+                        } else {
+                            format!("- {}", u)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}\n\n---\n**图片链接：**\n{}", content, urls_text)
+            } else {
+                content.clone()
+            };
+
+            let reply_text_content = if cmd.text_mode && !image_urls.is_empty() {
+                let re = Regex::new(r"!\[.*?\]\(((?:https?://|data:image/)[^\s\)]+)\)").unwrap();
+                re.replace_all(&content, |caps: &regex::Captures| {
+                    let url = &caps[1];
+                    if url.starts_with("data:") {
+                        "[图片]".to_string()
+                    } else {
+                        url.to_string()
+                    }
+                })
+                .to_string()
+            } else {
+                display_content.clone()
+            };
+
+            // 一两句话没必要走一次浏览器截图：文本更快，也方便直接复制。
+            let plain = cmd.text_mode
+                || (image_urls.is_empty()
+                    && reply_data.sources.is_empty()
+                    && is_plain_enough(&content, oai.plain_text_max_chars()));
+            let footer = (oai.show_trace_footer() && !plain).then(|| {
+                let mut footer = format!(
+                    "{} · {}",
+                    agent.model,
+                    super::agent::format_elapsed(started)
+                );
+                if !reply_data.trace.is_empty() {
+                    footer.push_str(" · ");
+                    footer.push_str(&reply_data.trace.join(" | "));
+                }
+                footer
+            });
+
+            reply_card(
+                ctx,
+                writer,
+                &event,
+                &reply_text_content,
+                plain,
+                &header,
+                &reply_data.sources,
+                footer,
+            )
+            .await;
+
+            for url in &image_urls {
+                if url.starts_with("data:") {
+                    if let Some(base64_data) = url.split(',').nth(1) {
+                        let _ = send_msg(
+                            ctx,
+                            writer.clone(),
+                            event.group_id(),
+                            Some(event.user_id()),
+                            Message::new().image(format!("base64://{}", base64_data)),
+                        )
+                        .await;
+                    }
+                } else {
+                    let _ = send_msg(
+                        ctx,
+                        writer.clone(),
+                        event.group_id(),
+                        Some(event.user_id()),
+                        Message::new().image(url),
+                    )
+                    .await;
+                }
+            }
+
+            for url in extract_video_urls(&content) {
+                let _ = send_msg(
+                    ctx,
+                    writer.clone(),
+                    event.group_id(),
+                    Some(event.user_id()),
+                    Message::new().video(url),
+                )
+                .await;
+            }
+        }
+    }
+
+    if annotate {
+        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    }
+}
+
+/// 一次成功回复的产物。
+struct Reply {
+    text: String,
+    sources: Vec<super::agent::Source>,
+    trace: Vec<String>,
+}
+
+/// 选择请求链路并取回最终文本。
+///
+/// 工具房间优先走 Responses：托管检索、推理档位与跨轮推理态都只在那条路上可用。
+/// 端点没有实现 `/responses` 时回落到 Chat Completions，用户侧无感。
+#[allow(clippy::too_many_arguments)]
+async fn respond(
+    client: &Client<OpenAIConfig>,
+    agent: &Agent,
+    hist: &[ChatMessage],
+    harness: Option<super::harness::HarnessConfig>,
+    oai: &super::OaiConfig,
+    api_base: &str,
+    api_key: &str,
+    room: &str,
+    progress: tokio::sync::mpsc::UnboundedSender<super::agent::Progress>,
+) -> anyhow::Result<Reply> {
+    if let Some(harness) = harness {
+        let request = super::agent::AgentRequest {
+            api_base: api_base.to_string(),
+            api_key: api_key.to_string(),
+            model: agent.model.clone(),
+            instructions: super::agent::build_instructions(
+                &agent.system_prompt,
+                harness.hosted_web_search,
+                room,
+            ),
+            input: build_agent_input(hist).await,
+            harness,
+            reasoning_effort: oai.effort(),
+            cache_key: Some(format!("ayjx-oai:{room}")),
+            progress: Some(progress),
+        };
+        match super::agent::run(request).await {
+            Ok(outcome) => {
+                return Ok(Reply {
+                    text: outcome.text,
+                    sources: outcome.sources,
+                    trace: outcome.trace,
+                });
+            }
+            Err(super::agent::AgentError::Unsupported(reason)) => {
+                warn!(target: "Plugin/OAI", "Responses 不可用，回落到 Chat Completions：{reason}");
+            }
+            Err(error) => return Err(anyhow::anyhow!("{error}")),
+        }
+    }
+
+    let msgs = build_chat_messages(agent, hist).await;
+    Ok(Reply {
+        text: complete(client, &agent.model, msgs, harness).await?,
+        sources: Vec::new(),
+        trace: Vec::new(),
+    })
+}
+
+/// 把房间历史转成 Responses 输入项。系统提示走 `instructions`，不占输入位。
+async fn build_agent_input(hist: &[ChatMessage]) -> Vec<serde_json::Value> {
+    let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
+    let mut items = Vec::with_capacity(hist.len());
+    for message in hist {
+        match message.role.as_str() {
+            "user" => {
+                let images = resolve_images(&message.images).await;
+                if let Some(item) = super::agent::user_item(&message.content, &images) {
+                    items.push(item);
+                }
+            }
+            "assistant" => {
+                // 历史里的 base64 图片重放一遍只会撑爆上下文，留个占位即可。
+                let clean = re.replace_all(&message.content, "[Image Created]");
+                if let Some(item) = super::agent::assistant_item(&clean) {
+                    items.push(item);
+                }
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+/// 把房间历史转成 Chat Completions 消息。
+async fn build_chat_messages(
+    agent: &Agent,
+    hist: &[ChatMessage],
+) -> Vec<ChatCompletionRequestMessage> {
+    let mut msgs: Vec<ChatCompletionRequestMessage> = Vec::new();
+
+    // 少数图像模型不接受 system 角色，只能把提示词并进首条用户消息。
     let model_lower = agent.model.to_lowercase();
     let force_user_role_for_system = [
         "nano-banana",
@@ -373,13 +776,11 @@ async fn chat(
     .iter()
     .any(|kw| model_lower.contains(kw));
 
-    let mut pending_sys_prompt = if !agent.system_prompt.is_empty() {
-        Some(agent.system_prompt.clone())
-    } else {
-        None
-    };
+    let mut pending_sys_prompt = (!agent.system_prompt.is_empty()).then(|| agent.system_prompt.clone());
 
-    if !force_user_role_for_system && let Some(sp) = pending_sys_prompt.take() {
+    if !force_user_role_for_system
+        && let Some(sp) = pending_sys_prompt.take()
+    {
         msgs.push(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(sp)
@@ -390,7 +791,7 @@ async fn chat(
     }
 
     let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
-    for m in &hist {
+    for m in hist {
         if m.role == "user" {
             let mut parts = Vec::new();
 
@@ -413,8 +814,7 @@ async fn chat(
                         .into(),
                 );
             }
-            for url in &m.images {
-                let data_url = to_data_url(url).await;
+            for data_url in resolve_images(&m.images).await {
                 parts.push(
                     ChatCompletionRequestMessageContentPartImageArgs::default()
                         .image_url(ImageUrlArgs::default().url(data_url).build().unwrap())
@@ -474,194 +874,37 @@ async fn chat(
                 .into(),
         );
     }
+    msgs
+}
 
-    let harness = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
-        .harness_for(name, is_priv_ctx);
-    let annotate = !event.is_manual_self();
-    if annotate {
-        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
+/// 并发解析一条消息里的全部图片地址。
+///
+/// 逐张串行下载会让多图历史在每一轮都白等一次网络往返；缓存则让同一张图在整个
+/// 会话里只下载一次。
+async fn resolve_images(urls: &[String]) -> Vec<String> {
+    futures_util::future::join_all(urls.iter().map(|url| to_data_url(url))).await
+}
+
+/// 短回复能否直接以纯文本发送。
+///
+/// 只要出现标题、列表、表格、代码块或链接，排版就有信息量，仍旧渲染卡片。
+fn is_plain_enough(text: &str, max_chars: usize) -> bool {
+    if max_chars == 0 || text.chars().count() > max_chars {
+        return false;
     }
-
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        complete(&client, &agent.model, msgs, harness),
-    )
-    .await
-    {
-        Err(_) => {
-            if !temp_mode {
-                mgr.generating
-                    .write()
-                    .await
-                    .set_generating(name, is_priv_ctx, &uid, false);
-            }
-            reply_text(
-                ctx,
-                writer,
-                &event,
-                "⏳ 请求超时：模型响应时间超过 5 分钟，已强制停止。",
-            )
-            .await;
-        }
-        Ok(result) => match result {
-            Ok(content) => {
-                if !temp_mode {
-                    mgr.generating
-                        .write()
-                        .await
-                        .set_generating(name, is_priv_ctx, &uid, false);
-                }
-
-                if !temp_mode {
-                    let c = mgr.config.read().await;
-                    if let Some(a) = c.agents.iter().find(|a| a.name == name)
-                        && a.generation_id != gen_id
-                    {
-                        drop(c);
-                        if annotate {
-                            let _ = api::set_msg_emoji_like(
-                                ctx,
-                                writer.clone(),
-                                event.message_id(),
-                                124,
-                                false,
-                            )
-                            .await;
-                        }
-                        return;
-                    }
-                }
-
-                {
-                    let msg_index = if temp_mode {
-                        0
-                    } else {
-                        let c = mgr.config.read().await;
-                        if let Some(a) = c.agents.iter().find(|a| a.name == name) {
-                            a.history(is_priv_ctx, &uid).len() + 1
-                        } else {
-                            0
-                        }
-                    };
-
-                    if !temp_mode {
-                        let mut c = mgr.config.write().await;
-                        if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
-                            a.history_mut(is_priv_ctx, &uid).push(ChatMessage::new(
-                                "assistant",
-                                &content,
-                                vec![],
-                            ));
-                        }
-                        mgr.save(&c);
-                    }
-
-                    let image_urls = extract_image_urls(&content);
-                    let header = if temp_mode {
-                        format!("{} (临时会话)", agent.name)
-                    } else {
-                        format!(
-                            "{} #{}回复{}",
-                            agent.name,
-                            msg_index,
-                            if cmd.private_reply { " (私有)" } else { "" }
-                        )
-                    };
-
-                    let display_content = if !image_urls.is_empty() && !cmd.text_mode {
-                        let urls_text = image_urls
-                            .iter()
-                            .map(|u| {
-                                if u.starts_with("data:") {
-                                    "- [Base64 Image]".to_string()
-                                } else {
-                                    format!("- {}", u)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("{}\n\n---\n**图片链接：**\n{}", content, urls_text)
-                    } else {
-                        content.clone()
-                    };
-
-                    let reply_text_content = if cmd.text_mode && !image_urls.is_empty() {
-                        let re =
-                            Regex::new(r"!\[.*?\]\(((?:https?://|data:image/)[^\s\)]+)\)").unwrap();
-                        re.replace_all(&content, |caps: &regex::Captures| {
-                            let url = &caps[1];
-                            if url.starts_with("data:") {
-                                "[图片]".to_string()
-                            } else {
-                                url.to_string()
-                            }
-                        })
-                        .to_string()
-                    } else {
-                        display_content.clone()
-                    };
-
-                    reply(
-                        ctx,
-                        writer,
-                        &event,
-                        &reply_text_content,
-                        cmd.text_mode,
-                        &header,
-                    )
-                    .await;
-
-                    for url in &image_urls {
-                        if url.starts_with("data:") {
-                            if let Some(base64_data) = url.split(',').nth(1) {
-                                let _ = send_msg(
-                                    ctx,
-                                    writer.clone(),
-                                    event.group_id(),
-                                    Some(event.user_id()),
-                                    Message::new().image(format!("base64://{}", base64_data)),
-                                )
-                                .await;
-                            }
-                        } else {
-                            let _ = send_msg(
-                                ctx,
-                                writer.clone(),
-                                event.group_id(),
-                                Some(event.user_id()),
-                                Message::new().image(url),
-                            )
-                            .await;
-                        }
-                    }
-
-                    let video_urls = extract_video_urls(&content);
-                    for url in video_urls {
-                        let _ = send_msg(
-                            ctx,
-                            writer.clone(),
-                            event.group_id(),
-                            Some(event.user_id()),
-                            Message::new().video(url),
-                        )
-                        .await;
-                    }
-                }
-            }
-            Err(e) => {
-                {
-                    mgr.generating
-                        .write()
-                        .await
-                        .set_generating(name, is_priv_ctx, &uid, false);
-                }
-                reply_text(ctx, writer, &event, format!("❌ API 错误：{}", e)).await;
-            }
-        },
-    };
-    if annotate {
-        let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, false).await;
+    if text.contains("](") || text.contains("```") || text.contains('|') {
+        return false;
     }
+    !text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with('#')
+            || line.starts_with("- ")
+            || line.starts_with("* ")
+            || line.starts_with("> ")
+            || line
+                .split_once(". ")
+                .is_some_and(|(head, _)| !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()))
+    })
 }
 
 pub async fn execute(
@@ -1406,9 +1649,11 @@ pub async fn execute(
 ## 工具增强房间
 | 房间 | 能力 |
 |------|------|
-| `pi` | 公有对话可直接执行终端命令并搜索实时网页；终端无需确认 |
+| `pi` | 联网检索并打开网页核实、执行终端命令；终端无需确认 |
 
+> 工具：`web_search` 搜索、`web_fetch` 读取网页正文、`shell` 执行本机命令，同一轮内并发执行。
 > 高权限工具仅对 `[oai].harness_rooms` 中列出的公有房间生效，`&` 私有模式不启用工具。
+> 回复卡片底部会列出引用来源与本次耗时、工具轨迹。
 
 ## MJ 绘图房间
 | 房间模型 | 直接操作 |
@@ -1630,12 +1875,30 @@ mod tests {
                     .unwrap()
                     .into(),
             ],
-            true,
+            Some(super::super::harness::HarnessConfig {
+                shell_timeout_seconds: 30,
+                shell_max_output_bytes: 4096,
+                web_search_results: 5,
+                web_fetch_max_chars: 4000,
+                web_fetch_timeout_seconds: 20,
+                hosted_web_search: false,
+            }),
         )
         .unwrap();
         let serialized = serde_json::to_value(request).unwrap();
 
         assert!(serialized.get("tools").is_some());
         assert!(serialized.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn short_prose_skips_the_image_card() {
+        assert!(is_plain_enough("好的，已经帮你重启了。", 120));
+        assert!(!is_plain_enough("## 标题\n正文", 120));
+        assert!(!is_plain_enough("- 要点一\n- 要点二", 120));
+        assert!(!is_plain_enough("见 [文档](https://example.com)", 120));
+        assert!(!is_plain_enough(&"很长".repeat(200), 120));
+        // 置 0 表示始终渲染卡片。
+        assert!(!is_plain_enough("短", 0));
     }
 }

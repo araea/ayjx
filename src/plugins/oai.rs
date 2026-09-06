@@ -9,13 +9,17 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjec
 use std::sync::Arc;
 use toml::Value;
 
+pub mod agent;
 pub mod data;
 pub mod harness;
 pub mod logic;
 pub mod mj;
 pub mod parser;
+pub mod render;
+pub mod search;
 pub mod types;
 pub mod utils;
+pub mod webfetch;
 
 use data::MANAGER;
 
@@ -28,6 +32,24 @@ pub(crate) struct OaiConfig {
     shell_timeout_seconds: u64,
     shell_max_output_bytes: usize,
     web_search_results: usize,
+    /// 单次 `web_fetch` 返回给模型的正文字符上限。
+    web_fetch_max_chars: usize,
+    web_fetch_timeout_seconds: u64,
+    /// 优先使用服务端托管的 `web_search` 工具。移动网络下本机抓取公共搜索引擎
+    /// 几乎必被反爬拦截，托管检索才是稳定选项；端点不支持时会自动回落到本机搜索。
+    hosted_web_search: bool,
+    /// 工具房间的推理档位：`minimal` / `low` / `medium` / `high`，留空则用模型默认。
+    /// 群聊问答用 `low` 通常就够，等待时间明显更短。
+    reasoning_effort: String,
+    /// 单次回复的总时间预算。
+    request_timeout_seconds: u64,
+    /// 超过这个秒数还没出结果就先发一条进度提示；置 0 关闭。
+    progress_notice_seconds: u64,
+    /// 短回复直接以文本发送而不渲染图片的字符上限；置 0 表示始终渲染图片。
+    /// 一句话的答复走文本既快又便于复制。
+    plain_text_max_chars: usize,
+    /// 在回复卡片页脚展示模型、耗时与工具调用轨迹。
+    show_trace_footer: bool,
 }
 
 impl Default for OaiConfig {
@@ -38,6 +60,14 @@ impl Default for OaiConfig {
             shell_timeout_seconds: 300,
             shell_max_output_bytes: 64 * 1024,
             web_search_results: 8,
+            web_fetch_max_chars: 12_000,
+            web_fetch_timeout_seconds: 25,
+            hosted_web_search: true,
+            reasoning_effort: "low".to_string(),
+            request_timeout_seconds: 300,
+            progress_notice_seconds: 30,
+            plain_text_max_chars: 120,
+            show_trace_footer: true,
         }
     }
 }
@@ -56,7 +86,34 @@ impl OaiConfig {
             shell_timeout_seconds: self.shell_timeout_seconds.clamp(1, 3_600),
             shell_max_output_bytes: self.shell_max_output_bytes.clamp(1_024, 1024 * 1024),
             web_search_results: self.web_search_results.clamp(1, 20),
+            web_fetch_max_chars: self.web_fetch_max_chars.clamp(500, 40_000),
+            web_fetch_timeout_seconds: self.web_fetch_timeout_seconds.clamp(5, 120),
+            hosted_web_search: self.hosted_web_search,
         })
+    }
+
+    /// 归一化后的推理档位；无法识别的取值当作未设置。
+    pub(crate) fn effort(&self) -> Option<String> {
+        let effort = self.reasoning_effort.trim().to_ascii_lowercase();
+        matches!(effort.as_str(), "minimal" | "low" | "medium" | "high").then_some(effort)
+    }
+
+    pub(crate) fn request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.request_timeout_seconds.clamp(30, 1_800))
+    }
+
+    /// 进度提示的触发时刻；`None` 表示不提示。
+    pub(crate) fn progress_notice(&self) -> Option<std::time::Duration> {
+        (self.progress_notice_seconds > 0)
+            .then(|| std::time::Duration::from_secs(self.progress_notice_seconds.max(5)))
+    }
+
+    pub(crate) fn plain_text_max_chars(&self) -> usize {
+        self.plain_text_max_chars
+    }
+
+    pub(crate) fn show_trace_footer(&self) -> bool {
+        self.show_trace_footer
     }
 }
 

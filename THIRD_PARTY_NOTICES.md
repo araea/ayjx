@@ -1,7 +1,10 @@
 # Third-party notices
 
-The OAI harness design and credential-free search fallback were adapted from
-the MIT-licensed [oh-my-pi](https://github.com/can1357/oh-my-pi) project.
+The OAI harness design was adapted from the MIT-licensed
+[oh-my-pi](https://github.com/can1357/oh-my-pi) project: the tool-loop
+conventions, and the credential-free "public web" search aggregate — parallel
+fan-out across engines under soft/hard deadlines, with cross-engine consensus
+ranking — including its DuckDuckGo and Mojeek result parsers.
 
 ## oh-my-pi
 

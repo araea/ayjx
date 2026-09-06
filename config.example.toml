@@ -23,4 +23,22 @@ enabled = true
 harness_rooms = ["pi"]
 shell_timeout_seconds = 300
 shell_max_output_bytes = 65536
+# 本机兜底搜索返回的结果条数。
 web_search_results = 8
+# 单次 web_fetch 交给模型的正文字符上限，以及抓取超时。
+web_fetch_max_chars = 12000
+web_fetch_timeout_seconds = 25
+# 优先使用服务端托管的 web_search 工具。移动网络下本机抓取公共搜索引擎几乎必被
+# 反爬拦截，托管检索才稳定；端点不支持时会自动回落到本机多引擎搜索。
+hosted_web_search = true
+# 工具房间的推理档位：minimal / low / medium / high，留空用模型默认。
+# 群聊问答用 low 通常足够，等待时间明显更短。
+reasoning_effort = "low"
+# 单次回复的总时间预算（秒）。
+request_timeout_seconds = 300
+# 超过这个秒数还没出结果就先发一条进度提示；置 0 关闭。
+progress_notice_seconds = 30
+# 不含标题/列表/代码块的短回复直接发文本，不渲染图片；置 0 表示始终渲染图片。
+plain_text_max_chars = 120
+# 在回复卡片页脚显示模型、耗时与工具调用轨迹。
+show_trace_footer = true

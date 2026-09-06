@@ -1,12 +1,8 @@
 use crate::adapters::satori::{LockedWriter, api};
 use crate::event::Context;
-use cdp_html_shot::{Browser, CaptureOptions, Viewport};
-use pulldown_cmark::{Options, Parser, html};
 use regex::Regex;
 use simd_json::base::ValueAsScalar;
 use std::sync::OnceLock;
-use std::time::Duration;
-use tokio::time;
 
 pub static RE_API: OnceLock<Regex> = OnceLock::new();
 pub static RE_IDX: OnceLock<Regex> = OnceLock::new();
@@ -142,102 +138,6 @@ pub fn escape_markdown_special(s: &str) -> String {
         }
         Err(_) => s.to_string(),
     }
-}
-
-pub async fn render_md(md: &str, title: &str) -> anyhow::Result<String> {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TABLES);
-    let parser = Parser::new_ext(md, opts);
-    let mut html_body = String::new();
-    html::push_html(&mut html_body, parser);
-
-    let css = r#"
- *{box-sizing:border-box}
- body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;background:#f5f5f5;color:#333;padding:0;margin:0}
- .md{background:#fff;padding:16px 14px;margin:0;max-width:480px;width:90vw;word-wrap:break-word;overflow-wrap:break-word}
- .title{font-size:13px;color:#888;border-bottom:1px solid #eee;padding-bottom:10px;margin-bottom:14px;font-weight:500}
- h1,h2,h3{margin:16px 0 10px;font-weight:600;line-height:1.4}
- h1{font-size:20px;border-bottom:2px solid #eee;padding-bottom:8px}
- h2{font-size:18px;border-bottom:1px solid #eee;padding-bottom:6px}
- h3{font-size:16px}
- p{margin:10px 0}
- table{border-collapse:collapse;margin:12px 0;width:100%;font-size:13px;display:block;overflow-x:auto}
- td,th{padding:8px 10px;border:1px solid #ddd;text-align:left}
- th{font-weight:600;background:#f8f9fa}
- tr:nth-child(2n){background:#fafafa}
- code{padding:2px 6px;background:#f0f0f0;border-radius:4px;font-family:"SF Mono",Consolas,"Liberation Mono",Menlo,monospace;font-size:13px;color:#d63384;white-space:pre-wrap;word-wrap:break-word;}
- pre{background:#f6f8fa;border-radius:8px;padding:12px;overflow-x:auto;margin:12px 0;white-space:pre-wrap;word-wrap:break-word;overflow-wrap: break-word;}
- pre code{background:none;padding:0;color:#333}
- blockquote{margin:12px 0;padding:8px 12px;color:#666;border-left:3px solid #ddd;background:#fafafa;border-radius:0 4px 4px 0}
- img{max-width:100%;height:auto;border-radius:6px;margin:8px 0}
- ul,ol{padding-left:20px;margin:10px 0}
- li{margin:4px 0}
- hr{border:none;border-top:1px solid #eee;margin:16px 0}
- a{color:#0066cc;text-decoration:none}
- strong{font-weight:600}
- .agent-card{background:#fafbfc;border:1px solid #e8e8e8;border-radius:8px;padding:12px;margin:10px 0}
- .agent-name{font-size:16px;font-weight:600;color:#333;margin-bottom:8px}
- .agent-info{font-size:13px;color:#666;line-height:1.8}
- .agent-info code{font-size:12px}
- .model-group{margin-bottom:16px;break-inside:avoid;}
- .model-header{background:#f0f2f5;color:#444;padding:6px 10px;border-radius:6px;font-weight:600;font-size:13px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;border-left:3px solid #0066cc;}
- .model-count{background:rgba(0,0,0,0.05);color:#666;font-size:11px;padding:1px 6px;border-radius:4px;}
- .agent-grid{display:grid;/*手机端一行两列，充分利用宽度*/grid-template-columns:repeat(2,1fr);gap:8px;}
- .agent-mini{background:#fff;border:1px solid #eee;border-radius:6px;padding:8px;display:flex;flex-direction:column;justify-content:center;transition:background 0.2s;}
- .agent-mini-top{display:flex;align-items:center;margin-bottom:4px;}
- .agent-idx{background:#e6f0ff;color:#0066cc;font-size:10px;font-weight:700;min-width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;margin-right:6px;flex-shrink:0;}
- .agent-mini-name{font-size:14px;font-weight:600;color:#333;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
- .agent-mini-desc{font-size:11px;color:#999;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
- .provider-section { margin-bottom: 20px; break-inside: avoid; }
- .provider-title { font-size: 14px; font-weight: 700; color: #555; margin-bottom: 8px; padding-left: 4px; border-left: 3px solid #666; line-height: 1.2; }
- .chip-container { display: flex; flex-wrap: wrap; gap: 8px; }
- .chip { background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 6px 10px; display: flex; align-items: center; font-size: 13px; color: #333; box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
- .chip-idx { background: #f0f0f0; color: #666; font-size: 11px; padding: 2px 5px; border-radius: 4px; margin-right: 6px; font-family: monospace; font-weight: 600; }
- .chip-name { font-weight: 500; }
- .chip-badge { margin-left: 6px; background: #e6f0ff; color: #0066cc; font-size: 10px; padding: 1px 5px; border-radius: 10px; font-weight: 600; }
- .mod-group { margin-bottom: 16px; break-inside: avoid; }
- .mod-title { font-size: 13px; font-weight: 700; color: #666; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; border-left: 3px solid #0066cc; padding-left: 6px; }
- .chip-box { display: flex; flex-wrap: wrap; gap: 8px; }
- .chip { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 6px 10px; display: flex; align-items: center; font-size: 13px; color: #333; transition: all 0.2s; }
- .chip-idx { background: #f5f5f5; color: #888; font-size: 11px; padding: 2px 6px; border-radius: 4px; margin-right: 8px; font-family: monospace; font-weight: 600; }
- .chip-name { font-weight: 500; }
- .chip-bad { margin-left: 8px; background: #e6f7ff; color: #1890ff; font-size: 10px; padding: 2px 6px; border-radius: 10px; font-weight: 600; } "#;
-    let html = format!(
-        r#"<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>{css}</style></head><body><div class="md"><div class="title">{title}</div>{html_body}</div></body></html>"#
-    );
-
-    let browser = Browser::instance().await;
-    let tab = browser.new_tab().await?;
-
-    let width = 600;
-    tab.set_viewport(&Viewport::new(width, 100).with_device_scale_factor(2.0))
-        .await?;
-
-    tab.set_content(&html).await?;
-
-    time::sleep(Duration::from_millis(200)).await;
-
-    let height_js = "document.body.scrollHeight";
-    let body_height = tab.evaluate(height_js).await?.as_f64().unwrap_or(800.0) as u32;
-
-    let viewport = Viewport::new(width, body_height + 100).with_device_scale_factor(2.0);
-    tab.set_viewport(&viewport).await?;
-
-    time::sleep(Duration::from_millis(100)).await;
-
-    let opts = CaptureOptions::new()
-        .with_viewport(viewport)
-        .with_quality(90);
-
-    let b64 = tab
-        .find_element(".md")
-        .await?
-        .screenshot_with_options(opts)
-        .await?;
-
-    let _ = tab.close().await;
-    Ok(b64)
 }
 
 pub async fn get_full_content(
