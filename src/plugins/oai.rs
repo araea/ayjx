@@ -11,6 +11,7 @@ use toml::Value;
 
 pub mod data;
 pub mod logic;
+pub mod mj;
 pub mod parser;
 pub mod types;
 pub mod utils;
@@ -119,6 +120,12 @@ pub fn handle(
                 return Ok(Some(ctx));
             }
         };
+
+        // MJ 的放大交互只依赖被引用的机器人消息，不要求再次写房间名。
+        // 因此必须先于普通文本/指令解析处理，也能兼容只发送数字的回复。
+        if mj::try_handle_upscale_reply(&ctx, &writer, mgr).await {
+            return Ok(None);
+        }
 
         // 获取纯文本内容
         let raw_text = match extract_clean_text(&ctx) {

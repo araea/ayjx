@@ -103,7 +103,7 @@ fn extract_video_urls(content: &str) -> Vec<String> {
 /// 把图片地址转成多模态模型可内联的 data URL。
 /// 已经是 `data:` 的保持不变；其余（QQ 图片 / 头像等远程 URL）下载后转 base64，
 /// 避免 QQ 图片防盗链导致服务端拉不到图。下载失败则回退原 URL，由服务端自行尝试。
-async fn to_data_url(url: &str) -> String {
+pub(crate) async fn to_data_url(url: &str) -> String {
     if url.starts_with("data:") {
         return url.to_string();
     }
@@ -181,6 +181,26 @@ async fn chat(
         Some(e) => e,
         None => return,
     };
+    let (agent, api) = {
+        let c = mgr.config.read().await;
+        let a = c.agents.iter().find(|a| a.name == name).cloned();
+        (a, (c.api_base.clone(), c.api_key.clone()))
+    };
+
+    let agent = match agent {
+        Some(a) => a,
+        None => {
+            reply_text(ctx, writer, &event, format!("❌ 智能体 {} 不存在", name)).await;
+            return;
+        }
+    };
+
+    if super::mj::is_mj_model(&agent.model) {
+        // MJ 房间天生是无历史任务流；引用文字也不应混入绘图提示词。
+        super::mj::handle_agent(&agent, &cmd.args, imgs, ctx, writer, mgr).await;
+        return;
+    }
+
     let is_priv_ctx = cmd.private_reply;
     let uid = event.user_id().to_string();
     let temp_mode = cmd.temp_mode;
@@ -198,20 +218,6 @@ async fn chat(
             return;
         }
     }
-
-    let (agent, api) = {
-        let c = mgr.config.read().await;
-        let a = c.agents.iter().find(|a| a.name == name).cloned();
-        (a, (c.api_base.clone(), c.api_key.clone()))
-    };
-
-    let agent = match agent {
-        Some(a) => a,
-        None => {
-            reply_text(ctx, writer, &event, format!("❌ 智能体 {} 不存在", name)).await;
-            return;
-        }
-    };
 
     if api.0.is_empty() || api.1.is_empty() {
         reply_text(ctx, writer, &event, "❌ API 未配置。").await;
@@ -1305,6 +1311,16 @@ pub async fn execute(
 | `智能体~` | 重新生成上一条 |
 | `智能体!` | 停止生成 |
 
+## MJ 绘图房间
+| 房间模型 | 直接操作 |
+|------|------|
+| `mj` | 输入提示词绘图；消息图片/引用图片自动作为垫图 |
+| `mj-describe` | 发送或引用图片，生成描述 |
+| `mj-shorten` | 输入提示词，生成精简版本 |
+| `mj-blend` | 发送/引用至少两张图进行融合（可写横图/竖图） |
+
+> 引用 `mj` 返回的四宫格，回复任意一个或多个 `1`–`4` 即可放大；已完成的放大直接读取缓存。
+
 ## 历史管理
 | 指令 | 功能 |
 |------|------|
@@ -1456,7 +1472,9 @@ pub async fn handle_create(
     let model = mgr
         .resolve_model(model, &models)
         .unwrap_or_else(|| model.to_string());
-    let prompt = if prompt.is_empty() && !c.agents.iter().any(|a| a.name == name) {
+    let prompt = if super::mj::is_mj_model(&model) && prompt.is_empty() {
+        String::new()
+    } else if prompt.is_empty() && !c.agents.iter().any(|a| a.name == name) {
         c.default_prompt.clone()
     } else {
         prompt.to_string()

@@ -60,6 +60,16 @@ pub fn normalize(s: &str) -> String {
             '＆' => '&',
             '／' => '/',
             '＝' => '=',
+            '０' => '0',
+            '１' => '1',
+            '２' => '2',
+            '３' => '3',
+            '４' => '4',
+            '５' => '5',
+            '６' => '6',
+            '７' => '7',
+            '８' => '8',
+            '９' => '9',
             _ => c,
         })
         .collect()
@@ -263,7 +273,12 @@ pub async fn get_full_content(
                         }
                     }
                     "image" => {
-                        if let Some(u) = seg.data.get("url").and_then(|v| v.as_str()) {
+                        if let Some(u) = seg
+                            .data
+                            .get("url")
+                            .or_else(|| seg.data.get("file"))
+                            .and_then(|v| v.as_str())
+                        {
                             imgs.push(u.to_string());
                         }
                     }
@@ -301,7 +316,7 @@ pub async fn get_full_content(
         let data = seg.get("data");
 
         if type_ == "image" {
-            if let Some(u) = data.and_then(|d| d.get_str("url")) {
+            if let Some(u) = data.and_then(|d| d.get_str("url").or_else(|| d.get_str("file"))) {
                 imgs.push(u.to_string());
             }
         } else if type_ == "video" {

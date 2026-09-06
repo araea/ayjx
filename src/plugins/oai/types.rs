@@ -123,6 +123,28 @@ pub struct Config {
     pub default_prompt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MjMessageTask {
+    pub task_id: String,
+    /// 任务实际使用的接入点（`mj-fast` / `mj-relax`），旧缓存缺省时走当前默认值。
+    #[serde(default)]
+    pub api_base: String,
+    #[serde(default)]
+    pub upscale_buttons: HashMap<u8, String>,
+    #[serde(default)]
+    pub created_at: i64,
+}
+
+/// MJ 的引用关系和放大结果独立于聊天记录持久化。
+/// `upscales` 的值优先是本地缓存文件，下载失败时回退为远程图片 URL。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MjCache {
+    #[serde(default)]
+    pub messages: HashMap<String, MjMessageTask>,
+    #[serde(default)]
+    pub upscales: HashMap<String, String>,
+}
+
 #[derive(Debug, Default)]
 pub struct GeneratingState {
     pub public: HashSet<String>,

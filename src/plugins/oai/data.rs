@@ -1,4 +1,5 @@
-use super::types::{Config, GeneratingState};
+use super::types::{Config, GeneratingState, MjCache};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -10,12 +11,18 @@ pub static MANAGER: OnceLock<Arc<Manager>> = OnceLock::new();
 pub struct Manager {
     pub config: RwLock<Config>,
     pub generating: RwLock<GeneratingState>,
+    pub mj_cache: RwLock<MjCache>,
+    pub mj_inflight: RwLock<HashSet<String>>,
     pub path: PathBuf,
+    pub mj_cache_path: PathBuf,
+    pub mj_images_dir: PathBuf,
 }
 
 impl Manager {
     pub fn new(dir: PathBuf) -> Self {
         let path = dir.join("config.json");
+        let mj_cache_path = dir.join("mj-cache.json");
+        let mj_images_dir = dir.join("mj-images");
         // 同步加载一次配置 (初始化时使用)
         let default = Config {
             default_model: "gpt-4o".to_string(),
@@ -32,10 +39,20 @@ impl Manager {
             default
         };
 
+        let mj_cache = std::fs::read_to_string(&mj_cache_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        let _ = std::fs::create_dir_all(&mj_images_dir);
+
         Self {
             config: RwLock::new(config),
             generating: RwLock::new(GeneratingState::default()),
+            mj_cache: RwLock::new(mj_cache),
+            mj_inflight: RwLock::new(HashSet::new()),
             path,
+            mj_cache_path,
+            mj_images_dir,
         }
     }
 
@@ -43,6 +60,12 @@ impl Manager {
         if let Ok(s) = serde_json::to_string_pretty(cfg) {
             // 使用 std::fs 写文件，虽然是阻塞操作，但保存配置频率不高
             let _ = std::fs::write(&self.path, s);
+        }
+    }
+
+    pub fn save_mj_cache(&self, cache: &MjCache) {
+        if let Ok(s) = serde_json::to_string_pretty(cache) {
+            let _ = std::fs::write(&self.mj_cache_path, s);
         }
     }
 
@@ -57,20 +80,28 @@ impl Manager {
 
         // 自实现 GET {base}/models：DeepSeek 官方（及多数中转）返回的 model 对象
         // 字段不全（缺 created），async-openai 的强类型反序列化会失败，这里宽松解析只取 id。
-        let url = format!("{}/models", base.trim_end_matches('/'));
-        let resp = crate::http::client()
-            .get(&url)
-            .bearer_auth(&key)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "模型列表请求失败: HTTP {}",
-                resp.status().as_u16()
-            ));
+        let base = base.trim_end_matches('/');
+        let mut urls = vec![format!("{base}/models")];
+        if !base.ends_with("/v1") {
+            urls.push(format!("{base}/v1/models"));
         }
-
-        let body: serde_json::Value = resp.json().await?;
+        let mut body = None;
+        let mut last_error = String::new();
+        for url in urls {
+            match crate::http::client().get(&url).bearer_auth(&key).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.json().await {
+                    Ok(value) => {
+                        body = Some(value);
+                        break;
+                    }
+                    Err(e) => last_error = format!("{url}: {e}"),
+                },
+                Ok(resp) => last_error = format!("{url}: HTTP {}", resp.status().as_u16()),
+                Err(e) => last_error = format!("{url}: {e}"),
+            }
+        }
+        let body: serde_json::Value =
+            body.ok_or_else(|| anyhow::anyhow!("模型列表请求失败: {last_error}"))?;
         let mut models: Vec<String> = body
             .get("data")
             .and_then(|d| d.as_array())
@@ -85,11 +116,16 @@ impl Manager {
         models.dedup();
 
         let filtered = super::utils::filter_models(&models);
-        let final_models = if filtered.is_empty() {
+        let mut final_models = if filtered.is_empty() {
             models
         } else {
             filtered
         };
+        for model in super::mj::MJ_MODELS {
+            if !final_models.iter().any(|m| m == model) {
+                final_models.push((*model).to_string());
+            }
+        }
 
         {
             let mut c = self.config.write().await;
@@ -110,6 +146,9 @@ impl Manager {
             return Some(models[i - 1].clone());
         }
         let lower = input.to_lowercase();
+        if let Some(exact) = models.iter().find(|model| model.to_lowercase() == lower) {
+            return Some(exact.clone());
+        }
         for m in models {
             if m.to_lowercase().contains(&lower) {
                 return Some(m.clone());
