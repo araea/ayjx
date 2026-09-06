@@ -270,8 +270,12 @@ async fn chat(
         generating.set_generating(name, is_priv_ctx, &uid, true);
     }
 
-    let client = Client::with_config(OpenAIConfig::new().with_api_base(api.0).with_api_key(api.1))
-        .with_http_client(crate::http::client());
+    let client = Client::with_config(
+        OpenAIConfig::new()
+            .with_api_base(super::utils::openai_api_base(&api.0))
+            .with_api_key(api.1),
+    )
+    .with_http_client(crate::http::client());
     let mut msgs: Vec<ChatCompletionRequestMessage> = vec![];
 
     let model_lower = agent.model.to_lowercase();
@@ -590,6 +594,7 @@ pub async fn execute(
 
     match cmd.action {
         Action::UpdateApi(url, key) => {
+            let url = super::utils::openai_api_base(&url);
             let mut c = mgr.config.write().await;
             c.api_base = url.clone();
             c.api_key = key;
@@ -1405,7 +1410,7 @@ pub async fn execute(
             .await;
             let client = Client::with_config(
                 OpenAIConfig::new()
-                    .with_api_base(api_config.0)
+                    .with_api_base(super::utils::openai_api_base(&api_config.0))
                     .with_api_key(api_config.1),
             )
             .with_http_client(crate::http::client());

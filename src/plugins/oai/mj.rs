@@ -7,7 +7,7 @@ use crate::event::Context;
 use crate::message::Message;
 use anyhow::{Context as _, anyhow};
 use base64::Engine as _;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 use std::collections::{HashMap, HashSet};
@@ -32,24 +32,44 @@ enum MjMode {
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct MjButton {
+    #[serde(deserialize_with = "null_default")]
     custom_id: String,
+    #[serde(deserialize_with = "null_default")]
     label: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct MjTask {
+    #[serde(deserialize_with = "null_default")]
     id: String,
+    #[serde(deserialize_with = "null_default")]
     action: String,
+    #[serde(deserialize_with = "null_default")]
     status: String,
+    #[serde(deserialize_with = "null_default")]
     progress: String,
+    #[serde(deserialize_with = "null_default")]
     description: String,
+    #[serde(deserialize_with = "null_default")]
     fail_reason: String,
+    #[serde(deserialize_with = "null_default")]
     image_url: String,
+    #[serde(deserialize_with = "null_default")]
     prompt: String,
+    #[serde(deserialize_with = "null_default")]
     prompt_en: String,
     properties: Value,
+    #[serde(deserialize_with = "null_default")]
     buttons: Vec<MjButton>,
+}
+
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
 fn mode(model: &str) -> Option<MjMode> {
@@ -714,5 +734,20 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(task_text(&task), "one\ntwo");
+    }
+
+    #[test]
+    fn accepts_null_buttons_and_nullable_task_fields() {
+        let task: MjTask = serde_json::from_value(json!({
+            "id": "task-1",
+            "status": "IN_PROGRESS",
+            "buttons": null,
+            "imageUrl": null,
+            "failReason": null
+        }))
+        .unwrap();
+        assert!(task.buttons.is_empty());
+        assert!(task.image_url.is_empty());
+        assert!(task.fail_reason.is_empty());
     }
 }

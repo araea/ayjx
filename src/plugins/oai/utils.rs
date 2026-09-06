@@ -35,6 +35,19 @@ pub const MODEL_KEYWORDS: &[&str] = &[
     "mimo",
 ];
 
+/// async-openai 会在 API 基址后拼接 `/chat/completions`。管理员只填写服务裸域名时，
+/// 自动补齐 OpenAI 兼容接口通用的 `/v1`，已有自定义路径则原样保留。
+pub fn openai_api_base(configured: &str) -> String {
+    let configured = configured.trim().trim_end_matches('/');
+    let Ok(mut parsed) = url::Url::parse(configured) else {
+        return configured.to_string();
+    };
+    if parsed.path().is_empty() || parsed.path() == "/" {
+        parsed.set_path("/v1");
+    }
+    parsed.to_string().trim_end_matches('/').to_string()
+}
+
 pub fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -496,4 +509,25 @@ pub fn format_export_txt(
         content.push_str(&format!("\n{}\n\n", separator));
     }
     content
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_api_base;
+
+    #[test]
+    fn adds_v1_only_to_bare_openai_hosts() {
+        assert_eq!(
+            openai_api_base("https://api.apilio.ai"),
+            "https://api.apilio.ai/v1"
+        );
+        assert_eq!(
+            openai_api_base("https://example.com/v1/"),
+            "https://example.com/v1"
+        );
+        assert_eq!(
+            openai_api_base("https://example.com/openai"),
+            "https://example.com/openai"
+        );
+    }
 }
