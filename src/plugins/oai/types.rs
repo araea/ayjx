@@ -124,6 +124,9 @@ pub struct Config {
     /// 记录内置 `pi` 房间已经迁移过，用户主动删除后不会在每次启动时复活。
     #[serde(default)]
     pub pi_room_initialized: bool,
+    /// 内置默认值迁移版本；避免每次启动覆盖管理员后续的模型选择。
+    #[serde(default)]
+    pub defaults_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

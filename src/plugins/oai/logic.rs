@@ -14,7 +14,7 @@ use async_openai::{
         ChatCompletionRequestMessageContentPartImageArgs,
         ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
         ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs, ImageUrlArgs,
+        CreateChatCompletionRequestArgs, ImageUrlArgs, ReasoningEffort,
     },
 };
 use regex::Regex;
@@ -182,7 +182,9 @@ async fn complete(
         let mut builder = CreateChatCompletionRequestArgs::default();
         builder.model(model).messages(messages.clone());
         if harness.is_some() {
-            builder.tools(super::harness::tool_definitions());
+            builder
+                .tools(super::harness::tool_definitions())
+                .reasoning_effort(ReasoningEffort::Medium);
         }
         let request = builder.build()?;
         let response = client.chat().create(request).await?;

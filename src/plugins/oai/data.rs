@@ -5,6 +5,10 @@ use std::sync::{Arc, OnceLock};
 
 use tokio::sync::RwLock;
 
+const DEFAULT_MODEL: &str = "gpt-5.6-luna";
+const LEGACY_DEFAULT_MODEL: &str = "gpt-4o";
+const CURRENT_DEFAULTS_VERSION: u32 = 1;
+
 // 全局单例管理器
 pub static MANAGER: OnceLock<Arc<Manager>> = OnceLock::new();
 
@@ -25,7 +29,7 @@ impl Manager {
         let mj_images_dir = dir.join("mj-images");
         // 同步加载一次配置 (初始化时使用)
         let default = Config {
-            default_model: "gpt-4o".to_string(),
+            default_model: DEFAULT_MODEL.to_string(),
             default_prompt: "You are a helpful assistant.".to_string(),
             ..Default::default()
         };
@@ -39,6 +43,27 @@ impl Manager {
             default
         };
 
+        let mut config_dirty = false;
+        // 将旧版默认值迁移到工具调用能力更完整的模型；只执行一次，不干预后续手动设置。
+        if config.defaults_version < CURRENT_DEFAULTS_VERSION {
+            if config.default_model.trim().is_empty()
+                || config.default_model.eq_ignore_ascii_case(LEGACY_DEFAULT_MODEL)
+            {
+                config.default_model = DEFAULT_MODEL.to_string();
+            }
+            if let Some(pi) = config
+                .agents
+                .iter_mut()
+                .find(|agent| agent.name.eq_ignore_ascii_case("pi"))
+                && (pi.model.trim().is_empty()
+                    || pi.model.eq_ignore_ascii_case(LEGACY_DEFAULT_MODEL))
+            {
+                pi.model = DEFAULT_MODEL.to_string();
+            }
+            config.defaults_version = CURRENT_DEFAULTS_VERSION;
+            config_dirty = true;
+        }
+
         // 老配置只迁移一次；之后若管理员主动删除 `pi`，尊重这一选择。
         if !config.pi_room_initialized {
             if !config
@@ -47,7 +72,7 @@ impl Manager {
                 .any(|agent| agent.name.eq_ignore_ascii_case("pi"))
             {
                 let model = if config.default_model.trim().is_empty() {
-                    "gpt-4o"
+                    DEFAULT_MODEL
                 } else {
                     &config.default_model
                 };
@@ -59,9 +84,10 @@ impl Manager {
                 ));
             }
             config.pi_room_initialized = true;
-            if let Ok(serialized) = serde_json::to_string_pretty(&config) {
-                let _ = std::fs::write(&path, serialized);
-            }
+            config_dirty = true;
+        }
+        if config_dirty && let Ok(serialized) = serde_json::to_string_pretty(&config) {
+            let _ = std::fs::write(&path, serialized);
         }
 
         let mj_cache = std::fs::read_to_string(&mj_cache_path)
@@ -215,7 +241,10 @@ mod tests {
         let config: Config = serde_json::from_str(&serialized).unwrap();
         let pi = config.agents.iter().find(|agent| agent.name == "pi").unwrap();
         assert_eq!(pi.description, "终端与联网工具助手");
+        assert_eq!(pi.model, DEFAULT_MODEL);
         assert!(pi.public_history.is_empty());
+        assert_eq!(config.default_model, DEFAULT_MODEL);
+        assert_eq!(config.defaults_version, CURRENT_DEFAULTS_VERSION);
         assert!(config.pi_room_initialized);
 
         std::fs::remove_dir_all(dir).unwrap();
