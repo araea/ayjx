@@ -170,7 +170,7 @@ fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
             "回显参数内容（支持图片等富文本）",
             cmds![("echo <内容>", "原样回显参数")],
         ),
-        "repeater" => ("群聊复读机，达到阈值后自动跟读", &[]),
+        "repeater" => ("同一句话接力到阈值就跟读一次，带冷却、概率与打断复读", &[]),
         "wordcloud" => (
             "根据消息记录生成词云图",
             cmds![

@@ -14,7 +14,7 @@
 | `ping` | 回复、合并转发 | `<quote>` 与 `<message forward>` 正常 |
 | `recall` | 引用与当前消息撤回 | 同频道 `message.delete` 正常 |
 | `echo` | 原样消息段 | 元素双向转换正常 |
-| `repeater` | 消息链比较、发送前观察 | 图片以 md5 为资源 ID，同图仍判定为复读 |
+| `repeater` | 消息指纹比较、发送前观察 | 图片取资源 ID 比较，换链接的同图仍判定为复读 |
 | `wordcloud` | 私聊/群聊作用域、数据库 | 私聊不再产生伪 `group_id = 0` |
 | `stats` | 群列表、定时多群发送 | `guild.list` 跟随 `next` 翻页，同步发送顺序正常 |
 | `card` | 引用图片、文件发送 | 引用图片正常，文件先 `upload.create` 再发送 |

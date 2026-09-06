@@ -67,6 +67,10 @@ const SETTINGS: &[SettingSpec] = &[
     // 复读机
     s("repeater", "min_times", "复读阈值", "连续几条相同消息后开始跟读", Kind::Int, "2"),
     s("repeater", "probability", "复读概率", "触发复读的概率，取值 0~1", Kind::Float, "1.0"),
+    s("repeater", "cooldown_seconds", "复读冷却", "同一频道两次复读的最小间隔秒数，0 为不限制", Kind::Int, "15"),
+    s("repeater", "max_chars", "复读长度上限", "超过这个字数的消息不跟读，0 为不限制", Kind::Int, "200"),
+    s("repeater", "allow_same_user", "同人复读", "是否允许一个人自己刷屏凑够复读阈值", Kind::Bool, "false"),
+    s("repeater", "interrupt_probability", "打断复读概率", "本该跟读时改发打断语的概率，取值 0~1", Kind::Float, "0.0"),
     // 词意猜词
     s("ciyi", "plugin.at_user", "猜词@提醒", "猜词时是否@提醒玩家", Kind::Bool, "false"),
     s("ciyi", "plugin.quote_user", "猜词引用", "猜词时是否引用原消息", Kind::Bool, "true"),

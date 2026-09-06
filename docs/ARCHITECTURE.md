@@ -96,7 +96,7 @@ HTML 截图走 `cdp_html_shot`（ai_news/help 已有现成封装可参考）。
 
 ```sh
 cargo check        # 快速验证
-cargo test         # 73 个测试；浏览器截图类为 ignored
+cargo test         # 102 个测试；浏览器截图类为 ignored
 cargo fmt          # 提交前
 ```
 

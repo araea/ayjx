@@ -184,6 +184,13 @@ impl SendPacket {
             .or_else(|| self.params.get_u64("group_id").map(|v| v as i64))
     }
 
+    /// 尝试从发送包中提取目标用户号（私聊）
+    pub fn user_id(&self) -> Option<i64> {
+        self.params
+            .get_i64("user_id")
+            .or_else(|| self.params.get_u64("user_id").map(|v| v as i64))
+    }
+
     /// 获取 message 字段的 Value
     pub fn message(&self) -> Option<&OwnedValue> {
         self.params.get("message")
