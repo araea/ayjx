@@ -76,7 +76,8 @@ ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤�
 
 ## 部署顺序
 
-1. 编译并测试：`cargo test`、`cargo build --release`。
+1. 编译并测试：`cargo test`、`cargo build --release`；可再运行
+   `node tests/foreground.cjs` 验证隔离配置下的前台指令、进程管理及退出保存。
 2. 向正在运行的 ayjx 发送 SIGTERM，等待进程退出和“配置已保存”日志。
 3. 备份并修改配置，开启所需插件。基础部署可开启 ctl、help、settings、
    meta_filter、logger、recorder、ping；按实际需求启用其他插件。

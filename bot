@@ -17,7 +17,9 @@ running_pids() {
         if is_our_process "$pid"; then
             printf '%s\n' "$pid"
         fi
-    done < <(pgrep -x ayjx || true)
+    # Android's pgrep may compare argv[0] (the full path) even with -x.
+    # Find candidates by command line, then verify /proc/PID/exe above.
+    done < <(pgrep -f '/target/release/ayjx' || true)
 }
 
 stop_bot() {

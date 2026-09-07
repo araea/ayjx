@@ -4,9 +4,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ayjx-foreground-'));
+const executable = path.join(temporary, 'target/release/ayjx');
+fs.mkdirSync(path.dirname(executable), { recursive: true });
+fs.copyFileSync(path.join(root, 'target/release/ayjx'), executable);
+const launcher = path.join(temporary, 'bot');
+fs.copyFileSync(path.join(root, 'bot'), launcher);
 const registry = fs.readFileSync(path.join(root, 'src/plugins/registry.rs'), 'utf8');
 const plugins = [...registry.matchAll(/^    ([a-z_]+) \{/gm)].map(match => match[1]);
 assert(plugins.includes('ctl') && plugins.includes('help'));
@@ -14,7 +19,7 @@ const configPath = path.join(temporary, 'config.toml');
 fs.writeFileSync(configPath,
   'command_prefix = ["/"]\n[[bots]]\nenabled = false\nprotocol = "console"\n' +
   plugins.map(name => `[${name}]\nenabled = ${['ctl', 'help'].includes(name)}\n`).join(''));
-const child = spawn(path.join(root, 'target/release/ayjx'), ['--console'], {
+const child = spawn(launcher, ['start'], {
   cwd: temporary, stdio: ['pipe', 'pipe', 'pipe'],
 });
 let output = '';
@@ -35,6 +40,12 @@ async function until(predicate, description, milliseconds = 12000) {
 }
 async function main() {
   await until(() => output.includes('前台控制台已就绪'), 'console ready');
+  const status = spawnSync(launcher, ['status'], { encoding: 'utf8' });
+  assert.equal(status.status, 0);
+  assert(status.stdout.includes(String(child.pid)));
+  const duplicate = spawnSync(launcher, ['start'], { encoding: 'utf8' });
+  assert.equal(duplicate.status, 1);
+  assert(duplicate.stderr.includes('已运行'));
   child.stdin.write('/ctl status\n');
   await until(() => output.includes('插件状态（全局配置）'), 'status reply');
   assert(output.includes('开 ctl') && output.includes('关 ping'));
@@ -52,7 +63,9 @@ async function main() {
   child.stdin.write('/help ctl\n');
   await until(() => (output.match(/\[Bot Reply\]/g) || []).length > previousReplies, 'image help or text fallback', 25000);
   const stopping = Date.now();
-  child.kill('SIGTERM'); // Leave stdin open to catch blocking-stdin shutdown regressions.
+  // Leave stdin open to catch blocking-stdin shutdown regressions.
+  const stop = spawnSync(launcher, ['stop'], { encoding: 'utf8', timeout: 8000 });
+  assert.equal(stop.status, 0, stop.stderr);
   const result = await Promise.race([
     exited,
     new Promise((_, reject) => {
@@ -61,6 +74,7 @@ async function main() {
     }),
   ]);
   assert.deepEqual(result, { code: 0, signal: null });
+  assert.equal(spawnSync(launcher, ['status']).status, 3);
   assert(output.includes('配置已保存') && output.includes('Bye!'));
   const saved = fs.readFileSync(configPath, 'utf8');
   assert(/\[\[bots\]\]\s+enabled = false\s+protocol = "console"/.test(saved), '--console must not persist');
