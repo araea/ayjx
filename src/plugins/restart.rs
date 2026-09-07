@@ -1,17 +1,17 @@
 //! restart 插件:每日定时自动重启 + 内存阈值监控 + 手动重启指令
 //!
 //! 解决长时间运行导致缓存累积、云服务器内存被撑爆的问题。
-//! 重启流程:先拉起新进程(失败则放弃、保证服务连续性) → 保存配置 → 关闭数据库 → 销毁浏览器 → 退出旧进程。
+//! 重启请求交给主循环：停止适配器和任务、关闭数据库与浏览器、保存配置，
+//! Unix 下使用 exec 替换当前进程，保持前台终端及 PID。
 
 use crate::adapters::satori::{LockedWriter, send_msg};
-use crate::command::match_command;
-use crate::config::build_config;
+use crate::command::match_word_command;
+use crate::config::{AppConfig, build_config};
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use toml::Value;
@@ -71,8 +71,11 @@ fn default_delay() -> u64 {
 
 // ================= 全局状态 =================
 
-/// 原始启动参数(不含 argv[0])，自我重启时原样还原
-static ORIGINAL_ARGS: OnceLock<Vec<String>> = OnceLock::new();
+static RESTART_REQUEST: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub async fn wait_request() {
+    RESTART_REQUEST.notified().await;
+}
 
 /// 重启防抖标记:防止定时任务与内存监控同时触发导致双重重启
 static RESTARTING: AtomicBool = AtomicBool::new(false);
@@ -85,18 +88,15 @@ pub fn default_config() -> Value {
 
 pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     Box::pin(async move {
-        // 记录原始启动参数，供自我重启时还原
-        let _ = ORIGINAL_ARGS.set(std::env::args().skip(1).collect());
-
         let cfg = get_config::<RestartConfig>(&ctx, "restart").unwrap_or_default();
         if !cfg.enabled {
             return Ok(());
         }
 
         // 1. 每日定时重启
-        let (h, m) = parse_time(&cfg.time);
+        let (h, m, s) = parse_time(&cfg.time);
         let daily_ctx = ctx.clone();
-        ctx.scheduler.add_daily_at(h, m, 0, move || {
+        ctx.scheduler.add_daily_at(h, m, s, move || {
             let ctx = daily_ctx.clone();
             async move {
                 info!(
@@ -108,9 +108,10 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         });
         info!(
             target: "Plugin/Restart",
-            "已计划每日 {:02}:{:02} 自动重启",
+            "已计划每日 {:02}:{:02}:{:02} 自动重启（系统本地时区）",
             h,
-            m
+            m,
+            s
         );
 
         // 2. 内存阈值监控(仅 Linux 支持读取自身 RSS)
@@ -167,7 +168,7 @@ pub fn handle(
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        if let Some(_cmd) = match_command(&ctx, "restart") {
+        if let Some(_cmd) = match_word_command(&ctx, "restart") {
             if !crate::plugins::ctl::is_manager(&ctx) {
                 let msg = ctx.as_message().unwrap();
                 send_msg(
@@ -226,7 +227,7 @@ pub fn handle(
 
 // ================= 重启核心逻辑 =================
 
-/// 执行完整重启流程:先拉起新进程 → 清理资源 → 退出旧进程
+/// 只提出请求，统一由主循环清理，避免定时任务中止自身或两个进程同时写配置。
 async fn do_restart(ctx: &Context, reason: String) {
     if !get_config::<RestartConfig>(ctx, "restart").is_some_and(|cfg| cfg.enabled) {
         return;
@@ -245,70 +246,40 @@ async fn do_restart(ctx: &Context, reason: String) {
         reason
     );
 
-    let cfg = get_config::<RestartConfig>(ctx, "restart").unwrap_or_default();
-
-    // 1. 先拉起新进程(失败则不退出，保证服务连续性)
-    let spawned = if !cfg.restart_command.trim().is_empty() {
-        spawn_external(cfg.restart_command.trim())
-    } else {
-        spawn_self()
-    };
-    if let Err(e) = spawned {
-        error!(target: "Plugin/Restart", "拉起新进程失败: {}，放弃重启", e);
-        RESTARTING.store(false, Ordering::SeqCst);
-        return;
-    }
-    info!(target: "Plugin/Restart", "新进程已拉起，开始清理资源...");
-
-    // 2. 保存配置(加锁避免与 update_config 并发写文件)
-    {
-        let _guard = ctx.config_save_lock.lock().await;
-        let snapshot = {
-            let guard = ctx.config.read().unwrap();
-            guard.clone()
-        };
-        if let Err(e) = snapshot.save(&ctx.config_path).await {
-            error!(target: "Plugin/Restart", "重启前保存配置失败: {}", e);
-        }
-    }
-
-    // 3. 关闭数据库连接(WAL 模式下安全落盘)
-    // 注: ctx.db 为共享引用，clone 连接池句柄后 close，等价于关闭整个连接池
-    if let Err(e) = ctx.db.clone().close().await {
-        error!(target: "Plugin/Restart", "关闭数据库失败: {}", e);
-    }
-
-    // 4. 销毁全局无头浏览器实例，释放其内存
-    cdp_html_shot::Browser::shutdown_global().await;
-
-    info!(target: "Plugin/Restart", "资源清理完毕，旧进程退出。");
-    std::process::exit(0);
+    RESTART_REQUEST.notify_one();
 }
 
-/// 自我拉起:用当前可执行文件 + 原始启动参数启动新进程
-fn spawn_self() -> Result<(), PluginError> {
+/// 资源清理并保存成功后调用。exec 保留终端、PID、环境和单实例锁。
+pub fn relaunch(config: &AppConfig) -> Result<(), PluginError> {
+    let cfg = config
+        .plugins
+        .get("restart")
+        .map(|v| RestartConfig::deserialize(v.clone()))
+        .transpose()?
+        .unwrap_or_default();
+    if !cfg.restart_command.trim().is_empty() {
+        return spawn_external(cfg.restart_command.trim());
+    }
     let exe = std::env::current_exe()?;
-    let args = ORIGINAL_ARGS.get().cloned().unwrap_or_default();
+    // A release build may have replaced the executable while this process ran.
+    let executable = exe.to_string_lossy();
+    let executable = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+    let mut cmd = std::process::Command::new(executable);
+    cmd.args(std::env::args_os().skip(1));
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.args(&args);
-
-    #[cfg(windows)]
+    #[cfg(unix)]
     {
-        use std::os::windows::process::CommandExt;
-        // 创建独立进程组，父进程退出后新进程不受控制台关闭信号影响
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        use std::os::unix::process::CommandExt;
+        info!(target: "Plugin/Restart", "配置已保存，正在原地重启（保留前台终端与 PID）...");
+        return Err(cmd.exec().into());
     }
 
-    let child = cmd.spawn()?;
-    info!(
-        target: "Plugin/Restart",
-        "已自我拉起新进程: {:?} (pid: {:?})",
-        exe,
-        child.id()
-    );
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let child = cmd.spawn()?;
+        info!(target: "Plugin/Restart", "已启动新进程，PID: {}", child.id());
+        Ok(())
+    }
 }
 
 /// 通过外部命令重启(如 systemctl / supervisor / nssm 等进程管理器)
@@ -345,25 +316,18 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
 
 // ================= 工具函数 =================
 
-/// 解析 "HH:MM" 或 "HH:MM:SS" 为 (时, 分)，非法输入回退默认 04:00
-fn parse_time(s: &str) -> (u32, u32) {
-    let parts: Vec<&str> = s.split(':').collect();
-    let h = parts
-        .first()
-        .and_then(|p| p.trim().parse().ok())
-        .unwrap_or(4)
-        .min(23);
-    let m = parts
-        .get(1)
-        .and_then(|p| p.trim().parse().ok())
-        .unwrap_or(0)
-        .min(59);
-    (h, m)
+/// 解析 HH:MM 或 HH:MM:SS，非法输入回退默认 04:00。
+fn parse_time(s: &str) -> (u32, u32, u32) {
+    use chrono::{NaiveTime, Timelike};
+    NaiveTime::parse_from_str(s.trim(), "%H:%M:%S")
+        .or_else(|_| NaiveTime::parse_from_str(s.trim(), "%H:%M"))
+        .map(|t| (t.hour(), t.minute(), t.second()))
+        .unwrap_or((4, 0, 0))
 }
 
 /// 读取当前进程 RSS 内存 (MB)。仅 Linux 提供 /proc/self/status，其余平台返回 None
 fn current_rss_mb() -> Option<u64> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         let status = std::fs::read_to_string("/proc/self/status").ok()?;
         for line in status.lines() {
@@ -374,7 +338,7 @@ fn current_rss_mb() -> Option<u64> {
         }
         None
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         None
     }
@@ -385,4 +349,22 @@ pub fn validate_config(value: &toml::Value) -> Result<(), String> {
     <RestartConfig as serde::Deserialize>::deserialize(value.clone())
         .map(|_| ())
         .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_time_accepts_minutes_and_seconds_and_falls_back() {
+        assert_eq!(parse_time("04:00"), (4, 0, 0));
+        assert_eq!(parse_time(" 23:59:58 "), (23, 59, 58));
+        assert_eq!(parse_time("26:71"), (4, 0, 0));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn rss_monitor_reads_self_status_on_linux_and_termux() {
+        assert!(current_rss_mb().is_some());
+    }
 }

@@ -40,6 +40,12 @@ Chrome/Chromium，默认自动查找，也可用 `browser_path` 指定可执行�
 
 `./bot status` 查看进程，`./bot stop` 停止，`./bot restart` 重新前台启动。
 需要暂离后再进入控制台时，使用 `./bot session` 和 `./bot attach`（需要 tmux）。
+不带参数的 `./bot` 会创建或直接进入前台会话；将脚本链接到 `$PREFIX/bin/bot`
+或 `~/.local/bin/bot` 后，任意目录输入 `bot` 即可进入，`bot s` 看状态、`bot down` 停止。
+Termux 下 `./bot start` 会自动取得唤醒锁，熄屏时保持网络连接；`./bot power` 说明用法。
+
+restart 插件负责每日定时重启与内存阈值重启。Unix/Termux 上先停止任务、关闭数据库与
+浏览器、保存配置，再原地 exec 替换进程，保留 PID、终端与 tmux 会话，重启期间连接短暂中断。
 
 ## 文档
 

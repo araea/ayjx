@@ -660,6 +660,7 @@ mod tests {
         use base64::{Engine, engine::general_purpose::STANDARD};
         let bytes = STANDARD.decode(&b64).expect("截图应是合法 base64");
         std::fs::write(format!("{}/captured.png", dir), &bytes).unwrap();
+        Browser::shutdown_global().await;
         println!("出图 {} 字节", bytes.len());
     }
 }

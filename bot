@@ -1,7 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Foreground launcher and process controls for this checkout (Linux / Termux).
+# Termux has no /usr/bin/env without termux-exec (widgets, cron, tmux servers
+# started elsewhere), so start under /bin/sh and hand over to bash on PATH.
+[ -n "${BASH_VERSION:-}" ] || exec bash "$0" "$@"
 set -euo pipefail
-bot_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+bot_script=$(realpath -- "${BASH_SOURCE[0]}")
+bot_dir=$(cd -- "$(dirname -- "$bot_script")" && pwd -P)
 bot_exe="$bot_dir/target/release/ayjx"
 bot_session=ayjx
 
@@ -43,7 +47,11 @@ stop_bot() {
     return 1
 }
 
-case "${1:-start}" in
+case "${1:-open}" in
+    open)
+        "$bot_script" session
+        exec "$bot_script" attach
+        ;;
     start)
         cd -- "$bot_dir"
         if [[ ! -x "$bot_exe" ]]; then
@@ -62,9 +70,12 @@ case "${1:-start}" in
         # Keep local Satori HTTP requests out of environment HTTP proxies.
         export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
         export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+        if [[ "${AYJX_WAKE_LOCK:-1}" == 1 ]] && command -v termux-wake-lock >/dev/null; then
+            termux-wake-lock || printf '未能取得 Termux 唤醒锁，请检查通知中的 Acquire wakelock。\n' >&2
+        fi
         exec "$bot_exe" --console
         ;;
-    status)
+    status|s)
         pids=$(running_pids)
         if [[ -n "$pids" ]]; then
             printf 'ayjx 运行中，PID：%s\n' "$pids"
@@ -74,12 +85,12 @@ case "${1:-start}" in
             exit 3
         fi
         ;;
-    stop) stop_bot ;;
+    stop|down) stop_bot ;;
     restart)
         stop_bot
         exec "$bot_dir/bot" start
         ;;
-    session)
+    session|up)
         command -v tmux >/dev/null || { printf '需要安装 tmux，或直接 ./bot start。\n' >&2; exit 1; }
         if tmux has-session -t "=$bot_session" 2>/dev/null; then
             printf '会话已存在，使用 ./bot attach 进入。\n'
@@ -91,13 +102,29 @@ case "${1:-start}" in
             printf '已创建前台会话。使用 ./bot attach 进入；Ctrl+B 后按 D 暂离并保持运行。\n'
         fi
         ;;
-    attach)
+    attach|a)
+        if [[ -z "${TERM:-}" || "${TERM:-}" == dumb ]]; then export TERM=xterm-256color; fi
         exec tmux attach-session -t "=$bot_session"
         ;;
+    power)
+        case "${2:-help}" in
+            on) termux-wake-lock ;;
+            off)
+                if [[ -n "$(running_pids)" ]]; then
+                    printf 'bot 运行中，请先 bot stop 再释放保活锁。\n' >&2
+                    exit 1
+                fi
+                termux-wake-unlock
+                ;;
+            *) printf 'bot power on 保持熄屏运行；bot power off 停止后释放 Termux 共享唤醒锁（影响其它 Termux 任务）。\n' ;;
+        esac
+        ;;
     help|-h|--help)
-        printf './bot start    前台启动（默认），输入 /ctl 管理；Ctrl+C 停止\n'
+        printf './bot          打开控制台；未运行时创建 tmux 会话\n'
+        printf './bot start    当前终端前台启动，输入 /ctl 管理；Ctrl+C 停止\n'
         printf './bot status   查看进程状态\n./bot stop     优雅停止\n./bot restart  停止后重新前台启动\n'
         printf './bot session  创建可重新进入的 tmux 前台会话\n./bot attach   进入会话（Ctrl+B 后按 D 暂离）\n'
+        printf './bot power    Termux 熄屏保活说明\n'
         ;;
     *) printf '未知操作，使用 ./bot help。\n' >&2; exit 2 ;;
 esac

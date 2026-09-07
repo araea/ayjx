@@ -243,27 +243,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 等待退出信号 (优雅关闭): 同时监听 SIGINT (Ctrl+C) 与 SIGTERM (kill/systemd stop)
     #[cfg(unix)]
-    {
+    let restarting = {
         use tokio::signal::unix::{SignalKind, signal as unix_signal};
         let mut sigterm = unix_signal(SignalKind::terminate())?;
         tokio::select! {
             _ = signal::ctrl_c() => {
                 info!("收到退出信号 (Ctrl+C)，正在清理资源...");
+                false
             }
             _ = sigterm.recv() => {
                 info!("收到退出信号 (SIGTERM)，正在清理资源...");
+                false
             }
+            _ = plugins::restart::wait_request() => true,
         }
-    }
+    };
     #[cfg(not(unix))]
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            info!("收到退出信号，正在清理资源...");
-        }
-        Err(err) => {
-            error!("监听信号失败: {}", err);
-        }
-    }
+    let restarting = tokio::select! {
+        _ = signal::ctrl_c() => false,
+        _ = plugins::restart::wait_request() => true,
+    };
 
     // 执行清理工作 (带超时保护，避免浏览器销毁等操作卡死导致进程挂起)
     let cleanup = async {
@@ -292,12 +291,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None
     };
 
-    if let Some(cfg) = config_snapshot {
+    if let Some(ref cfg) = config_snapshot {
         if let Err(e) = cfg.save(config_path).await {
             error!("退出前保存配置失败: {}", e);
+            if restarting {
+                return Err(e);
+            }
         } else {
             info!("配置已保存。");
         }
+    }
+
+    drop(_save_guard);
+    if restarting {
+        let cfg = config_snapshot.ok_or("无法读取配置，重启已取消")?;
+        plugins::restart::relaunch(&cfg)?;
     }
 
     info!("Bye!");

@@ -69,6 +69,10 @@ admins = [123456789] # 替换为维护者 QQ 号，可填多个
   整插件 reset 保留 enabled；重置 ctl 还保留 admins。
 - `/restart` 需全局管理员且 `restart.allow_manual_restart = true`；
   不具备重启管理条件时，由本机维护者停止并重新启动框架。
+  定时与手动重启都只向主循环提出请求，由主循环停止任务、关闭数据库与浏览器、保存配置；
+  Unix/Termux 随后 exec 替换当前进程，保留 PID、终端、环境变量与启动参数和单实例锁，
+  重新连接 Satori 前有短暂连接中断。`restart.time` 支持 `HH:MM` 或 `HH:MM:SS`，
+  使用系统本地时区；内存阈值只统计 ayjx 自身 RSS（Linux/Android），不含 Chromium 子进程。
 
 ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤规则、数据库中的
 插件业务数据，以及 oai 独立存储的模型 API 与智能体历史仍由其原入口管理。
@@ -77,7 +81,8 @@ ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤�
 ## 部署顺序
 
 1. 编译并测试：`cargo test`、`cargo build --release`；可再运行
-   `node tests/foreground.cjs` 验证隔离配置下的前台指令、进程管理及退出保存。
+   `node tests/foreground.cjs` 验证隔离配置下的前台指令、进程管理及退出保存，
+   `node tests/restart.cjs` 验证保留 PID 的手动重启与定时重启。
 2. 向正在运行的 ayjx 发送 SIGTERM，等待进程退出和“配置已保存”日志。
 3. 备份并修改配置，开启所需插件。基础部署可开启 ctl、help、settings、
    meta_filter、logger、recorder、ping；按实际需求启用其他插件。
@@ -104,7 +109,14 @@ ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤�
 | `./bot restart` | 停止后在当前终端重新前台启动 |
 | `./bot session` | 使用 tmux 创建名为 ayjx 的可重新进入的前台会话 |
 | `./bot attach` | 进入该会话，查看实时日志并输入指令 |
+| `./bot` | 无参数时创建（或直接进入）名为 ayjx 的前台会话 |
+| `./bot power on/off` | Termux 唤醒锁：熄屏保持网络；`off` 需先停止 bot |
 | `./bot help` | 显示启动脚本帮助 |
+
+`status`、`stop`、`session`、`attach` 分别可简写为 `s`、`down`、`up`、`a`。
+把脚本链接到 `$PREFIX/bin/bot`（Termux）或 `~/.local/bin/bot` 后，任意目录都能直接使用。
+`./bot start` 在 Termux 上自动取得唤醒锁以避免熄屏断网，`AYJX_WAKE_LOCK=0` 可关闭；
+唤醒锁由整个 Termux 共享，`./bot power off` 会影响其它 Termux 任务，因此要求先停止 bot。
 
 在 tmux 会话中，按 `Ctrl+B` 后松开，再按 `D` 可暂离；bot 持续运行。
 `Ctrl+C` 会停止 bot。停止后用 `./bot session` 创建新会话，再 `./bot attach` 进入。

@@ -21,6 +21,7 @@ fs.writeFileSync(configPath,
   plugins.map(name => `[${name}]\nenabled = ${['ctl', 'help'].includes(name)}\n`).join(''));
 const child = spawn(launcher, ['start'], {
   cwd: temporary, stdio: ['pipe', 'pipe', 'pipe'],
+  env: { ...process.env, AYJX_WAKE_LOCK: '0' },
 });
 let output = '';
 child.stdout.on('data', data => { output += data; });
