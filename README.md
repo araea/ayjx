@@ -1,73 +1,55 @@
-ayjx
-====
+# ayjx
 
-[<img alt="github" src="https://img.shields.io/badge/github-araea/ayjx-8da0cb?style=for-the-badge&labelColor=555555&logo=github" height="20">](https://github.com/araea/ayjx)
+基于 Rust 的 QQ 机器人框架，通过 Satori v1 连接实现端，并提供可配置的插件运行环境。
 
-QQ 机器人框架。以 [Satori v1](https://satori.js.org/zh-CN/) 协议连接实现端，
-默认对接本机 [`satori-qq`](https://github.com/araea/satori-qq)。
+## 安装
 
-## 使用
+需要 Rust 1.85 或更高版本。准备 config.toml 后构建：
 
-1. 启动 `satori-qq`，默认监听 `http://127.0.0.1:3001`。
-2. 复制 `config.example.toml` 为 `config.toml`，填入实现端的 `access_token`；
-   留空表示不鉴权。
-3. `cargo build --release`，运行 `./bot start`，输入 `/ctl` 查看控制帮助。
-   QQ 中可发送 `/help`（需 help 插件开启）。
+~~~
+cp config.example.toml config.toml
+cargo build --release
+./bot start
+~~~
 
-构建需要支持 edition 2024 的 Rust（1.85+）。网页截图与卡片出图调用本机
-Chrome/Chromium，默认自动查找，也可用 `browser_path` 指定可执行文件。
+默认 Satori 地址为 http://127.0.0.1:3001。网页截图和卡片出图需要本机
+Chrome 或 Chromium，可在 browser_path 中指定路径。
 
 ## 配置
 
-`config.toml` 已被 Git 忽略。首次启动写入全部插件的默认配置，之后每次启动补齐
-新增字段、清理已移除插件的残留项；文件解析失败时程序停止，不覆盖原文件。
+config.toml 不提交到 Git。首次启动会补齐默认字段，不覆盖解析失败的文件。
 
-- `command_prefix`：指令前缀，默认 `["/"]`，可配多个；
-- `browser_path`：浏览器可执行文件路径，留空为自动查找；
-- `global_filter`：全局群黑/白名单，在事件进入插件流水线前生效；
-- `[[bots]]`：适配器列表，`satori` 连接实现端，`console` 供本地测试；
-- `access_token`：也可用环境变量 `AYJX_SATORI_TOKEN` 注入，优先级更高。
+- command_prefix：指令前缀，默认 /；
+- global_filter：全局群黑白名单；
+- [[bots]]：satori 连接实现端，console 用于本地测试；
+- access_token：Satori 令牌，也可由 AYJX_SATORI_TOKEN 提供；
+- [ctl]：插件控制权限，admins 填维护者 QQ 号；
+- [oai]：可选的 OAI 与 Pi Agent 设置。
 
-数据库为 `data/bot.db`（SQLite，WAL 模式）。
+数据库文件为 data/bot.db。
 
-## 插件
+## 插件与运行
 
-插件在 `src/plugins/`，注册表为 `src/plugins/registry.rs`；各自带默认配置与开关，
-指令清单见 `/help`；`/ctl`（别名 `/控制`、`/插件`）统一管理插件开关与配置。
-首次使用请在停机时配置 `[ctl] admins = [维护者QQ号]`，空列表仅允许控制台管理。
-例如 `/ctl on help ping`、`/ctl set help image_enabled 关`。
-详细用法与生效时间见 [插件控制](docs/CONTROL.md)。
+插件位于 src/plugins/。发送 /help 查看指令，使用 /ctl（别名 /控制、/插件）查看和修改
+插件开关与配置。首次使用前在停机状态设置 [ctl].admins；空列表只允许本机控制台管理。
 
-`./bot status` 查看进程，`./bot stop` 停止，`./bot restart` 重新前台启动。
-需要暂离后再进入控制台时，使用 `./bot session` 和 `./bot attach`（需要 tmux）。
-不带参数的 `./bot` 会创建或直接进入前台会话；将脚本链接到 `$PREFIX/bin/bot`
-或 `~/.local/bin/bot` 后，任意目录输入 `bot` 即可进入，`bot s` 看状态、`bot down` 停止。
-Termux 下 `./bot start` 会自动取得唤醒锁，熄屏时保持网络连接；`./bot power` 说明用法。
+~~~
+./bot status
+./bot stop
+./bot restart
+~~~
 
-restart 插件负责每日定时重启与内存阈值重启。Unix/Termux 上先停止任务、关闭数据库与
-浏览器、保存配置，再原地 exec 替换进程，保留 PID、终端与 tmux 会话，重启期间连接短暂中断。
+Termux 下 ./bot start 会取得唤醒锁；需要使用 tmux 时执行 ./bot session 和 ./bot attach。
+名称为 pi 或以 pi- 开头的房间可调用本机 Pi CLI。
 
-## 文档
+## 文档与测试
 
-- [架构说明](docs/ARCHITECTURE.md)
-- [Satori 接入说明](docs/SATORI.md)
+- [插件控制](docs/CONTROL.md)
+- [Satori 接入](docs/SATORI.md)
 - [插件兼容性审计](docs/SATORI_PLUGIN_AUDIT.md)
+- [架构说明](docs/ARCHITECTURE.md)
 
-## QQ 群
-
-956758505
-
-## Pi 房间
-
-OAI 插件中名为 `pi` 或以 `pi-` 开头的房间（忽略大小写）使用本机 Pi Agent。
-可用 `##pi-test` 创建房间，再发送 `pi-test 你好`；`&pi-test` 使用独立私有历史，
-`~pi-test` 为一次性对话。模型和工具读取 Pi 自身配置，房间提示词作为补充提示，
-房间的 `%模型` 设置不用于 Pi。`[oai].pi_command` 可指定 Pi 可执行文件路径，默认 `pi`。
-
-支持图片输入、历史编辑/删除/清空与重新生成。每次调用从当前房间历史重建独立会话，
-Pi 的中间工具结果不写入聊天历史；结束或取消时清理临时文件。`房间!` 和请求超时会停止
-Pi 及其工具进程（Linux / Termux 包括独立进程组子进程）。短回复直接发送文字，长回复卡片显示实际模型、耗时和工具轨迹。
-旧的 `harness_rooms`、内置搜索/终端和推理档位配置不再使用。
-
-验证：`cargo test`；已安装并配置 Pi 时可运行
-`cargo test live_pi_reads_history_image_and_runs_a_tool -- --ignored --nocapture`。
+~~~
+cargo test
+cargo build --release
+~~~
