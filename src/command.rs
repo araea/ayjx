@@ -18,7 +18,12 @@ pub struct CommandMatch {
 }
 
 pub fn get_prefixes(ctx: &Context) -> Vec<String> {
-    ctx.config.read().unwrap().command_prefix.clone()
+    let prefixes = ctx.config.read().unwrap().command_prefix.clone();
+    if prefixes.is_empty() {
+        vec![String::new()]
+    } else {
+        prefixes
+    }
 }
 
 /// 在多条候选指令中返回第一个命中的匹配
@@ -95,6 +100,15 @@ pub async fn get_image_url(
 
 /// 解析指令：自动过滤头部的 Reply/At/空白，匹配 [Prefix][Command]，返回参数及引用信息
 pub fn match_command(ctx: &Context, command_name: &str) -> Option<CommandMatch> {
+    match_command_inner(ctx, command_name, false)
+}
+
+/// Word commands require whitespace or end-of-message after their name.
+pub fn match_word_command(ctx: &Context, command_name: &str) -> Option<CommandMatch> {
+    match_command_inner(ctx, command_name, true)
+}
+
+fn match_command_inner(ctx: &Context, command_name: &str, strict: bool) -> Option<CommandMatch> {
     let prefixes = get_prefixes(ctx);
     // 仅处理 MessageEvent
     let msg_arr = ctx.as_message()?.0.get_array("message")?;
@@ -146,6 +160,14 @@ pub fn match_command(ctx: &Context, command_name: &str) -> Option<CommandMatch> 
                         // 处理当前文本节点剩余部分
                         let rest_of_text = &trimmed_start[target.len()..];
                         // 指令后通常有空格，作为参数时去除左侧空格
+                        if strict
+                            && rest_of_text
+                                .chars()
+                                .next()
+                                .is_some_and(|c| !c.is_whitespace())
+                        {
+                            continue;
+                        }
                         let args_text = rest_of_text.trim_start();
 
                         if !args_text.is_empty() {

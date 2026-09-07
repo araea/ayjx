@@ -204,3 +204,10 @@ async fn handle_to_media(
 
     Ok(None)
 }
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <Config as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}

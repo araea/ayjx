@@ -39,12 +39,15 @@ Context 通过 Move 传递，不深拷贝事件。`send_fake_event` 可将伪造
 
 - `handle(ctx, writer) -> BoxFuture<Result<Option<Context>, PluginError>>` — 必需
 - `default_config() -> toml::Value` — 必需
+- `validate_config(&toml::Value) -> Result<(), String>` — 必需，使用真实配置类型反序列化
 - `init(ctx)` / `on_connected(ctx, writer)` — 可选生命周期钩子
 
 注册在 `src/plugins/registry.rs` 的 `register_plugins!` 宏中，宏自动生成模块声明；
 `display_name` 为中文展示名（help/settings 用），配置键用标识符。
 
-启用与否只看 `[plugins.<name>] enabled`，运行时每次事件从配置快照读取。
+插件配置使用顶层 `[<name>] enabled`（例如 `[help]`），运行时每次事件从配置快照读取。
+带生命周期的插件如果启动时未开启，后来开启会等待重启初始化，避免调用未就绪的 handler。
+ctl 位于 meta_filter 之后、logger/recorder 之前；统一控制与部署说明见 [CONTROL.md](CONTROL.md)。
 
 ## 插件编写约定
 
@@ -67,6 +70,7 @@ pub fn default_config() -> Value { build_config(Config::default()) }
 **指令匹配**：统一走 `crate::command`：
 
 - `match_command(ctx, cmd)` / `first_command_match(ctx, &[cmd])` — 前缀类指令
+- `match_word_command(ctx, cmd)` — 要求指令名后为空白或消息末尾，用于 ctl
 - `strip_prefix(ctx, text)` — 自带正则匹配的指令（词云、stats 式）
 - `extract_text_arg(&matched.args)` — 参数拼接为纯文本
 - `get_image_url(ctx, writer, &args, reply_id)` — 取图（参数或引用）

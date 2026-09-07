@@ -9,6 +9,9 @@ register_plugins!(
     meta_filter {
         display_name: "元事件过滤"
     },
+    ctl {
+        display_name: "插件控制"
+    },
     logger {
         display_name: "日志输出"
     },

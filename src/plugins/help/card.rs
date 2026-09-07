@@ -64,7 +64,11 @@ fn placeholders(text: &str) -> String {
 
     while let Some(pos) = rest.find(['<', '[']) {
         out.push_str(&esc(&rest[..pos]));
-        let close = if rest.as_bytes()[pos] == b'<' { '>' } else { ']' };
+        let close = if rest.as_bytes()[pos] == b'<' {
+            '>'
+        } else {
+            ']'
+        };
         match rest[pos..].find(close) {
             Some(end) => {
                 out.push_str(&format!(
@@ -281,7 +285,13 @@ pub fn overview(groups: &[Group], prefix: &str) -> Card {
     let cells: String = groups
         .iter()
         .flat_map(|g| g.items.iter())
-        .map(|e| if e.enabled { r#"<i class="on"></i>"# } else { "<i></i>" })
+        .map(|e| {
+            if e.enabled {
+                r#"<i class="on"></i>"#
+            } else {
+                "<i></i>"
+            }
+        })
         .collect();
 
     let head = format!(
@@ -327,10 +337,14 @@ pub fn overview(groups: &[Group], prefix: &str) -> Card {
         body.push_str("</div></div>");
     }
 
+    body.push_str(&format!(r#"<div class="lead">Satori v1 · 管理开关与配置：<b>{}ctl</b><br>状态为配置开关；首次初始化及定时排期修改需重启。</div>"#, esc(prefix)));
     let foot = format!(
         r#"<div class="legend"><div class="lg"><i></i>已启用</div>
 <div class="lg off"><i></i>已停用</div></div>{}"#,
-        hint("查看某个插件的全部指令", &format!("{}help <插件名>", prefix))
+        hint(
+            "查看某个插件的全部指令",
+            &format!("{}help <插件名>", prefix)
+        )
     );
 
     Card {
@@ -395,6 +409,7 @@ pub fn detail(entry: &Entry, cmds: &[Cmd], prefix: &str) -> Card {
         }
     }
 
+    body.push_str(&format!(r#"<div class="lead">管理：{p}ctl show {name}<br>开关：{p}ctl on/off {name}<br>首次初始化及定时排期修改需重启；详见 {p}ctl list。</div>"#, p = esc(prefix), name = esc(entry.name)));
     let foot = format!(
         r#"<div class="legend"><div class="lg"><i></i>AYJX · 插件手册</div></div>{}"#,
         hint("回到插件总览", &format!("{}help", prefix))
@@ -436,8 +451,14 @@ impl Card {
             tab.set_viewport(&viewport).await?;
             tokio::time::sleep(Duration::from_millis(80)).await;
 
-            let opts = CaptureOptions::new().with_viewport(viewport).with_quality(92);
-            let b64 = tab.find_element(".shot").await?.screenshot_with_options(opts).await?;
+            let opts = CaptureOptions::new()
+                .with_viewport(viewport)
+                .with_quality(92);
+            let b64 = tab
+                .find_element(".shot")
+                .await?
+                .screenshot_with_options(opts)
+                .await?;
             Ok::<String, anyhow::Error>(b64)
         }
         .await;

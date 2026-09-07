@@ -269,3 +269,10 @@ async fn send_forward_msg(ctx: &Context, writer: LockedWriter, base64_list: Vec<
     // 调用通用 API
     let _ = send_msg(ctx, writer, group_id, Some(user_id), forward_msg).await;
 }
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <Config as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}

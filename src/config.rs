@@ -42,7 +42,29 @@ pub struct GlobalFilterConfig {
 impl AppConfig {
     pub async fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let toml_string = toml::to_string_pretty(self)?;
-        fs::write(path, toml_string).await?;
+        // Write beside the destination and rename only after syncing a complete file.
+        use tokio::io::AsyncWriteExt;
+        let temporary = format!(
+            "{}.tmp-{}-{}",
+            path,
+            std::process::id(),
+            rand::random::<u64>()
+        );
+        let result = async {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary).await?;
+            file.write_all(toml_string.as_bytes()).await?;
+            file.sync_all().await?;
+            fs::rename(&temporary, path).await
+        }
+        .await;
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary).await;
+        }
+        result?;
         Ok(())
     }
 }

@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Foreground launcher and process controls for this checkout (Linux / Termux).
+set -euo pipefail
+bot_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+bot_exe="$bot_dir/target/release/ayjx"
+bot_session=ayjx
+
+is_our_process() {
+    local executable
+    executable=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
+    [[ "${executable% (deleted)}" == "$bot_exe" ]]
+}
+
+running_pids() {
+    local pid
+    while read -r pid; do
+        if is_our_process "$pid"; then
+            printf '%s\n' "$pid"
+        fi
+    done < <(pgrep -x ayjx || true)
+}
+
+stop_bot() {
+    local pids pid attempt
+    pids=$(running_pids)
+    if [[ -z "$pids" ]]; then
+        printf 'ayjx 已停止。\n'
+        return
+    fi
+    while read -r pid; do
+        if is_our_process "$pid"; then kill -TERM "$pid"; fi
+    done <<< "$pids"
+    for ((attempt = 0; attempt < 35; attempt++)); do
+        if [[ -z "$(running_pids)" ]]; then
+            printf 'ayjx 进程已退出；请在前台日志确认配置保存结果。\n'
+            return
+        fi
+        sleep 1
+    done
+    printf '停止超时，请检查前台日志；未强制杀死进程。\n' >&2
+    return 1
+}
+
+case "${1:-start}" in
+    start)
+        cd -- "$bot_dir"
+        if [[ ! -x "$bot_exe" ]]; then
+            printf '请先运行 cargo build --release。\n' >&2
+            exit 1
+        fi
+        if [[ -n "$(running_pids)" ]]; then
+            printf '本仓库的 ayjx 已运行；用 ./bot attach 进入会话或 ./bot status 查看。\n' >&2
+            exit 1
+        fi
+        exec 9>"$bot_dir/.bot.lock"
+        if ! flock -n 9; then
+            printf '启动锁已被占用，请先检查 ./bot status。\n' >&2
+            exit 1
+        fi
+        # Keep local Satori HTTP requests out of environment HTTP proxies.
+        export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
+        export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+        exec "$bot_exe" --console
+        ;;
+    status)
+        pids=$(running_pids)
+        if [[ -n "$pids" ]]; then
+            printf 'ayjx 运行中，PID：%s\n' "$pids"
+            printf '插件状态：进入控制台输入 /ctl list；连接状态请查看 Satori 日志。\n'
+        else
+            printf 'ayjx 已停止。\n'
+            exit 3
+        fi
+        ;;
+    stop) stop_bot ;;
+    restart)
+        stop_bot
+        exec "$bot_dir/bot" start
+        ;;
+    session)
+        command -v tmux >/dev/null || { printf '需要安装 tmux，或直接 ./bot start。\n' >&2; exit 1; }
+        if tmux has-session -t "=$bot_session" 2>/dev/null; then
+            printf '会话已存在，使用 ./bot attach 进入。\n'
+        elif [[ -n "$(running_pids)" ]]; then
+            printf 'ayjx 已在其他终端运行，请先停止再创建会话。\n' >&2
+            exit 1
+        else
+            tmux new-session -d -s "$bot_session" -c "$bot_dir" './bot start'
+            printf '已创建前台会话。使用 ./bot attach 进入；Ctrl+B 后按 D 暂离并保持运行。\n'
+        fi
+        ;;
+    attach)
+        exec tmux attach-session -t "=$bot_session"
+        ;;
+    help|-h|--help)
+        printf './bot start    前台启动（默认），输入 /ctl 管理；Ctrl+C 停止\n'
+        printf './bot status   查看进程状态\n./bot stop     优雅停止\n./bot restart  停止后重新前台启动\n'
+        printf './bot session  创建可重新进入的 tmux 前台会话\n./bot attach   进入会话（Ctrl+B 后按 D 暂离）\n'
+        ;;
+    *) printf '未知操作，使用 ./bot help。\n' >&2; exit 2 ;;
+esac

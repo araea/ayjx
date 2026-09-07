@@ -29,9 +29,23 @@ pub struct Plugin {
     /// 当 Bot 连接成功且获取到自身信息后触发 (用于注册主动推送任务等)
     pub on_connected: Option<PluginHandler>,
     pub default_config: fn() -> Value,
+    pub validate_config: fn(&Value) -> Result<(), String>,
 }
 
 static PLUGINS: OnceLock<Vec<Plugin>> = OnceLock::new();
+static STARTUP_ENABLED: OnceLock<HashSet<String>> = OnceLock::new();
+
+/// Plugins with lifecycle hooks must have been enabled at startup.
+pub fn needs_startup(name: &str) -> bool {
+    get_plugins()
+        .iter()
+        .any(|p| p.name == name && (p.on_init.is_some() || p.on_connected.is_some()))
+}
+
+pub fn pending_startup(name: &str) -> bool {
+    needs_startup(name) && STARTUP_ENABLED.get().is_some_and(|set| !set.contains(name))
+}
+
 static CONNECTED_BOTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 fn mark_connected(connection_key: String) -> bool {
@@ -67,6 +81,7 @@ macro_rules! register_plugins {
                                 on_init: None,
                                 on_connected: None,
                                 default_config: $module::default_config,
+                                validate_config: $module::validate_config,
                             };
                             // 应用自定义覆盖 (如果有)
                             $(
@@ -115,6 +130,20 @@ pub async fn do_init(ctx: Context) -> Result<(), PluginError> {
     );
 
     // 一次性快照所有插件的 enabled 标记，避免每个插件单独锁
+    let _ = STARTUP_ENABLED.set({
+        let cfg = ctx.config.read().unwrap();
+        plugins
+            .iter()
+            .filter(|p| {
+                cfg.plugins
+                    .get(p.name)
+                    .and_then(|v| v.get("enabled"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .map(|p| p.name.to_string())
+            .collect()
+    });
     let enabled_set = collect_enabled_set(&ctx);
 
     let system_bot: Arc<BotStatus> = Arc::new(BotStatus {
@@ -168,7 +197,7 @@ fn collect_enabled_set(ctx: &Context) -> EnabledSet {
             .and_then(|v| v.get("enabled"))
             .and_then(|x| x.as_bool())
             .unwrap_or(false);
-        set.insert(p.name, enabled);
+        set.insert(p.name, enabled && !pending_startup(p.name));
     }
     set
 }
@@ -363,26 +392,13 @@ where
     T: Serialize + DeserializeOwned + Clone,
     F: FnOnce(T) -> T,
 {
-    {
-        let mut guard = ctx.config.write().unwrap();
-        if let Some(v) = guard.plugins.get_mut(plugin_name)
-            && let Ok(current_cfg) = T::deserialize(v.clone())
-        {
-            let new_cfg = f(current_cfg);
-            if let Ok(new_val) = Value::try_from(new_cfg) {
-                *v = new_val;
-            }
-        }
-    }
-
     let _fs_guard = ctx.config_save_lock.lock().await;
-
-    let latest_config_snapshot = {
-        let guard = ctx.config.read().unwrap();
-        guard.clone()
-    };
-
-    latest_config_snapshot.save(&ctx.config_path).await?;
+    let mut snapshot = ctx.config.read().unwrap().clone();
+    let current = snapshot.plugins.get(plugin_name).ok_or("插件配置不存在")?;
+    let next = Value::try_from(f(T::deserialize(current.clone())?))?;
+    snapshot.plugins.insert(plugin_name.to_string(), next);
+    snapshot.save(&ctx.config_path).await?;
+    *ctx.config.write().unwrap() = snapshot;
 
     Ok(())
 }

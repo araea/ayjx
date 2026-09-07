@@ -42,3 +42,8 @@ progress_notice_seconds = 30
 plain_text_max_chars = 120
 # 在回复卡片页脚显示模型、耗时与工具调用轨迹。
 show_trace_footer = true
+
+# 全局插件控制：空列表仅允许本机控制台管理。
+[ctl]
+enabled = true
+admins = [] # 填写维护者 QQ 号，例如 [123456789]

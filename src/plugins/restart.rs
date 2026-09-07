@@ -118,37 +118,38 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let threshold = cfg.memory_threshold_mb;
             let interval_secs = cfg.memory_check_interval_minutes.max(1) * 60;
             let mem_ctx = ctx.clone();
-            ctx.scheduler.add_interval(Duration::from_secs(interval_secs), move || {
-                let ctx = mem_ctx.clone();
-                async move {
-                    match current_rss_mb() {
-                        Some(mb) if mb >= threshold => {
-                            warn!(
-                                target: "Plugin/Restart",
-                                "内存占用 {}MB 达到阈值 {}MB，提前重启",
-                                mb,
-                                threshold
-                            );
-                            do_restart(&ctx, format!("内存超限 ({}MB >= {}MB)", mb, threshold))
-                                .await;
-                        }
-                        Some(mb) => {
-                            debug!(
-                                target: "Plugin/Restart",
-                                "内存巡检: {}/{}MB",
-                                mb,
-                                threshold
-                            );
-                        }
-                        None => {
-                            debug!(
-                                target: "Plugin/Restart",
-                                "当前平台不支持读取内存占用，跳过巡检"
-                            );
+            ctx.scheduler
+                .add_interval(Duration::from_secs(interval_secs), move || {
+                    let ctx = mem_ctx.clone();
+                    async move {
+                        match current_rss_mb() {
+                            Some(mb) if mb >= threshold => {
+                                warn!(
+                                    target: "Plugin/Restart",
+                                    "内存占用 {}MB 达到阈值 {}MB，提前重启",
+                                    mb,
+                                    threshold
+                                );
+                                do_restart(&ctx, format!("内存超限 ({}MB >= {}MB)", mb, threshold))
+                                    .await;
+                            }
+                            Some(mb) => {
+                                debug!(
+                                    target: "Plugin/Restart",
+                                    "内存巡检: {}/{}MB",
+                                    mb,
+                                    threshold
+                                );
+                            }
+                            None => {
+                                debug!(
+                                    target: "Plugin/Restart",
+                                    "当前平台不支持读取内存占用，跳过巡检"
+                                );
+                            }
                         }
                     }
-                }
-            });
+                });
             info!(
                 target: "Plugin/Restart",
                 "已开启内存监控: 阈值 {}MB，每 {} 分钟巡检一次",
@@ -167,6 +168,18 @@ pub fn handle(
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
         if let Some(_cmd) = match_command(&ctx, "restart") {
+            if !crate::plugins::ctl::is_manager(&ctx) {
+                let msg = ctx.as_message().unwrap();
+                send_msg(
+                    &ctx,
+                    writer,
+                    msg.group_id(),
+                    Some(msg.user_id()),
+                    Message::new().text(crate::plugins::ctl::DENIED),
+                )
+                .await?;
+                return Ok(None);
+            }
             let cfg = get_config::<RestartConfig>(&ctx, "restart").unwrap_or_default();
 
             // 未开放手动重启时给出提示
@@ -215,6 +228,9 @@ pub fn handle(
 
 /// 执行完整重启流程:先拉起新进程 → 清理资源 → 退出旧进程
 async fn do_restart(ctx: &Context, reason: String) {
+    if !get_config::<RestartConfig>(ctx, "restart").is_some_and(|cfg| cfg.enabled) {
+        return;
+    }
     if RESTARTING.swap(true, Ordering::SeqCst) {
         info!(
             target: "Plugin/Restart",
@@ -314,7 +330,9 @@ fn spawn_external(command: &str) -> Result<(), PluginError> {
     }
     #[cfg(not(windows))]
     {
-        let child = std::process::Command::new("sh").args(["-c", command]).spawn()?;
+        let child = std::process::Command::new("sh")
+            .args(["-c", command])
+            .spawn()?;
         info!(
             target: "Plugin/Restart",
             "已执行外部重启命令: {} (pid: {:?})",
@@ -360,4 +378,11 @@ fn current_rss_mb() -> Option<u64> {
     {
         None
     }
+}
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <RestartConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
 }

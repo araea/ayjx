@@ -172,6 +172,7 @@ pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
             let db = db_clone.clone();
             let cfg = config_clone.clone();
             async move {
+                if !cfg.read().unwrap().plugins.get("recorder").and_then(|v| v.get("enabled")).and_then(Value::as_bool).unwrap_or(false) { return; }
                 // 统计聚合自愈：重建近 7 天聚合行，修复异常场景下的计数漂移
                 // （保留期之外的聚合行是冻结的历史，不会被触碰）
                 if let Err(e) = crate::db::stats::self_heal_recent(&db).await {
@@ -619,4 +620,11 @@ mod satori_tests {
         assert_eq!(record.image_count, Set(1));
         assert_eq!(record.content_rich, Set("[动画表情]".to_string()));
     }
+}
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <RecorderConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
 }

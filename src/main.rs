@@ -16,7 +16,9 @@ use crate::event::{BotStatus, Context, EventType};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
 use cdp_html_shot::Browser;
+use futures_util::FutureExt;
 use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::fs;
@@ -25,6 +27,19 @@ use tokio::sync::Mutex as AsyncMutex;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut console = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--console" => console = true,
+            "--help" | "-h" => {
+                println!(
+                    "ayjx [--console]\n--console 临时启用前台控制台，不修改 config.toml；输入 /ctl 查看用法，Ctrl+C 停止。"
+                );
+                return Ok(());
+            }
+            _ => return Err(format!("未知参数：{arg}；使用 --help 查看用法").into()),
+        }
+    }
     let config_path = "config.toml";
 
     let db = db::init().await.expect("数据库初始化失败");
@@ -110,18 +125,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    // 初始化全局浏览器实例
-    if let Some(ref path) = app_config.browser_path {
-        if !path.is_empty() {
-            info!("正在使用自定义路径启动浏览器: {}", path);
-            let _ = Browser::instance_with_path(path).await;
-        } else {
-            info!("正在启动浏览器 (自动检测路径)...");
-            let _ = Browser::instance().await;
+    // The screenshot dependency panics when Chromium is absent. Browser availability
+    // must not prevent text commands, recording and control from starting.
+    let browser_init = async {
+        match app_config.browser_path.as_deref().filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let _ = Browser::instance_with_path(path).await;
+            }
+            None => {
+                let _ = Browser::instance().await;
+            }
         }
-    } else {
-        info!("正在启动浏览器 (自动检测路径)...");
-        let _ = Browser::instance().await;
+    };
+    if AssertUnwindSafe(browser_init).catch_unwind().await.is_err() {
+        warn!("浏览器不可用，继续启动；帮助可退回文字，截图功能需安装 Chrome/Chromium。");
     }
 
     // 构建运行时组件
@@ -153,7 +170,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 启动 Bots
     let mut active_bots = 0;
-    for bot_conf in app_config.bots {
+    let mut bot_configs = app_config.bots;
+    if console {
+        if let Some(bot) = bot_configs.iter_mut().find(|b| b.protocol == "console") {
+            bot.enabled = true;
+        } else {
+            bot_configs.push(config::BotConfig {
+                enabled: true,
+                protocol: "console".into(),
+                url: None,
+                access_token: None,
+            });
+        }
+    }
+    let mut adapter_tasks = Vec::new();
+    for bot_conf in bot_configs {
         // 1. 检查是否启用
         if !bot_conf.enabled {
             if bot_conf.protocol == "satori" {
@@ -194,7 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .clone()
             .unwrap_or_else(|| "Internal".to_string());
 
-        tokio::spawn(async move {
+        adapter_tasks.push(tokio::spawn(async move {
             info!("启动适配器 [{}] -> {}", protocol_name, bot_url);
             handler(
                 bot_conf,
@@ -205,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 bot_config_path,
             )
             .await;
-        });
+        }));
     }
 
     info!("激活 Bot 数量: {}。按 Ctrl+C 退出。", active_bots);
@@ -236,6 +267,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // 执行清理工作 (带超时保护，避免浏览器销毁等操作卡死导致进程挂起)
     let cleanup = async {
+        for task in adapter_tasks {
+            task.abort();
+            let _ = task.await;
+        }
         scheduler.shutdown();
         let _ = db.close().await;
         cdp_html_shot::Browser::shutdown_global().await;
@@ -249,6 +284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // 退出前强制再保存一次配置，确保万无一失
+    let _save_guard = save_lock.lock().await;
     let config_snapshot = if let Ok(guard) = shared_config.read() {
         Some(guard.clone())
     } else {

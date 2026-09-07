@@ -154,3 +154,9 @@ pub async fn generate_image(
         Err(e) => Err(format!("Task Join Error: {}", e)),
     }
 }
+
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <WordCloudConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "词云配置类型错误".to_string())
+}

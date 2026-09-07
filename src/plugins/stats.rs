@@ -64,11 +64,6 @@ pub struct StatsConfig {
     pub monthly_recap_time: String,
 }
 
-
-
-
-
-
 impl Default for StatsConfig {
     fn default() -> Self {
         Self {
@@ -232,7 +227,7 @@ pub fn on_connected(
         let config: StatsConfig = get_config(&ctx, "stats").unwrap_or_default();
 
         let scheduler = ctx.scheduler.clone();
-        let min = config.push_min_messages;
+
         let pace = Pace::new(
             config.push_group_gap_min_seconds,
             config.push_group_gap_max_seconds,
@@ -288,10 +283,9 @@ pub fn on_connected(
             ),
         ];
 
-        for (enabled, label, time_str, freq, runner) in registrations {
-            if !enabled {
-                continue;
-            }
+        for (index, (_enabled, label, time_str, freq, runner)) in
+            registrations.into_iter().enumerate()
+        {
             scheduler.schedule_periodic_push(
                 ctx.clone(),
                 writer.clone(),
@@ -300,7 +294,21 @@ pub fn on_connected(
                 time_str,
                 freq,
                 pace,
-                move |c, w, gid| runner(c, w, gid, min),
+                move |c, w, gid| async move {
+                    let current =
+                        crate::plugins::get_config::<StatsConfig>(&c, "stats").unwrap_or_default();
+                    let switches = [
+                        current.morning_recap_enabled,
+                        current.noon_brief_enabled,
+                        current.daily_push_enabled,
+                        current.weekly_recap_enabled,
+                        current.weekend_fun_enabled,
+                        current.monthly_recap_enabled,
+                    ];
+                    if current.enabled && switches[index] {
+                        runner(c, w, gid, current.push_min_messages).await;
+                    }
+                },
             );
         }
 
@@ -308,9 +316,11 @@ pub fn on_connected(
     })
 }
 
-type PushFn = fn(
-    Context,
-    LockedWriter,
-    i64,
-    u64,
-) -> futures_util::future::BoxFuture<'static, ()>;
+type PushFn = fn(Context, LockedWriter, i64, u64) -> futures_util::future::BoxFuture<'static, ()>;
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <StatsConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}

@@ -12,3 +12,5 @@
 /.workbuddy
 /build-ayjx.log
 /run-ayjx.log
+/.bot.lock
+/config.toml.backup-*

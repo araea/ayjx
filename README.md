@@ -11,7 +11,8 @@ QQ 机器人框架。以 [Satori v1](https://satori.js.org/zh-CN/) 协议连接�
 1. 启动 `satori-qq`，默认监听 `http://127.0.0.1:3001`。
 2. 复制 `config.example.toml` 为 `config.toml`，填入实现端的 `access_token`；
    留空表示不鉴权。
-3. `cargo run --release`，在 QQ 中发送 `/help`。
+3. `cargo build --release`，运行 `./bot start`，输入 `/ctl` 查看控制帮助。
+   QQ 中可发送 `/help`（需 help 插件开启）。
 
 构建需要支持 edition 2024 的 Rust（1.85+）。网页截图与卡片出图调用本机
 Chrome/Chromium，默认自动查找，也可用 `browser_path` 指定可执行文件。
@@ -32,7 +33,13 @@ Chrome/Chromium，默认自动查找，也可用 `browser_path` 指定可执行�
 ## 插件
 
 插件在 `src/plugins/`，注册表为 `src/plugins/registry.rs`；各自带默认配置与开关，
-指令清单见 `/help`。
+指令清单见 `/help`；`/ctl`（别名 `/控制`、`/插件`）统一管理插件开关与配置。
+首次使用请在停机时配置 `[ctl] admins = [维护者QQ号]`，空列表仅允许控制台管理。
+例如 `/ctl on help ping`、`/ctl set help image_enabled 关`。
+详细用法与生效时间见 [插件控制](docs/CONTROL.md)。
+
+`./bot status` 查看进程，`./bot stop` 停止，`./bot restart` 重新前台启动。
+需要暂离后再进入控制台时，使用 `./bot session` 和 `./bot attach`（需要 tmux）。
 
 ## 文档
 
