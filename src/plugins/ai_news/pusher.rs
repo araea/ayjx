@@ -161,6 +161,9 @@ fn retryable_pre_send_error(error: &str) -> bool {
         || error.contains("outbound queue timeout")
         || error.contains("outbound circuit open")
         || error.contains("outbound rate budget exhausted")
+        // 富媒体上传发生在 sendMsg 内部、消息投递之前：上传失败时对端什么都没收到，
+        // 重试同样不会重复发送。锁屏久了射频休眠，深夜定时推送最容易撞上这一条。
+        || error.contains("rich media transfer failed")
 }
 
 async fn send_card_with_recovery(
@@ -188,6 +191,9 @@ async fn send_card_with_recovery(
                 }
                 let delay = if detail.contains("session stabilizing") {
                     32
+                } else if detail.contains("rich media transfer failed") {
+                    // Satori 端已就地重试过一轮；再等久一点，让射频有机会重新拉起来。
+                    30
                 } else {
                     5
                 };
