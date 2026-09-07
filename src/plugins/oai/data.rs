@@ -12,11 +12,11 @@ const CURRENT_DEFAULTS_VERSION: u32 = 2;
 /// `pi` 房间的人设。
 ///
 /// 只写「是谁、什么风格」；运行环境、工具策略与排版要求由
-/// [`super::agent::build_instructions`] 在每次请求时按当前时间和端点能力生成——
+/// 本机 Pi Agent 按自身配置生成——
 /// 那些内容写死在人设里会随时间过期，也没法随托管检索的可用性变化。
 const PI_PERSONA: &str = "你是 pi，一个务实、直接的通用助手，回答简洁但不省略关键依据。";
 
-/// 旧版 `pi` 人设；把运行细节写进了人设，现已由 harness 动态生成。
+/// 旧版 `pi` 人设；把运行细节写进了人设，现已由 Pi Agent 生成。
 const LEGACY_PI_PERSONA: &str = "You are pi, a capable general assistant. In this public room you can use a full-permission shell and live web search. Use tools whenever they make the answer more accurate; never invent tool results. For web research, include the source URLs you relied on.";
 
 // 全局单例管理器
@@ -57,7 +57,9 @@ impl Manager {
         // 将旧版默认值迁移到工具调用能力更完整的模型；只执行一次，不干预后续手动设置。
         if config.defaults_version < CURRENT_DEFAULTS_VERSION {
             if config.default_model.trim().is_empty()
-                || config.default_model.eq_ignore_ascii_case(LEGACY_DEFAULT_MODEL)
+                || config
+                    .default_model
+                    .eq_ignore_ascii_case(LEGACY_DEFAULT_MODEL)
             {
                 config.default_model = DEFAULT_MODEL.to_string();
             }
@@ -70,7 +72,7 @@ impl Manager {
             {
                 pi.model = DEFAULT_MODEL.to_string();
             }
-            // 人设里写死的运行说明已改由 harness 生成；只替换没被管理员改过的那份。
+            // 人设里写死的运行说明已改由 Pi Agent 生成；只替换没被管理员改过的那份。
             if let Some(pi) = config
                 .agents
                 .iter_mut()
@@ -158,7 +160,12 @@ impl Manager {
         let mut body = None;
         let mut last_error = String::new();
         for url in urls {
-            match crate::http::client().get(&url).bearer_auth(&key).send().await {
+            match crate::http::client()
+                .get(&url)
+                .bearer_auth(&key)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => match resp.json().await {
                     Ok(value) => {
                         body = Some(value);
@@ -258,7 +265,11 @@ mod tests {
         let manager = Manager::new(dir.clone());
         let serialized = std::fs::read_to_string(&manager.path).unwrap();
         let config: Config = serde_json::from_str(&serialized).unwrap();
-        let pi = config.agents.iter().find(|agent| agent.name == "pi").unwrap();
+        let pi = config
+            .agents
+            .iter()
+            .find(|agent| agent.name == "pi")
+            .unwrap();
         assert_eq!(pi.description, "终端与联网工具助手");
         assert_eq!(pi.model, DEFAULT_MODEL);
         assert!(pi.public_history.is_empty());

@@ -56,3 +56,18 @@ restart 插件负责每日定时重启与内存阈值重启。Unix/Termux 上先
 ## QQ 群
 
 956758505
+
+## Pi 房间
+
+OAI 插件中名为 `pi` 或以 `pi-` 开头的房间（忽略大小写）使用本机 Pi Agent。
+可用 `##pi-test` 创建房间，再发送 `pi-test 你好`；`&pi-test` 使用独立私有历史，
+`~pi-test` 为一次性对话。模型和工具读取 Pi 自身配置，房间提示词作为补充提示，
+房间的 `%模型` 设置不用于 Pi。`[oai].pi_command` 可指定 Pi 可执行文件路径，默认 `pi`。
+
+支持图片输入、历史编辑/删除/清空与重新生成。每次调用从当前房间历史重建独立会话，
+Pi 的中间工具结果不写入聊天历史；结束或取消时清理临时文件。`房间!` 和请求超时会停止
+Pi 及其工具进程（Linux / Termux 包括独立进程组子进程）。短回复直接发送文字，长回复卡片显示实际模型、耗时和工具轨迹。
+旧的 `harness_rooms`、内置搜索/终端和推理档位配置不再使用。
+
+验证：`cargo test`；已安装并配置 Pi 时可运行
+`cargo test live_pi_reads_history_image_and_runs_a_tool -- --ignored --nocapture`。

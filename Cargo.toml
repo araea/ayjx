@@ -48,3 +48,6 @@ cdp-html-shot = "0.2.8"     # HTML 截图
 # 时间与随机数
 chrono = "0.4"
 rand = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2" # 取消 Pi 时终止同组工具进程

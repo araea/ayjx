@@ -38,7 +38,7 @@ pub(crate) struct Card<'a> {
     pub title: &'a str,
     pub markdown: &'a str,
     /// 参考来源，渲染成正文后的编号列表。
-    pub sources: &'a [super::agent::Source],
+    pub sources: &'a [super::types::Source],
     /// 页脚小字，例如模型、耗时与工具轨迹。
     pub footer: Option<String>,
 }
@@ -95,7 +95,9 @@ async fn capture(tab: &cdp_html_shot::Tab, html: &str) -> anyhow::Result<String>
         .await?;
 
     let number = |key: &str| measured.get(key).and_then(|value| value.as_f64());
-    let width = number("width").filter(|value| *value > 1.0).unwrap_or(f64::from(CARD_WIDTH));
+    let width = number("width")
+        .filter(|value| *value > 1.0)
+        .unwrap_or(f64::from(CARD_WIDTH));
     let height = number("height")
         .filter(|value| *value > 1.0)
         .unwrap_or(800.0)
@@ -151,16 +153,14 @@ fn build_html(card: &Card<'_>) -> String {
 /// 让 CSS 能用 `attr()` 在代码块角上标出语言——纯 CSS 拿不到子元素的类名。
 fn label_code_blocks(html: &str) -> String {
     static CODE: OnceLock<Regex> = OnceLock::new();
-    CODE.get_or_init(|| {
-        Regex::new(r#"(?is)<pre><code class="language-([^"]+)">"#).unwrap()
-    })
-    .replace_all(html, |caps: &regex::Captures| {
-        format!(r#"<pre data-lang="{}"><code>"#, escape_html(&caps[1]))
-    })
-    .into_owned()
+    CODE.get_or_init(|| Regex::new(r#"(?is)<pre><code class="language-([^"]+)">"#).unwrap())
+        .replace_all(html, |caps: &regex::Captures| {
+            format!(r#"<pre data-lang="{}"><code>"#, escape_html(&caps[1]))
+        })
+        .into_owned()
 }
 
-fn render_sources(sources: &[super::agent::Source]) -> String {
+fn render_sources(sources: &[super::types::Source]) -> String {
     if sources.is_empty() {
         return String::new();
     }
@@ -172,7 +172,7 @@ fn render_sources(sources: &[super::agent::Source]) -> String {
             format!(
                 r#"<li><span class="src-idx">{}</span><span class="src-title">{}</span><span class="src-host">{}</span></li>"#,
                 index + 1,
-                escape_html(&super::search::truncate_chars(&source.title, 48)),
+                escape_html(&super::utils::truncate_chars(&source.title, 48)),
                 escape_html(&host_of(&source.url)),
             )
         })
@@ -183,8 +183,12 @@ fn render_sources(sources: &[super::agent::Source]) -> String {
 fn host_of(url: &str) -> String {
     url::Url::parse(url)
         .ok()
-        .and_then(|parsed| parsed.host_str().map(|host| host.trim_start_matches("www.").to_string()))
-        .unwrap_or_else(|| super::search::truncate_chars(url, 40))
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|host| host.trim_start_matches("www.").to_string())
+        })
+        .unwrap_or_else(|| super::utils::truncate_chars(url, 40))
 }
 
 pub(crate) fn escape_html(value: &str) -> String {
@@ -276,11 +280,12 @@ img{max-width:100%;height:auto;margin:8px 0;border-radius:8px}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::oai::agent::Source;
+    use crate::plugins::oai::types::Source;
 
     #[test]
     fn code_blocks_carry_their_language_label() {
-        let html = label_code_blocks(r#"<pre><code class="language-rust">fn main(){}</code></pre>"#);
+        let html =
+            label_code_blocks(r#"<pre><code class="language-rust">fn main(){}</code></pre>"#);
         assert_eq!(
             html,
             r#"<pre data-lang="rust"><code>fn main(){}</code></pre>"#
@@ -334,7 +339,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
-    use crate::plugins::oai::agent::Source;
+    use crate::plugins::oai::types::Source;
 
     /// 真跑一次浏览器截图，确认卡片被完整量到（宽度按 2 倍像素密度出图，
     /// 高度不该退化成占位视口高度）。
@@ -362,10 +367,7 @@ mod live_tests {
             .decode(&base64)
             .unwrap();
         let image = image::load_from_memory(&bytes).unwrap();
-        assert_eq!(
-            image.width(),
-            (f64::from(CARD_WIDTH) * DEVICE_SCALE) as u32
-        );
+        assert_eq!(image.width(), (f64::from(CARD_WIDTH) * DEVICE_SCALE) as u32);
         // 占位视口是 800，真实卡片必须比它高出一截才说明测量生效。
         assert!(image.height() > 900, "height = {}", image.height());
         std::fs::write("/tmp/ayjx-card.jpg", &bytes).ok();

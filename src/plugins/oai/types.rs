@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -153,34 +153,80 @@ pub struct MjCache {
 
 #[derive(Debug, Default)]
 pub struct GeneratingState {
-    pub public: HashSet<String>,
-    pub private: HashMap<String, HashSet<String>>,
+    pub public: HashMap<String, u64>,
+    pub private: HashMap<String, HashMap<String, u64>>,
 }
 
 impl GeneratingState {
     pub fn is_generating(&self, agent: &str, private: bool, uid: &str) -> bool {
+        self.current(agent, private, uid).is_some()
+    }
+    fn current(&self, agent: &str, private: bool, uid: &str) -> Option<u64> {
         if private {
-            self.private
-                .get(agent)
-                .map(|s| s.contains(uid))
-                .unwrap_or(false)
+            self.private.get(agent)?.get(uid).copied()
         } else {
-            self.public.contains(agent)
+            self.public.get(agent).copied()
         }
     }
-
-    pub fn set_generating(&mut self, agent: &str, private: bool, uid: &str, generating: bool) {
+    pub fn is_current(&self, agent: &str, private: bool, uid: &str, id: u64) -> bool {
+        self.current(agent, private, uid) == Some(id)
+    }
+    /// 在同一个写锁内占用会话，避免两个请求同时通过空闲检查。
+    pub fn begin(&mut self, agent: &str, private: bool, uid: &str) -> Option<u64> {
+        if self.is_generating(agent, private, uid) {
+            return None;
+        }
+        let id = rand::random();
         if private {
-            let set = self.private.entry(agent.to_string()).or_default();
-            if generating {
-                set.insert(uid.to_string());
-            } else {
-                set.remove(uid);
+            self.private
+                .entry(agent.to_string())
+                .or_default()
+                .insert(uid.to_string(), id);
+        } else {
+            self.public.insert(agent.to_string(), id);
+        }
+        Some(id)
+    }
+    pub fn cancel_room(&mut self, agent: &str) {
+        self.public.remove(agent);
+        self.private.remove(agent);
+    }
+    pub fn set_generating(&mut self, agent: &str, private: bool, uid: &str, generating: bool) {
+        if generating {
+            self.begin(agent, private, uid);
+        } else if private {
+            if let Some(users) = self.private.get_mut(agent) {
+                users.remove(uid);
             }
-        } else if generating {
-            self.public.insert(agent.to_string());
         } else {
             self.public.remove(agent);
         }
     }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn cancellation_and_concurrent_histories_are_independent() {
+        let mut state = GeneratingState::default();
+        let public = state.begin("pi", false, "alice").unwrap();
+        let alice = state.begin("pi", true, "alice").unwrap();
+        let bob = state.begin("pi", true, "bob").unwrap();
+        assert!(state.begin("pi", false, "bob").is_none());
+        state.set_generating("pi", true, "alice", false);
+        assert!(!state.is_current("pi", true, "alice", alice));
+        assert!(state.is_current("pi", true, "bob", bob));
+        assert!(state.is_current("pi", false, "alice", public));
+        let next = state.begin("pi", true, "alice").unwrap();
+        assert!(state.is_current("pi", true, "alice", next));
+        assert!(!state.is_current("pi", true, "alice", alice));
+    }
+}
+
+/// 正文引用到的网页来源。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Source {
+    pub title: String,
+    pub url: String,
 }

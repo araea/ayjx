@@ -431,3 +431,24 @@ mod tests {
         );
     }
 }
+
+pub(crate) fn format_elapsed(started: std::time::Instant) -> String {
+    let seconds = started.elapsed().as_secs_f32();
+    if seconds >= 60.0 {
+        format!("{}分{:.0}秒", (seconds / 60.0) as u32, seconds % 60.0)
+    } else {
+        format!("{seconds:.1}秒")
+    }
+}
+
+pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}

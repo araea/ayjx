@@ -99,6 +99,15 @@ pub fn parse_global(raw: &str, prefixes: &[String]) -> Option<Command> {
     None
 }
 
+pub(crate) fn valid_agent_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 7
+        && !name
+            .chars()
+            .any(|c| c.is_whitespace() || "&\"#~/ _'!@$%:*".contains(c))
+        && (!name.contains('-') || super::pi_agent::is_pi_room(name))
+}
+
 pub fn parse_create(raw: &str) -> Option<(String, String, String, String)> {
     let norm = normalize(raw.trim());
     if !norm.starts_with("##") {
@@ -112,10 +121,7 @@ pub fn parse_create(raw: &str) -> Option<(String, String, String, String)> {
         .unwrap_or(after.len());
     let name = after[..name_end].trim().to_string();
 
-    if name.is_empty()
-        || name.chars().count() > 7
-        || name.chars().any(|c| "&\"#~/ -_'!@$%:*".contains(c))
-    {
+    if !valid_agent_name(&name) {
         return None;
     }
 
@@ -150,11 +156,10 @@ pub fn parse_delete_agent(raw: &str, agents: &[String]) -> Option<String> {
         return None;
     }
     let name = norm[2..].trim();
-    if agents.iter().any(|a| a.eq_ignore_ascii_case(name)) {
-        Some(name.to_string())
-    } else {
-        None
-    }
+    agents
+        .iter()
+        .find(|a| a.eq_ignore_ascii_case(name))
+        .cloned()
 }
 
 pub fn parse_agent_cmd(raw: &str, agents: &[String]) -> Option<Command> {
@@ -363,4 +368,32 @@ fn parse_suffix(norm: &str, raw: &str, has_priv_prefix: bool) -> (Action, String
     }
 
     (Action::Chat, r.to_string(), vec![])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pi_prefixed_rooms_can_be_created_and_use_longest_name() {
+        let (name, _, model, _) = parse_create("##pi-test").unwrap();
+        assert_eq!(name, "pi-test");
+        assert!(model.is_empty());
+        assert!(valid_agent_name("PI-猫娘"));
+        assert!(!valid_agent_name("pi-../x"));
+        assert!(!valid_agent_name("other-x"));
+        let rooms = vec!["pi".to_string(), name];
+        for input in ["pi-test 你好", "&pi-test 你好", "~pi-test 你好"] {
+            let cmd = parse_agent_cmd(input, &rooms).unwrap();
+            assert_eq!(cmd.agent, "pi-test");
+            assert_eq!(cmd.action, Action::Chat);
+        }
+        let cmd = parse_agent_cmd("pi-test-1", &rooms).unwrap();
+        assert_eq!(cmd.agent, "pi-test");
+        assert_eq!(cmd.action, Action::DeleteAt(Scope::Public));
+        assert_eq!(cmd.indices, vec![1]);
+        assert_eq!(
+            parse_delete_agent("-#PI-TEST", &rooms).as_deref(),
+            Some("pi-test")
+        );
+    }
 }

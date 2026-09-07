@@ -9,17 +9,14 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjec
 use std::sync::Arc;
 use toml::Value;
 
-pub mod agent;
 pub mod data;
-pub mod harness;
 pub mod logic;
 pub mod mj;
 pub mod parser;
+mod pi_agent;
 pub mod render;
-pub mod search;
 pub mod types;
 pub mod utils;
-pub mod webfetch;
 
 use data::MANAGER;
 
@@ -27,20 +24,8 @@ use data::MANAGER;
 #[serde(default)]
 pub(crate) struct OaiConfig {
     enabled: bool,
-    /// 仅这些公有房间启用本机工具；私有历史模式不会获得工具权限。
-    harness_rooms: Vec<String>,
-    shell_timeout_seconds: u64,
-    shell_max_output_bytes: usize,
-    web_search_results: usize,
-    /// 单次 `web_fetch` 返回给模型的正文字符上限。
-    web_fetch_max_chars: usize,
-    web_fetch_timeout_seconds: u64,
-    /// 优先使用服务端托管的 `web_search` 工具。移动网络下本机抓取公共搜索引擎
-    /// 几乎必被反爬拦截，托管检索才是稳定选项；端点不支持时会自动回落到本机搜索。
-    hosted_web_search: bool,
-    /// 工具房间的推理档位：`minimal` / `low` / `medium` / `high`，留空则用模型默认。
-    /// 群聊问答用 `low` 通常就够，等待时间明显更短。
-    reasoning_effort: String,
+    /// 本机 Pi CLI 可执行文件；模型与工具沿用 Pi 配置。
+    pi_command: String,
     /// 单次回复的总时间预算。
     request_timeout_seconds: u64,
     /// 超过这个秒数还没出结果就先发一条进度提示；置 0 关闭。
@@ -56,14 +41,7 @@ impl Default for OaiConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            harness_rooms: vec!["pi".to_string()],
-            shell_timeout_seconds: 300,
-            shell_max_output_bytes: 64 * 1024,
-            web_search_results: 8,
-            web_fetch_max_chars: 12_000,
-            web_fetch_timeout_seconds: 25,
-            hosted_web_search: true,
-            reasoning_effort: "low".to_string(),
+            pi_command: "pi".to_string(),
             request_timeout_seconds: 300,
             progress_notice_seconds: 30,
             plain_text_max_chars: 120,
@@ -73,31 +51,6 @@ impl Default for OaiConfig {
 }
 
 impl OaiConfig {
-    pub(crate) fn harness_for(&self, room: &str, private: bool) -> Option<harness::HarnessConfig> {
-        if private
-            || !self
-                .harness_rooms
-                .iter()
-                .any(|configured| configured.eq_ignore_ascii_case(room))
-        {
-            return None;
-        }
-        Some(harness::HarnessConfig {
-            shell_timeout_seconds: self.shell_timeout_seconds.clamp(1, 3_600),
-            shell_max_output_bytes: self.shell_max_output_bytes.clamp(1_024, 1024 * 1024),
-            web_search_results: self.web_search_results.clamp(1, 20),
-            web_fetch_max_chars: self.web_fetch_max_chars.clamp(500, 40_000),
-            web_fetch_timeout_seconds: self.web_fetch_timeout_seconds.clamp(5, 120),
-            hosted_web_search: self.hosted_web_search,
-        })
-    }
-
-    /// 归一化后的推理档位；无法识别的取值当作未设置。
-    pub(crate) fn effort(&self) -> Option<String> {
-        let effort = self.reasoning_effort.trim().to_ascii_lowercase();
-        matches!(effort.as_str(), "minimal" | "low" | "medium" | "high").then_some(effort)
-    }
-
     pub(crate) fn request_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.request_timeout_seconds.clamp(30, 1_800))
     }
@@ -267,12 +220,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn harness_is_enabled_only_for_pi_public_room_by_default() {
-        let config = OaiConfig::default();
-        assert!(config.harness_for("pi", false).is_some());
-        assert!(config.harness_for("PI", false).is_some());
-        assert!(config.harness_for("pi", true).is_none());
-        assert!(config.harness_for("other", false).is_none());
+    fn pi_command_defaults_and_legacy_config_remain_loadable() {
+        let config: OaiConfig =
+            toml::from_str("harness_rooms = ['pi']\nshell_timeout_seconds = 300").unwrap();
+        assert_eq!(config.pi_command, "pi");
+        let config: OaiConfig = toml::from_str("pi_command = '/custom/pi'").unwrap();
+        assert_eq!(config.pi_command, "/custom/pi");
     }
 }
 

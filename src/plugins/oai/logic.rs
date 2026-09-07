@@ -9,12 +9,11 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionMessageToolCalls, ChatCompletionRequestAssistantMessageArgs,
-        ChatCompletionRequestMessage,
+        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestMessageContentPartImageArgs,
         ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
-        ChatCompletionRequestToolMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequest, CreateChatCompletionRequestArgs, ImageUrlArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
+        CreateChatCompletionRequestArgs, ImageUrlArgs,
     },
 };
 use regex::Regex;
@@ -57,7 +56,7 @@ async fn reply_card(
     text: &str,
     text_mode: bool,
     header: &str,
-    sources: &[super::agent::Source],
+    sources: &[super::types::Source],
     footer: Option<String>,
 ) {
     let msg = Message::new().reply(event.message_id());
@@ -152,9 +151,8 @@ pub(crate) async fn to_data_url(url: &str) -> String {
 /// 历史里的图仍然可以继续参与对话。容量到顶时整体清空——命中率远比精确淘汰重要，
 /// 也省下维护 LRU 链表的复杂度。
 fn data_url_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
-    static CACHE: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, String>>,
-    > = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -227,90 +225,59 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
-/// 执行标准的模型 → tool calls → tool results → 模型循环。
-///
-/// 和 pi-agent / Rig 的手动工具循环一致，只把最终自然语言写入房间历史；中间的
-/// assistant/tool 消息仅属于本次推理，避免把可能很大的终端输出永久落盘。
+/// 普通房间直接使用 Chat Completions；Pi 房间由本机 CLI 管理工具。
 fn build_chat_request(
     model: &str,
     messages: Vec<ChatCompletionRequestMessage>,
-    harness: Option<super::harness::HarnessConfig>,
 ) -> anyhow::Result<CreateChatCompletionRequest> {
-    let mut builder = CreateChatCompletionRequestArgs::default();
-    builder.model(model).messages(messages);
-    if let Some(harness) = harness {
-        // Chat Completions 的工具支持是跨模型/中转的公共能力，而 reasoning_effort
-        // 属于模型和端点相关的可选扩展。不要把后者附加到工具请求：部分服务（如
-        // Luna）只在 Responses API 支持两者组合，且同一模型在不同中转上的行为也
-        // 可能不同。让服务端采用该模型的默认推理策略是最可移植的请求契约。
-        builder.tools(super::harness::chat_tool_definitions(harness));
-    }
-    Ok(builder.build()?)
+    Ok(CreateChatCompletionRequestArgs::default()
+        .model(model)
+        .messages(messages)
+        .build()?)
 }
 
 async fn complete(
     client: &Client<OpenAIConfig>,
     model: &str,
-    mut messages: Vec<ChatCompletionRequestMessage>,
-    harness: Option<super::harness::HarnessConfig>,
+    messages: Vec<ChatCompletionRequestMessage>,
 ) -> anyhow::Result<String> {
-    for _ in 0..super::harness::MAX_TOOL_ROUNDS {
-        let request = build_chat_request(model, messages.clone(), harness)?;
-        let response = client.chat().create(request).await?;
-        let choice = response
-            .choices
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("API 未返回任何候选回复"))?;
-        let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
+    let response = client
+        .chat()
+        .create(build_chat_request(model, messages)?)
+        .await?;
+    let choice = response
+        .choices
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("API 未返回任何候选回复"))?;
+    choice
+        .message
+        .content
+        .clone()
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("API 返回了空回复"))
+}
 
-        if tool_calls.is_empty() {
-            return choice
-                .message
-                .content
-                .clone()
-                .filter(|content| !content.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("API 返回了空回复"));
+fn prepare_history(
+    history: &[ChatMessage],
+    prompt: &str,
+    imgs: &[String],
+    regen: bool,
+) -> Vec<ChatMessage> {
+    let mut hist = history.to_vec();
+    if regen {
+        if hist.last().is_some_and(|m| m.role == "assistant") {
+            hist.pop();
         }
-
-        let harness = harness.ok_or_else(|| anyhow::anyhow!("模型请求了未启用的工具"))?;
-        let mut assistant = ChatCompletionRequestAssistantMessageArgs::default();
-        assistant.tool_calls(tool_calls.clone());
-        if let Some(content) = choice.message.content.clone().filter(|value| !value.is_empty()) {
-            assistant.content(content);
-        }
-        messages.push(assistant.build()?.into());
-
-        let executions = tool_calls.iter().map(|call| async move {
-            match call {
-                ChatCompletionMessageToolCalls::Function(call) => {
-                    let run = super::harness::execute_tool(
-                        &call.function.name,
-                        &call.function.arguments,
-                        harness,
-                    )
-                    .await;
-                    (call.id.clone(), run.output)
-                }
-                ChatCompletionMessageToolCalls::Custom(call) => (
-                    call.id.clone(),
-                    format!("Tool error: unsupported custom tool {}", call.custom_tool.name),
-                ),
+        if !prompt.is_empty() || !imgs.is_empty() {
+            if hist.last().is_some_and(|m| m.role == "user") {
+                hist.pop();
             }
-        });
-        for (call_id, output) in futures_util::future::join_all(executions).await {
-            messages.push(
-                ChatCompletionRequestToolMessageArgs::default()
-                    .tool_call_id(call_id)
-                    .content(output)
-                    .build()?
-                    .into(),
-            );
+            hist.push(ChatMessage::new("user", prompt, imgs.to_vec()));
         }
+    } else {
+        hist.push(ChatMessage::new("user", prompt, imgs.to_vec()));
     }
-    anyhow::bail!(
-        "工具调用超过 {} 轮，已停止以避免无限循环",
-        super::harness::MAX_TOOL_ROUNDS
-    )
+    hist
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -342,7 +309,8 @@ async fn chat(
         }
     };
 
-    if super::mj::is_mj_model(&agent.model) {
+    let use_pi = super::pi_agent::is_pi_room(name);
+    if !use_pi && super::mj::is_mj_model(&agent.model) {
         // MJ 房间天生是无历史任务流；引用文字也不应混入绘图提示词。
         super::mj::handle_agent(&agent, &cmd.args, imgs, ctx, writer, mgr).await;
         return;
@@ -366,54 +334,39 @@ async fn chat(
         }
     }
 
-    if api.0.is_empty() || api.1.is_empty() {
+    if !use_pi && (api.0.is_empty() || api.1.is_empty()) {
         reply_text(ctx, writer, &event, "❌ API 未配置。").await;
         return;
     }
 
-    let mut hist = if temp_mode {
-        Vec::new()
-    } else {
-        agent.history(is_priv_ctx, &uid).to_vec()
-    };
-
-    if regen {
-        if hist.last().map(|m| m.role == "assistant").unwrap_or(false) {
-            hist.pop();
-        }
-        if !prompt.is_empty() {
-            if hist.last().map(|m| m.role == "user").unwrap_or(false) {
-                hist.pop();
-            }
-            hist.push(ChatMessage::new("user", prompt, imgs.clone()));
-        }
-    } else {
-        if prompt.is_empty() && imgs.is_empty() {
-            reply_text(ctx, writer, &event, "💬 请输入内容。").await;
-            return;
-        }
-        hist.push(ChatMessage::new("user", prompt, imgs.clone()));
+    if !regen && prompt.is_empty() && imgs.is_empty() {
+        reply_text(ctx, writer, &event, "💬 请输入内容。").await;
+        return;
     }
-
-    let gen_id = if temp_mode {
-        0
+    let (hist, gen_id) = if temp_mode {
+        (prepare_history(&[], prompt, &imgs, regen), 0)
     } else {
-        let mut c = mgr.config.write().await;
-        if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
-            *a.history_mut(is_priv_ctx, &uid) = hist.clone();
-            a.generation_id += 1;
-            let id = a.generation_id;
-            mgr.save(&c);
-            id
-        } else {
+        let mut config = mgr.config.write().await;
+        let Some(current) = config.agents.iter_mut().find(|a| a.name == name) else {
             return;
-        }
+        };
+        let reservation = mgr.generating.write().await.begin(name, is_priv_ctx, &uid);
+        let Some(id) = reservation else {
+            drop(config);
+            reply_text(
+                ctx,
+                writer,
+                &event,
+                "⏳ 正在生成中，请等待，或使用「智能体!」停止。",
+            )
+            .await;
+            return;
+        };
+        let hist = prepare_history(current.history(is_priv_ctx, &uid), prompt, &imgs, regen);
+        *current.history_mut(is_priv_ctx, &uid) = hist.clone();
+        mgr.save(&config);
+        (hist, id)
     };
-
-    if !temp_mode {
-        let mut generating = mgr.generating.write().await;
-        generating.set_generating(name, is_priv_ctx, &uid, true);
-    }
 
     let api_base = super::utils::openai_api_base(&api.0);
     let client = Client::with_config(
@@ -424,7 +377,6 @@ async fn chat(
     .with_http_client(crate::http::client());
 
     let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
-    let harness = oai.harness_for(name, is_priv_ctx);
     let annotate = !event.is_manual_self();
     if annotate {
         let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
@@ -435,62 +387,83 @@ async fn chat(
 
     // 三件事在同一个任务里赛跑：出结果、到总预算、到进度提示时刻。用 select 而不是
     // 另起任务，是因为发消息要用借来的 ctx/event，搬进 spawn 就得整套克隆一遍。
-    let work = respond(
-        &client,
-        &agent,
-        &hist,
-        harness,
-        &oai,
-        &api_base,
-        &api.1,
-        name,
-        progress_tx,
-    );
-    let mut work = std::pin::pin!(work);
-    let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
-    let notice_delay = harness.and_then(|_| oai.progress_notice());
-    let mut notice = std::pin::pin!(async move {
-        match notice_delay {
-            Some(delay) => tokio::time::sleep(delay).await,
-            None => std::future::pending::<()>().await,
-        }
-    });
-    let mut noticed = false;
+    // 把工作 Future 放进独立作用域，超时/停止后立即 drop 并终止 Pi 子进程。
+    let mut outcome = {
+        let work = respond(
+            &client,
+            &agent,
+            &hist,
+            &oai,
+            mgr.path.parent().unwrap_or(&mgr.path),
+            progress_tx,
+        );
+        let mut work = std::pin::pin!(work);
+        let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
+        let notice_delay = use_pi.then(|| oai.progress_notice()).flatten();
+        let mut notice = std::pin::pin!(async move {
+            match notice_delay {
+                Some(delay) => tokio::time::sleep(delay).await,
+                None => std::future::pending::<()>().await,
+            }
+        });
+        let mut noticed = false;
 
-    let outcome = loop {
-        tokio::select! {
-            result = &mut work => break Some(result),
-            _ = &mut budget => break None,
-            _ = &mut notice, if !noticed => {
-                noticed = true;
-                let mut done = Vec::new();
-                while let Ok(progress) = progress_rx.try_recv() {
-                    done.push(match progress {
-                        super::agent::Progress::HostedSearch(query) => format!("搜索「{query}」"),
-                        super::agent::Progress::Tool(summary) => summary,
-                    });
+        let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                result = &mut work => break Some(result.map(Some)),
+                _ = &mut budget => break None,
+                _ = cancellation.tick(), if !temp_mode => {
+                    let config = mgr.config.read().await;
+                    if !config.agents.iter().any(|a| a.name == name)
+                        || !mgr.generating.read().await.is_current(name, is_priv_ctx, &uid, gen_id) {
+                        break Some(Ok(None));
+                    }
                 }
-                let detail = if done.is_empty() {
-                    "正在思考".to_string()
-                } else {
-                    format!("已完成 {}", done.join("、"))
-                };
-                reply_text(
-                    ctx,
-                    writer,
-                    &event,
-                    format!("⏳ 还在处理（{detail}），稍等一下…"),
-                )
-                .await;
+                _ = &mut notice, if !noticed => {
+                    noticed = true;
+                    let mut done = Vec::new();
+                    while let Ok(progress) = progress_rx.try_recv() {
+                        done.push(progress);
+                    }
+                    let detail = if done.is_empty() {
+                        "正在思考".to_string()
+                    } else {
+                        format!("正在处理 {}", done.join("、"))
+                    };
+                    reply_text(
+                        ctx,
+                        writer,
+                        &event,
+                        format!("⏳ 还在处理（{detail}），稍等一下…"),
+                    )
+                    .await;
+                }
             }
         }
     };
 
+    // 在保存历史前再次验证请求身份；旧请求不能清掉新请求的占用状态。
     if !temp_mode {
-        mgr.generating
-            .write()
-            .await
-            .set_generating(name, is_priv_ctx, &uid, false);
+        let mut config = mgr.config.write().await;
+        let mut generating = mgr.generating.write().await;
+        if generating.is_current(name, is_priv_ctx, &uid, gen_id) {
+            generating.set_generating(name, is_priv_ctx, &uid, false);
+            if let Some(Ok(Some(reply))) = &outcome {
+                if let Some(agent) = config.agents.iter_mut().find(|a| a.name == name) {
+                    agent.history_mut(is_priv_ctx, &uid).push(ChatMessage::new(
+                        "assistant",
+                        &reply.text,
+                        vec![],
+                    ));
+                    mgr.save(&config);
+                } else {
+                    outcome = Some(Ok(None));
+                }
+            }
+        } else {
+            outcome = Some(Ok(None));
+        }
     }
 
     match outcome {
@@ -507,34 +480,11 @@ async fn chat(
             .await;
         }
         Some(Err(error)) => {
-            reply_text(ctx, writer, &event, format!("❌ API 错误：{error:#}")).await;
+            reply_text(ctx, writer, &event, format!("❌ 对话失败：{error:#}")).await;
         }
-        Some(Ok(reply_data)) => {
+        Some(Ok(None)) => {}
+        Some(Ok(Some(reply_data))) => {
             let content = reply_data.text;
-
-            // 期间被「智能体!」打断或历史被改写过，这次结果就作废。
-            if !temp_mode {
-                let stale = {
-                    let c = mgr.config.read().await;
-                    c.agents
-                        .iter()
-                        .find(|a| a.name == name)
-                        .is_some_and(|a| a.generation_id != gen_id)
-                };
-                if stale {
-                    if annotate {
-                        let _ = api::set_msg_emoji_like(
-                            ctx,
-                            writer.clone(),
-                            event.message_id(),
-                            124,
-                            false,
-                        )
-                        .await;
-                    }
-                    return;
-                }
-            }
 
             let msg_index = if temp_mode {
                 0
@@ -543,18 +493,9 @@ async fn chat(
                 c.agents
                     .iter()
                     .find(|a| a.name == name)
-                    .map(|a| a.history(is_priv_ctx, &uid).len() + 1)
+                    .map(|a| a.history(is_priv_ctx, &uid).len())
                     .unwrap_or(0)
             };
-
-            if !temp_mode {
-                let mut c = mgr.config.write().await;
-                if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
-                    a.history_mut(is_priv_ctx, &uid)
-                        .push(ChatMessage::new("assistant", &content, vec![]));
-                }
-                mgr.save(&c);
-            }
 
             let image_urls = extract_image_urls(&content);
             let header = if temp_mode {
@@ -608,8 +549,8 @@ async fn chat(
             let footer = (oai.show_trace_footer() && !plain).then(|| {
                 let mut footer = format!(
                     "{} · {}",
-                    agent.model,
-                    super::agent::format_elapsed(started)
+                    reply_data.model.as_deref().unwrap_or(&agent.model),
+                    super::utils::format_elapsed(started)
                 );
                 if !reply_data.trace.is_empty() {
                     footer.push_str(" · ");
@@ -672,91 +613,54 @@ async fn chat(
     }
 }
 
+fn room_model_label(agent: &Agent) -> &str {
+    if super::pi_agent::is_pi_room(&agent.name) {
+        "Pi 本机配置"
+    } else {
+        &agent.model
+    }
+}
+
 /// 一次成功回复的产物。
 struct Reply {
     text: String,
-    sources: Vec<super::agent::Source>,
+    sources: Vec<super::types::Source>,
     trace: Vec<String>,
+    model: Option<String>,
 }
 
-/// 选择请求链路并取回最终文本。
-///
-/// 工具房间优先走 Responses：托管检索、推理档位与跨轮推理态都只在那条路上可用。
-/// 端点没有实现 `/responses` 时回落到 Chat Completions，用户侧无感。
-#[allow(clippy::too_many_arguments)]
+/// Pi 房间直接读取本机 Pi 配置，普通房间继续使用 OAI 配置。
 async fn respond(
     client: &Client<OpenAIConfig>,
     agent: &Agent,
     hist: &[ChatMessage],
-    harness: Option<super::harness::HarnessConfig>,
     oai: &super::OaiConfig,
-    api_base: &str,
-    api_key: &str,
-    room: &str,
-    progress: tokio::sync::mpsc::UnboundedSender<super::agent::Progress>,
+    data_dir: &std::path::Path,
+    progress: tokio::sync::mpsc::UnboundedSender<String>,
 ) -> anyhow::Result<Reply> {
-    if let Some(harness) = harness {
-        let request = super::agent::AgentRequest {
-            api_base: api_base.to_string(),
-            api_key: api_key.to_string(),
-            model: agent.model.clone(),
-            instructions: super::agent::build_instructions(
-                &agent.system_prompt,
-                harness.hosted_web_search,
-                room,
-            ),
-            input: build_agent_input(hist).await,
-            harness,
-            reasoning_effort: oai.effort(),
-            cache_key: Some(format!("ayjx-oai:{room}")),
-            progress: Some(progress),
-        };
-        match super::agent::run(request).await {
-            Ok(outcome) => {
-                return Ok(Reply {
-                    text: outcome.text,
-                    sources: outcome.sources,
-                    trace: outcome.trace,
-                });
-            }
-            Err(super::agent::AgentError::Unsupported(reason)) => {
-                warn!(target: "Plugin/OAI", "Responses 不可用，回落到 Chat Completions：{reason}");
-            }
-            Err(error) => return Err(anyhow::anyhow!("{error}")),
-        }
+    if super::pi_agent::is_pi_room(&agent.name) {
+        let result = super::pi_agent::conversation(
+            &oai.pi_command,
+            data_dir,
+            &agent.system_prompt,
+            hist,
+            Some(progress),
+        )
+        .await?;
+        return Ok(Reply {
+            text: result.text,
+            sources: Vec::new(),
+            trace: result.trace,
+            model: result.model,
+        });
     }
-
     let msgs = build_chat_messages(agent, hist).await;
     Ok(Reply {
-        text: complete(client, &agent.model, msgs, harness).await?,
+        text: complete(client, &agent.model, msgs).await?,
         sources: Vec::new(),
         trace: Vec::new(),
+        model: Some(agent.model.clone()),
     })
-}
-
-/// 把房间历史转成 Responses 输入项。系统提示走 `instructions`，不占输入位。
-async fn build_agent_input(hist: &[ChatMessage]) -> Vec<serde_json::Value> {
-    let re = Regex::new(r"!\[.*?\]\((data:image/[^\s\)]+)\)").unwrap();
-    let mut items = Vec::with_capacity(hist.len());
-    for message in hist {
-        match message.role.as_str() {
-            "user" => {
-                let images = resolve_images(&message.images).await;
-                if let Some(item) = super::agent::user_item(&message.content, &images) {
-                    items.push(item);
-                }
-            }
-            "assistant" => {
-                // 历史里的 base64 图片重放一遍只会撑爆上下文，留个占位即可。
-                let clean = re.replace_all(&message.content, "[Image Created]");
-                if let Some(item) = super::agent::assistant_item(&clean) {
-                    items.push(item);
-                }
-            }
-            _ => {}
-        }
-    }
-    items
 }
 
 /// 把房间历史转成 Chat Completions 消息。
@@ -776,11 +680,10 @@ async fn build_chat_messages(
     .iter()
     .any(|kw| model_lower.contains(kw));
 
-    let mut pending_sys_prompt = (!agent.system_prompt.is_empty()).then(|| agent.system_prompt.clone());
+    let mut pending_sys_prompt =
+        (!agent.system_prompt.is_empty()).then(|| agent.system_prompt.clone());
 
-    if !force_user_role_for_system
-        && let Some(sp) = pending_sys_prompt.take()
-    {
+    if !force_user_role_for_system && let Some(sp) = pending_sys_prompt.take() {
         msgs.push(
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(sp)
@@ -901,9 +804,9 @@ fn is_plain_enough(text: &str, max_chars: usize) -> bool {
             || line.starts_with("- ")
             || line.starts_with("* ")
             || line.starts_with("> ")
-            || line
-                .split_once(". ")
-                .is_some_and(|(head, _)| !head.is_empty() && head.chars().all(|c| c.is_ascii_digit()))
+            || line.split_once(". ").is_some_and(|(head, _)| {
+                !head.is_empty() && head.chars().all(|c| c.is_ascii_digit())
+            })
     })
 }
 
@@ -980,9 +883,7 @@ pub async fn execute(
                 reply_text(ctx, writer, &msg_event, "❌ 请指定新名称：智能体~#新名称").await;
                 return;
             }
-            if cmd.args.chars().count() > 7
-                || cmd.args.chars().any(|c| "&\"#~/ -_'!@$%:*".contains(c))
-            {
+            if !super::parser::valid_agent_name(&cmd.args) {
                 reply_text(
                     ctx,
                     writer,
@@ -1023,9 +924,7 @@ pub async fn execute(
                 reply_text(ctx, writer, &msg_event, "❌ 请指定新名称：智能体~=新名称").await;
                 return;
             }
-            if cmd.args.chars().count() > 7
-                || cmd.args.chars().any(|c| "&\"#~/ -_'!@$%:*".contains(c))
-            {
+            if !super::parser::valid_agent_name(&cmd.args) {
                 reply_text(
                     ctx,
                     writer,
@@ -1048,6 +947,7 @@ pub async fn execute(
             }
             let idx_opt = c.agents.iter().position(|a| a.name == *name);
             if let Some(idx) = idx_opt {
+                mgr.generating.write().await.cancel_room(name);
                 c.agents[idx].name = cmd.args.clone();
                 mgr.save(&c);
                 reply_text(
@@ -1076,6 +976,16 @@ pub async fn execute(
             }
         }
         Action::SetModel => {
+            if super::pi_agent::is_pi_room(name) {
+                reply_text(
+                    ctx,
+                    writer,
+                    &msg_event,
+                    "Pi 房间使用本机 Pi 配置的模型，请在 Pi 中修改默认模型。",
+                )
+                .await;
+                return;
+            }
             if cmd.args.is_empty() {
                 reply_text(ctx, writer, &msg_event, "❌ 请指定模型：智能体%模型名").await;
                 return;
@@ -1129,7 +1039,8 @@ pub async fn execute(
                 };
                 let content = format!(
                     "**模型**: `{}`\n\n**提示词**:\n```\n{}\n```",
-                    a.model, prompt_display
+                    room_model_label(a),
+                    prompt_display
                 );
                 reply(
                     ctx,
@@ -1159,7 +1070,10 @@ pub async fn execute(
             use std::collections::BTreeMap;
             let mut groups: BTreeMap<String, Vec<(usize, &Agent)>> = BTreeMap::new();
             for (i, a) in c.agents.iter().enumerate() {
-                groups.entry(a.model.clone()).or_default().push((i + 1, a));
+                groups
+                    .entry(room_model_label(a).to_string())
+                    .or_default()
+                    .push((i + 1, a));
             }
             let mut html_parts = Vec::new();
             for (model, mut agents) in groups {
@@ -1190,6 +1104,7 @@ pub async fn execute(
         Action::Delete => {
             let mut c = mgr.config.write().await;
             if let Some(idx) = c.agents.iter().position(|a| a.name == *name) {
+                mgr.generating.write().await.cancel_room(name);
                 c.agents.remove(idx);
                 mgr.save(&c);
                 reply_text(ctx, writer, &msg_event, format!("🗑️ 已删除 {}", name)).await;
@@ -1496,6 +1411,10 @@ pub async fn execute(
             if let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) {
                 let priv_scope = matches!(scope, Scope::Private);
                 if a.edit_at(priv_scope, &uid, idx, &cmd.args) {
+                    mgr.generating
+                        .write()
+                        .await
+                        .set_generating(name, priv_scope, &uid, false);
                     mgr.save(&c);
                     reply_text(ctx, writer, &msg_event, format!("✏️ 已编辑第 {} 条", idx)).await;
                 } else {
@@ -1520,6 +1439,12 @@ pub async fn execute(
             if let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) {
                 let priv_scope = matches!(scope, Scope::Private);
                 let deleted = a.delete_at(priv_scope, &uid, &cmd.indices);
+                if !deleted.is_empty() {
+                    mgr.generating
+                        .write()
+                        .await
+                        .set_generating(name, priv_scope, &uid, false);
+                }
                 if deleted.is_empty() {
                     reply_text(ctx, writer, &msg_event, "❌ 索引无效。").await;
                 } else {
@@ -1542,7 +1467,7 @@ pub async fn execute(
             }
         }
         Action::ClearHistory(scope) => {
-            let is_priv_ctx = cmd.private_reply;
+            let is_priv_ctx = matches!(scope, Scope::Private);
             {
                 mgr.generating
                     .write()
@@ -1646,14 +1571,15 @@ pub async fn execute(
 | `智能体~` | 重新生成上一条 |
 | `智能体!` | 停止生成 |
 
-## 工具增强房间
-| 房间 | 能力 |
+## Pi Agent 房间
+| 房间名 | 能力 |
 |------|------|
-| `pi` | 联网检索并打开网页核实、执行终端命令；终端无需确认 |
+| `pi` 或 `pi-*` | 使用本机 Pi Agent 的模型与工具配置进行对话 |
 
-> 工具：`web_search` 搜索、`web_fetch` 读取网页正文、`shell` 执行本机命令，同一轮内并发执行。
-> 高权限工具仅对 `[oai].harness_rooms` 中列出的公有房间生效，`&` 私有模式不启用工具。
-> 回复卡片底部会列出引用来源与本次耗时、工具轨迹。
+> 公有、`&` 私有和 `~` 临时模式均使用 Pi，历史按原模式隔离。
+> 使用 `##pi-test` 创建 Pi 房间；模型由本机 Pi 配置决定，房间提示词追加到 Pi 系统提示词。
+> 支持图片、历史编辑/删除/清空/重新生成；长回复卡片显示实际模型、耗时和工具轨迹。
+> Pi 可执行文件由 `[oai].pi_command` 指定，默认 `pi`。
 
 ## MJ 绘图房间
 | 房间模型 | 直接操作 |
@@ -1832,7 +1758,7 @@ pub async fn handle_create(
         if !desc.is_empty() {
             a.description = desc.to_string();
         }
-        let updated_model = a.model.clone();
+        let updated_model = room_model_label(a).to_string();
         mgr.save(&c);
         reply_text(
             ctx,
@@ -1854,7 +1780,15 @@ pub async fn handle_create(
             ctx,
             writer,
             &msg_event,
-            format!("🤖 已创建 {}（模型：{}）", name, model),
+            format!(
+                "🤖 已创建 {}（模型：{}）",
+                name,
+                if super::pi_agent::is_pi_room(name) {
+                    "Pi 本机配置"
+                } else {
+                    &model
+                }
+            ),
         )
         .await;
     }
@@ -1865,9 +1799,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn portable_tool_request_omits_model_specific_reasoning_options() {
+    fn ordinary_chat_request_has_no_tools() {
         let request = build_chat_request(
-            "gpt-5.6-luna",
+            "example-model",
             vec![
                 ChatCompletionRequestUserMessageArgs::default()
                     .content("test")
@@ -1875,19 +1809,10 @@ mod tests {
                     .unwrap()
                     .into(),
             ],
-            Some(super::super::harness::HarnessConfig {
-                shell_timeout_seconds: 30,
-                shell_max_output_bytes: 4096,
-                web_search_results: 5,
-                web_fetch_max_chars: 4000,
-                web_fetch_timeout_seconds: 20,
-                hosted_web_search: false,
-            }),
         )
         .unwrap();
         let serialized = serde_json::to_value(request).unwrap();
-
-        assert!(serialized.get("tools").is_some());
+        assert!(serialized.get("tools").is_none());
         assert!(serialized.get("reasoning_effort").is_none());
     }
 
@@ -1900,5 +1825,37 @@ mod tests {
         assert!(!is_plain_enough(&"很长".repeat(200), 120));
         // 置 0 表示始终渲染卡片。
         assert!(!is_plain_enough("短", 0));
+    }
+    #[test]
+    fn regeneration_replays_only_the_current_user_message() {
+        let hist = vec![
+            ChatMessage::new("user", "旧问题", vec!["image".into()]),
+            ChatMessage::new("assistant", "旧回答", vec![]),
+        ];
+        let replay = prepare_history(&hist, "", &[], true);
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].images, vec!["image"]);
+        let edited = prepare_history(&hist, "新问题", &[], true);
+        assert_eq!(edited.len(), 1);
+        assert_eq!(edited[0].content, "新问题");
+        assert!(edited[0].images.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pi_room_routing_ignores_the_oai_model_and_credentials() {
+        let dir = std::env::temp_dir().join(format!("pi-routing-{:032x}", rand::random::<u128>()));
+        let config = super::super::OaiConfig {
+            pi_command: dir.join("missing-pi").to_string_lossy().into(),
+            ..Default::default()
+        };
+        let client = Client::with_config(OpenAIConfig::new().with_api_base("").with_api_key(""));
+        for name in ["pi", "PI-test"] {
+            let agent = Agent::new(name, "mj", "", "");
+            let history = vec![ChatMessage::new("user", "test", vec![])];
+            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+            let result = respond(&client, &agent, &history, &config, &dir, tx).await;
+            assert!(result.err().unwrap().to_string().contains("无法启动 pi"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
