@@ -9,6 +9,7 @@ mod http;
 mod matcher;
 mod message;
 mod plugins;
+mod render;
 mod scheduler;
 
 use crate::config::AppConfig;

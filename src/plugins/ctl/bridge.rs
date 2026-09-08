@@ -254,7 +254,8 @@ async fn handle(request: Request) -> Response {
     // 审计：谁、在哪一轮、执行了什么，落进与聊天同一份日志。
     info!(target: LOG_TARGET, "控制通道执行（{user}）：{command}");
     match super::execute(&ctx, &command).await {
-        Ok(text) => Response { ok: true, text },
+        // 控制通道只要文本：调用方可能是 CLI 或 pi agent，图片对它们没有意义
+        Ok(out) => Response { ok: true, text: out.text },
         Err(text) => Response {
             ok: false,
             text: format!("操作未完成：{text}"),

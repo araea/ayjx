@@ -2,11 +2,20 @@
 
 面向维护者与后续自动化任务的参考手册。只描述现状与约定，不描述历史。
 
+- [目录结构](#目录结构)
+- [事件流](#事件流)
+- [插件系统](#插件系统)
+- [插件编写约定](#插件编写约定)
+- [出图与渲染](#出图与渲染)
+- [配置与数据](#配置与数据)
+- [新增一个插件](#新增一个插件)
+- [构建与测试](#构建与测试)
+
 ## 目录结构
 
 ```
 src/
-  main.rs          启动：加载配置、初始化数据库、连接适配器
+  main.rs          启动：加载配置、初始化数据库、连接适配器、优雅退出
   adapters/        适配器。satori.rs 为 Satori WS/HTTP 实现，console.rs 供本地测试
   command.rs       指令解析与消息内容提取的公共工具
   config.rs        AppConfig 与插件配置读写，build_config 辅助函数
@@ -14,11 +23,15 @@ src/
   http.rs          全局 reqwest 客户端（Android CA 兼容），download_bytes
   matcher.rs       事件去重
   message.rs       Message 消息构建器（text/image/node_custom 等）
-  plugins.rs       插件框架核心：Plugin 定义、流水线、配置读写
-  plugins/         各插件，registry.rs 为注册表
-  scheduler.rs     定时任务（daily/interval/周期推送，带 Pace 错峰）
+  plugins.rs       插件框架核心：Plugin 定义、注册宏、流水线、配置读写
+  plugins/         各插件；registry.rs 为注册表（唯一的插件清单）
+  render/          原生卡片渲染层：字体、画布、卡片部件（详见「出图与渲染」）
+  scheduler.rs     定时任务（daily / interval / 周期推送，带 Pace 错峰）
   db/              sea-orm 实体与查询（SQLite，data/bot.db）
 ```
+
+`res/` 存放插件的静态资源（词库、人格提示词、技能说明），`docs/` 是本手册所在，
+`tests/` 是几个用 Node 跑的端到端脚本（前台指令、重启、Satori 工具）。
 
 ## 事件流
 
@@ -31,23 +44,40 @@ src/
   流水线走完仍未消费 → 末尾派发 EventType::BeforeSend
 ```
 
-Context 通过 Move 传递，不深拷贝事件。`send_fake_event` 可将伪造事件推回流水线。
+Context 通过 Move 传递，不深拷贝事件。`plugins::send_fake_event` 可把伪造事件推回流水线。
+
+插件的执行顺序**就是 `registry.rs` 里的书写顺序**。因此过滤类插件写在最前
+（`meta_filter` 掐掉心跳与元事件），`ctl` 紧随其后确保管理入口不被任何插件截胡，
+记录类（`logger`、`recorder`）在业务插件之前拿到原始消息。
 
 ## 插件系统
 
-插件即一个模块，需提供：
+一个插件就是 `src/plugins/` 下的一个模块，需要提供三个必需项与两个可选钩子：
 
-- `handle(ctx, writer) -> BoxFuture<Result<Option<Context>, PluginError>>` — 必需
-- `default_config() -> toml::Value` — 必需
-- `validate_config(&toml::Value) -> Result<(), String>` — 必需，使用真实配置类型反序列化
-- `init(ctx)` / `on_connected(ctx, writer)` — 可选生命周期钩子
+| 项 | 签名 | 说明 |
+| --- | --- | --- |
+| `handle` | `fn(Context, LockedWriter) -> BoxFuture<Result<Option<Context>, PluginError>>` | 必需，事件处理 |
+| `default_config` | `fn() -> toml::Value` | 必需，通常是 `build_config(Config::default())` |
+| `validate_config` | `fn(&toml::Value) -> Result<(), String>` | 必需，用真实配置类型反序列化 |
+| `init` | `fn(Context) -> BoxFuture<Result<(), PluginError>>` | 可选，启动时建表 / 载入数据 |
+| `on_connected` | 同 `handle` | 可选，Bot 连接就绪后注册推送任务 |
 
-注册在 `src/plugins/registry.rs` 的 `register_plugins!` 宏中，宏自动生成模块声明；
-`display_name` 为中文展示名（help/settings 用），配置键用标识符。
+`Plugin` 结构除上述函数指针外还带一组**帮助元数据**，全部在注册表里声明：
+
+| 字段 | 缺省 | 用途 |
+| --- | --- | --- |
+| `display_name` | 模块名 | 中文展示名；`/help`、`/ctl` 都认它 |
+| `section` | `"misc"` | 帮助总览的分区代号，取值见 `help::SECTIONS` |
+| `summary` | `""` | 一句话说明 |
+| `commands` | `&[]` | 指令清单，`cmds![("指令", "说明"), …]` |
+
+**帮助中心不再自带清单**：`/help` 与 `/ctl` 全部从注册表读这些字段，
+所以新增插件只改 `registry.rs` 一处，帮助总览、插件详情与控制面板同时跟上。
+`section` 写错会落到「其他」而不是消失，`summary` 漏填由 `help::tests` 当场拦下。
 
 插件配置使用顶层 `[<name>] enabled`（例如 `[help]`），运行时每次事件从配置快照读取。
-带生命周期的插件如果启动时未开启，后来开启会等待重启初始化，避免调用未就绪的 handler。
-ctl 位于 meta_filter 之后、logger/recorder 之前；统一控制与部署说明见 [CONTROL.md](CONTROL.md)。
+带生命周期钩子的插件如果启动时未开启，后来开启会等待重启初始化，避免调用未就绪的
+handler；`/ctl list` 里标注为「待重启」。统一控制与部署说明见 [CONTROL.md](CONTROL.md)。
 
 ## 插件编写约定
 
@@ -87,22 +117,88 @@ msg 支持 `Message`、`&str`、`String`。下载资源用 `crate::http::downloa
 
 **日志**：target 用 `"Plugin/<Name>"` 常量或字面量，命名与注册名一致（如 `Plugin/WordCloud`）。
 
-**下载与渲染**：图片下载 `http::download_bytes`；合并转发节点用 `Message::node_custom`；
-HTML 截图走 `cdp_html_shot`（ai_news/help 已有现成封装可参考）。
+## 出图与渲染
+
+框架里有三条出图路线，按内容形态选，不要混用：
+
+| 路线 | 依赖 | 谁在用 | 适用 |
+| --- | --- | --- | --- |
+| **原生卡片** `crate::render` | 系统 CJK 字体 | ciyi、help、ctl | 版式确定的清单、说明、盘面 |
+| **图表** plotters | 无 | stats | 坐标轴、折线、柱状 |
+| **浏览器截图** cdp_html_shot | Chrome/Chromium | webshot、ai_news、oai | 真实网页、富文本长图 |
+
+原生渲染层 `src/render/` 分三层，从下往上：
+
+```
+render/font.rs     字体装载 + 逐字符回退链（缺字不画豆腐块，按度量留位）
+render/canvas.rs   逻辑像素画布：SDF 几何、文字光栅化与度量、折行、外投影
+render/kit.rs      系统类卡片的成品部件：Theme + Block 序列 → PNG base64
+```
+
+- **逻辑像素**：排版代码只写逻辑坐标，绘制时统一乘设备比例 `s`（各插件的
+  `image_scale`，1—4 倍，默认 3）。同一份版式换倍率不用改一个数字。
+- **先量后画**：`kit::render` 先用一张 1×1 的量尺画布算出每个 Block 的高度，
+  累加得到卡片真实高度后再开画布。既不会「先给足高度再裁」而静默截断，
+  也不必猜上界。ciyi 的宣纸卡版式独特，自己画，但同样先算后裁。
+- **折行**：`Canvas::wrap` 西文按词断、中文避头点避尾点，末行超宽加省略号。
+- **换皮不改版式**：`kit::Theme` 收拢全部配色。help 用 `blueprint()`（青绿），
+  ctl 用 `graphite()`（琥珀），同一套版式语言、不同色相，一眼能分辨两张卡的来路。
+
+**出图失败一律回退纯文本**。原生渲染只在「一个可用 CJK 字体都找不到」时返回
+`None`；浏览器截图则可能因缺少 Chrome 而失败。两种情况下插件都必须仍能把同样的
+内容用文字讲清楚——图里一套、文字另一套是不允许的。
+
+短反馈不出图：一句话的纠错、开关确认、报错走纯文本，出图既慢又刷屏，
+还挡住了复制粘贴。ciyi 的 `Reply::wants_card` 与 ctl 的 `Output::card` 都是这条线。
 
 ## 配置与数据
 
 - `config.toml` 不入库；首次启动写默认值，启动时补字段、清残留，解析失败则退出不覆盖
-- 插件配置改动经 `plugins::update_config` 或 settings 插件，持久化受 `config_save_lock` 串行化
+- 插件配置改动经 `plugins::update_config` 或 ctl 插件，持久化受 `config_save_lock` 串行化
 - 数据库 `data/bot.db`，插件数据目录 `data/<plugin>/`（`get_data_dir`）
+
+## 新增一个插件
+
+1. 写 `src/plugins/<name>.rs`（或 `<name>/mod.rs` 式的目录模块），
+   提供 `handle`、`default_config`、`validate_config`，按需加 `init` / `on_connected`。
+2. 在 `src/plugins/registry.rs` 增加一条记录，位置决定它在流水线中的顺序：
+
+   ```rust
+   my_plugin {
+       display_name: "我的插件",
+       section: "play",
+       summary: "一句话说明它做什么",
+       commands: cmds![("我的指令 <参数>", "这条指令干什么")],
+       on_init: Some(my_plugin::init)
+   },
+   ```
+
+3. `cargo test`。注册表与帮助的一致性检查会告诉你还差什么：
+   `every_plugin_has_a_summary`、`every_plugin_claims_a_known_section`、
+   `grouping_loses_no_plugin`，以及跑遍全部插件的 `satori_compat_tests`。
+
+**不需要**改动 `help.rs`、`ctl.rs` 或任何渲染代码——`/help`、`/help <插件名>`、
+`/ctl list` 都会自动带上新插件。只有在需要一个全新分区时，才去 `help::SECTIONS`
+加一行。
 
 ## 构建与测试
 
 ```sh
 cargo check        # 快速验证
-cargo test         # 102 个测试；浏览器截图类为 ignored
+cargo test         # 209 个测试；出图与浏览器类为 ignored
 cargo fmt          # 提交前
 ```
 
 改动插件后至少跑 `cargo test`：`plugins::satori_compat_tests` 会用规范化消息跑全部插件，
-`help::tests` 校验注册表与帮助分区一致。
+`help::tests` 校验注册表元数据完整、分区不丢插件。
+
+卡片版式改动要人工看图，三个插件各有一个 `ignored` 的落盘测试：
+
+```sh
+CIYI_CARD_DUMP=/tmp/cards cargo test ciyi::card -- --ignored
+HELP_CARD_DUMP=/tmp/cards cargo test help::card -- --ignored
+CTL_CARD_DUMP=/tmp/cards  cargo test ctl::card  -- --ignored
+```
+
+它们用真实注册表造样张（含启用/停用、长昵称、超长指令表等边界），
+出图落盘后逐张核对；断言只保证「画得完、是合法 PNG」，好不好看得自己看。

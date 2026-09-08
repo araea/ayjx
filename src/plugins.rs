@@ -20,6 +20,23 @@ pub type PluginHandler =
 
 pub type PluginInitHandler = fn(Context) -> BoxFuture<'static, Result<(), PluginError>>;
 
+/// 一条面向用户的指令说明。
+///
+/// `cmd` 可含参数占位符（`<必填>` / `[可选]`）与 ` / ` 分隔的别名，
+/// 渲染时会把首个抬为主指令、其余降级为别名；`note` 是一句话用途。
+pub struct Cmd {
+    pub cmd: &'static str,
+    pub note: &'static str,
+}
+
+/// 把 `("指令", "说明")` 列表展开成 `&'static [Cmd]`（结构体字面量可静态提升）
+#[macro_export]
+macro_rules! cmds {
+    ( $( ($c:expr, $n:expr) ),* $(,)? ) => {
+        &[ $( $crate::plugins::Cmd { cmd: $c, note: $n } ),* ]
+    };
+}
+
 pub struct Plugin {
     pub name: &'static str,
     /// 中文显示名（面向用户的展示名，默认与 name 相同，可在注册时覆盖）
@@ -30,6 +47,16 @@ pub struct Plugin {
     pub on_connected: Option<PluginHandler>,
     pub default_config: fn() -> Value,
     pub validate_config: fn(&Value) -> Result<(), String>,
+
+    // —— 帮助元数据 ——
+    // 三个字段一并写在注册表里，帮助中心直接读，不再另设一份清单。
+    // 新增插件只需在 registry.rs 补一条，/help 与 /ctl 自动跟上。
+    /// 所属分区代号，见 `help::SECTIONS`；缺省落到「其他」
+    pub section: &'static str,
+    /// 一句话说明：这个插件到底做什么
+    pub summary: &'static str,
+    /// 完整指令清单；后台自动工作的插件留空
+    pub commands: &'static [Cmd],
 }
 
 static PLUGINS: OnceLock<Vec<Plugin>> = OnceLock::new();
@@ -82,6 +109,9 @@ macro_rules! register_plugins {
                                 on_connected: None,
                                 default_config: $module::default_config,
                                 validate_config: $module::validate_config,
+                                section: "misc",
+                                summary: "",
+                                commands: &[],
                             };
                             // 应用自定义覆盖 (如果有)
                             $(

@@ -4,12 +4,13 @@ use crate::command::{extract_text_arg, get_prefixes, match_word_command};
 use crate::config::{AppConfig, build_config};
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{Plugin, PluginError, get_plugins, needs_startup, pending_startup};
+use crate::plugins::{Plugin, PluginError, get_config, get_plugins, needs_startup, pending_startup};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
 pub mod bridge;
+pub mod card;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -19,6 +20,11 @@ struct Config {
     admins: Vec<i64>,
     /// 允许管理员在 pi 房间里用自然语言驱动 ctl（见 bridge）。关闭后 pi 房间拿不到凭据。
     pi_control: bool,
+    /// 是否把用法、状态、配置与差异排版成卡片图；关掉或没有可用字体时退回纯文本。
+    /// 短反馈（开关、设置、重置、报错）任何时候都走纯文本。
+    image_enabled: bool,
+    /// 卡片图渲染倍率（1.0—4.0）。3.0 在手机上放大也不糊
+    image_scale: f64,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -26,6 +32,8 @@ impl Default for Config {
             enabled: true,
             admins: vec![],
             pi_control: true,
+            image_enabled: true,
+            image_scale: 3.0,
         }
     }
 }
@@ -35,7 +43,7 @@ pub fn default_config() -> Value {
 pub fn validate_config(value: &Value) -> Result<(), String> {
     Config::deserialize(value.clone())
         .map(|_| ())
-        .map_err(|_| "admins 必须是 QQ 号整数数组，pi_control 必须是布尔值".into())
+        .map_err(|_| "admins 必须是 QQ 号整数数组，pi_control/image_enabled 必须是布尔值，image_scale 必须是数字".into())
 }
 pub fn is_manager(ctx: &Context) -> bool {
     if ctx.bot.adapter == "console" && ctx.bot.platform == "console" {
@@ -351,43 +359,81 @@ fn word(text: &str) -> (&str, &str) {
         .map(|i| (&text[..i], text[i..].trim_start()))
         .unwrap_or((text, ""))
 }
-pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String> {
+/// 一次控制操作的结果：纯文本必备，卡片图可选。
+///
+/// 只有「要被读、要被翻回去看」的四种输出带卡片（用法、状态、配置、差异）；
+/// 开关、设置、重置的确认与全部报错都只有文本——它们是一句话反馈，
+/// 出图既慢又刷屏，还挡住了复制粘贴。
+pub(crate) struct Output {
+    pub text: String,
+    pub card: Option<card::Card>,
+}
+impl From<String> for Output {
+    fn from(text: String) -> Self {
+        Output { text, card: None }
+    }
+}
+impl Output {
+    fn carded(text: String, card: card::Card) -> Self {
+        Output { text, card: Some(card) }
+    }
+}
+
+/// ctl 自己的指令清单，取自注册表——用法文本、用法卡与 `/help ctl` 同源
+fn own_commands() -> &'static [crate::plugins::Cmd] {
+    get_plugins()
+        .iter()
+        .find(|p| p.name == "ctl")
+        .map(|p| p.commands)
+        .unwrap_or(&[])
+}
+
+pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<Output, String> {
     let (action, rest) = word(input);
     let prefix = get_prefixes(ctx).first().cloned().unwrap_or_default();
     if ["", "help", "帮助"].contains(&action) {
-        return Ok(usage(&prefix));
+        return Ok(Output::carded(usage(&prefix), card::usage(&prefix, own_commands())));
     }
     if ["list", "ls", "status", "列表", "状态"].contains(&action) {
-        let cfg = ctx.config.read().unwrap();
-        let rows: Vec<_> = get_plugins()
-            .iter()
-            .filter(|p| match rest {
-                "on" | "开启" => enabled(&cfg, p.name),
-                "off" | "关闭" => !enabled(&cfg, p.name),
-                key => p.name.contains(&key.to_ascii_lowercase()) || p.display_name.contains(key),
-            })
-            .map(|p| {
-                format!(
-                    "{} {}（{}）{}",
-                    if enabled(&cfg, p.name) { "开" } else { "关" },
-                    p.name,
-                    p.display_name,
-                    if enabled(&cfg, p.name) && pending_startup(p.name) {
-                        " · 待重启"
-                    } else {
-                        ""
+        let rows: Vec<card::Status> = {
+            let cfg = ctx.config.read().unwrap();
+            get_plugins()
+                .iter()
+                .filter(|p| match rest {
+                    "on" | "开启" => enabled(&cfg, p.name),
+                    "off" | "关闭" => !enabled(&cfg, p.name),
+                    key => {
+                        p.name.contains(&key.to_ascii_lowercase()) || p.display_name.contains(key)
                     }
-                )
-            })
-            .collect();
-        return Ok(format!(
+                })
+                .map(|p| card::Status {
+                    name: p.name,
+                    display: p.display_name,
+                    on: enabled(&cfg, p.name),
+                    pending: enabled(&cfg, p.name) && pending_startup(p.name),
+                })
+                .collect()
+        };
+        let text = format!(
             "插件状态（全局配置）\n{}\n操作帮助：{prefix}ctl",
             if rows.is_empty() {
                 "无匹配插件".into()
             } else {
-                rows.join("\n")
+                rows.iter()
+                    .map(|r| {
+                        format!(
+                            "{} {}（{}）{}",
+                            if r.on { "开" } else { "关" },
+                            r.name,
+                            r.display,
+                            if r.pending { " · 待重启" } else { "" }
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             }
-        ));
+        );
+        return Ok(Output::carded(text, card::list(&prefix, rest, &rows)));
     }
     if !is_manager(ctx) {
         return Err(DENIED.into());
@@ -420,7 +466,8 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
                 }
             ))
         })
-        .await;
+        .await
+        .map(Output::from);
     }
     let (name, rest) = word(rest);
     let p = resolve(name)?;
@@ -438,12 +485,12 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
                 cfg.plugins.get(p.name).ok_or("配置不存在")?
             };
             let value = at(source, path).ok_or("配置路径不存在；省略路径可查看完整配置")?;
-            Ok(format!(
-                "{}.{}\n{}\n{}",
-                p.name,
-                path,
-                display(value, path),
-                effect(p.name)
+            let body = display(value, path);
+            let is_defaults = ["defaults", "默认"].contains(&action);
+            let text = format!("{}.{}\n{}\n{}", p.name, path, body, effect(p.name));
+            Ok(Output::carded(
+                text,
+                card::config(&prefix, p.name, path, is_defaults, &body, effect(p.name)),
             ))
         }
         "diff" | "差异" => {
@@ -455,11 +502,12 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
             let defaults = (p.default_config)();
             let mut lines = Vec::new();
             differences(&defaults, current, "", &mut lines);
-            Ok(if lines.is_empty() {
-                "配置与默认值一致".into()
+            let text = if lines.is_empty() {
+                "配置与默认值一致".to_string()
             } else {
                 lines.join("\n")
-            })
+            };
+            Ok(Output::carded(text, card::diff(&prefix, p.name, &lines)))
         }
         "set" | "设置" => {
             if path.is_empty() || tail.is_empty() {
@@ -481,7 +529,7 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
                     })
                     .ok_or("配置路径不存在")?
             };
-            set_value(ctx, p.name, path, parse(tail, &old)?).await
+            set_value(ctx, p.name, path, parse(tail, &old)?).await.map(Output::from)
         }
         "reset" | "重置" => {
             let path = if path == "--confirm" && tail.is_empty() {
@@ -509,6 +557,7 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
                     ))
                 })
                 .await
+                .map(Output::from)
             } else {
                 set_value(
                     ctx,
@@ -517,6 +566,7 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String
                     at(&defaults, path).cloned().ok_or("该路径没有默认值")?,
                 )
                 .await
+                .map(Output::from)
             }
         }
         _ => Err(format!("未知操作「{action}」。发送 {prefix}ctl 查看用法。")),
@@ -563,11 +613,30 @@ pub fn handle(
             return Ok(Some(ctx));
         };
         let input = extract_text_arg(&matched.args);
+        let config = get_config::<Config>(&ctx, "ctl").unwrap_or_default();
         let response = execute(&ctx, &input)
             .await
-            .unwrap_or_else(|e| format!("操作未完成：{e}"));
+            .unwrap_or_else(|e| Output::from(format!("操作未完成：{e}")));
+
+        // 出图是纯 CPU 工作，没有浏览器可失败；没有可用字体时 render 返回 None，
+        // 直接落回下面的纯文本这一路。
+        if config.image_enabled
+            && let Some(card) = &response.card
+            && let Some(b64) = card.render(config.image_scale)
+        {
+            send_msg(
+                &ctx,
+                writer,
+                msg.group_id(),
+                Some(msg.user_id()),
+                Message::new().image(format!("base64://{b64}")),
+            )
+            .await?;
+            return Ok(None);
+        }
+
         // Bound each message so a large array/config does not exceed adapter limits.
-        let chars: Vec<char> = response.chars().collect();
+        let chars: Vec<char> = response.text.chars().collect();
         for part in chars.chunks(2800) {
             send_msg(
                 &ctx,
@@ -708,6 +777,7 @@ mod tests {
             execute(&ctx, "diff repeater")
                 .await
                 .unwrap()
+                .text
                 .contains("789")
         );
         assert!(execute(&ctx, "reset repeater channel.white").await.is_err());
@@ -718,6 +788,7 @@ mod tests {
             execute(&ctx, "diff repeater")
                 .await
                 .unwrap()
+                .text
                 .contains("一致")
         );
         tokio::fs::remove_file(ctx.config_path.as_ref())

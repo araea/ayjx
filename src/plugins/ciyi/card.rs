@@ -15,11 +15,12 @@
 //!   - **五档距离命名**（咫尺/相邻/相近/相关/天涯）：让「#137」这种抽象数字
 //!     有一个可直接读出来的语感，颜色同步从朱砂过渡到远山蓝。
 //!
-//! 绘制基元见 `painter.rs`：文字由 ab_glyph 直接光栅化，几何用 SDF 逐像素判定。
+//! 绘制基元见 `crate::render::canvas`：文字由 ab_glyph 直接光栅化并逐字符回退，
+//! 几何用 SDF 逐像素判定。
 //! 版心 668 逻辑 px，配合 `image_scale`（默认 3 倍）出图约 2160px 宽。
 
 use super::view::{COMMAND_ROWS, Board, HintRow, RankBoard, RankItem, Reply, Win};
-use crate::plugins::ciyi::painter::{Canvas, Fonts, Ink};
+use crate::render::{Canvas, Fonts, Ink};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{FixedOffset, Utc};
 use image::RgbaImage;
@@ -102,23 +103,9 @@ fn mid_baseline(cy: f32, px: f32) -> f32 {
     cy + 0.38 * px
 }
 
-/// 白与色之间的插值（接近度条 / 底纹渐变）
-fn mix(a: Ink, b: Ink, t: f32) -> Ink {
-    let t = t.clamp(0.0, 1.0);
-    Ink {
-        r: (a.r as f32 + (b.r as f32 - a.r as f32) * t) as u8,
-        g: (a.g as f32 + (b.g as f32 - a.g as f32) * t) as u8,
-        b: (a.b as f32 + (b.b as f32 - a.b as f32) * t) as u8,
-        a: a.a + (b.a - a.a) * t,
-    }
-}
-
 /// 虚线描一个矩形框（圆角近似为直角，框小看不出来）
 fn dashed_rect(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, ink: Ink) {
-    c.hline(x, x + w, y, 1.0, ink, 4.0, 4.0);
-    c.hline(x, x + w, y + h, 1.0, ink, 4.0, 4.0);
-    c.vdash(x, y, y + h, 1.0, ink, 4.0, 4.0);
-    c.vdash(x + w, y, y + h, 1.0, ink, 4.0, 4.0);
+    c.dashed_rect(x, y, w + 1.0, h + 1.0, 1.0, ink, 4.0, 4.0);
 }
 
 /// 点状分隔线（行与行之间）
@@ -131,7 +118,7 @@ fn gradient_bar(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: Ink) {
     let cols = w.ceil() as i32;
     for i in 0..cols {
         let t = i as f32 / w.max(1.0);
-        let ink = mix(Ink::rgb(255, 255, 255).with_a(0.45), color, t);
+        let ink = Ink::rgb(255, 255, 255).with_a(0.45).mix(color, t);
         c.rect(x + i as f32, y, 1.0, h, ink);
     }
 }
@@ -144,7 +131,7 @@ fn draw_cells(c: &mut Canvas, f: &Fonts, x: f32, y: f32, word: &str, large: bool
     let (cell, font_px, blank_px, border_a) = if large {
         (104.0, 60.0, 0.0, 0.5)
     } else {
-        (50.0, 26.0, 21.0, 0.30)
+        (50.0, 26.0, 24.0, 0.30)
     };
     let chars: Vec<char> = word.chars().collect();
     let n = if chars.is_empty() { 2 } else { chars.len() };
@@ -174,14 +161,11 @@ fn draw_cells(c: &mut Canvas, f: &Fonts, x: f32, y: f32, word: &str, large: bool
         c.hline(cx + inner, cx + cell - inner, cy, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
         c.vdash(xc, y + inner, y + cell - inner, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
         // 字
+        // 格子里的字按**墨迹**居中：田字格讲究字身正对十字线，
+        // 按步进宽度居中会让全角「？」歪在一角
         match ch {
-            Some(&ch) => {
-                c.text_center(xc, cy, &ch.to_string(), &f.serif_b, font_px, INK, 0.0);
-            }
-            None => {
-                // 全角「？」的字形偏左，往右挪四分之一个字身压回中线
-                c.text_center(xc + 0.25 * blank_px, cy, "？", &f.serif_b, blank_px, RED.with_a(0.42), 0.0);
-            }
+            Some(&ch) => c.text_center_ink(xc, cy, &ch.to_string(), &f.serif_b, font_px, INK, 0.0),
+            None => c.text_center_ink(xc, cy, "？", &f.serif_b, blank_px, RED.with_a(0.46), 0.0),
         }
         cx += cell + gap;
     }
@@ -240,7 +224,7 @@ fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, 
     let sx = rk_right - hash_w - 1.0 - num_w;
     c.text(sx, base1, "#", &f.sans_b, 16.0, ink.with_a(0.5), 0.0);
     c.text(sx + hash_w + 1.0, base1, &num, &f.sans_b, 25.0, ink, 0.0);
-    c.text_right(rk_right, base1 + 7.0 + 9.5, label, &f.serif_b, 12.5, ink.with_a(0.8), 2.5);
+    c.text_right(rk_right, base1 + 7.0 + 10.0, label, &f.serif_b, 13.0, ink.with_a(0.95), 2.5);
 
     // 中列：邻词牌 + 词 + 邻词牌，垂直居中在 TRI_H 里
     let mx = CX0 + 100.0;
@@ -275,7 +259,7 @@ fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, 
 fn draw_flag(c: &mut Canvas, f: &Fonts, cx: f32, cy: f32) {
     let mut layer = Canvas::new(30.0, 30.0, c.s());
     layer.rrect_fill(2.0, 2.0, 26.0, 26.0, 5.0, RED);
-    layer.text_center(15.0, 15.0, "新", &f.serif_b, 14.0, CREAM, 0.0);
+    layer.text_center_ink(15.0, 15.0, "新", &f.serif_b, 14.0, CREAM, 0.0);
     c.blit_rotated(&layer.img, cx, cy, -6.0);
 }
 
@@ -286,7 +270,7 @@ fn draw_note(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
     c.rrect_fill(CX0, y, CW, h, 8.0, RED.with_a(0.06));
     c.rrect_fill(CX0, y + 8.0, 3.0, h - 16.0, 1.5, RED);
     c.rrect_fill(CX0 + 16.0, y + 12.0, 24.0, 24.0, 4.0, RED.with_a(0.14));
-    c.text_center(CX0 + 28.0, y + 24.0, "注", &f.serif_b, 14.0, RED, 0.0);
+    c.text_center_ink(CX0 + 28.0, y + 24.0, "注", &f.serif_b, 14.0, RED, 0.0);
     c.text(CX0 + 51.0, mid_baseline(y + 24.0, 16.0), text, &f.sans, 16.0, NOTE_C, 0.0);
     y + h
 }
@@ -323,7 +307,9 @@ fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) ->
     // 托纸
     c.fill(SHELL_BG);
     c.dot_grid(0.0, 0.0, VIEW_W, h, 7.0, 0.0, 0.0, 1.0, Ink::rgb(255, 255, 255).with_a(0.42));
-    // 宣纸卡：暖白底 + 两层纤维颗粒
+    // 宣纸卡：先落一层极淡的投影把纸从托纸上托起来，再铺暖白底与两层纤维颗粒。
+    // 投影偏移 2px 向下，模拟一张平放的纸——不是悬浮的卡片，所以扩散给得很克制。
+    c.rrect_shadow(PAD, PAD + 2.0, CARD_W, h - PAD * 2.0, 5.0, 7.0, Ink::rgb(96, 78, 54).with_a(0.16));
     c.rrect_fill(PAD, PAD, CARD_W, h - PAD * 2.0, 5.0, PAPER);
     let paper = |cc: &mut Canvas| {
         cc.dot_grid(PAD, PAD, CARD_W, h - PAD * 2.0, 13.0, 0.0, 0.0, 1.0, Ink::rgb(120, 90, 60).with_a(0.045));
@@ -339,7 +325,7 @@ fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) ->
     // 印章：朱砂底 + 旋转 -3° 的「词」
     let mut seal = Canvas::new(46.0, 46.0, c.s());
     seal.rrect_fill(2.0, 2.0, 42.0, 42.0, 5.0, RED);
-    seal.text_center(23.0, 23.0, "词", &f.serif_b, 25.0, CREAM, 0.0);
+    seal.text_center_ink(23.0, 23.0, "词", &f.serif_b, 25.0, CREAM, 0.0);
     c.blit_rotated(&seal.img, CX0 + 21.0, head_cy, -3.0);
     // 品名
     let bx = CX0 + 42.0 + 13.0;
@@ -394,6 +380,8 @@ fn shell_foot(c: &mut Canvas, f: &Fonts, y: f32, foot: &str) -> f32 {
         c.dot_grid(0.0, card_bottom, VIEW_W, alloc_h - card_bottom, 7.0, 0.0, oy, 1.0, Ink::rgb(255, 255, 255).with_a(0.42));
         // 3) 纸卡底部圆角收边：同色条带叠在纸面上，只让下缘出现圆角
         c.rrect_fill(PAD, card_bottom - 12.0, CARD_W, 12.0, 5.0, PAPER);
+        // 3b) 补画底缘投影。外投影只落在形状外侧，纸面上已有的内容不受影响
+        c.rrect_shadow(PAD, PAD + 2.0, CARD_W, card_bottom - PAD, 5.0, 7.0, Ink::rgb(96, 78, 54).with_a(0.16));
         // 4) 内框重描到底：顶边重复描一遍同色细线，视觉无差
         c.rrect_stroke(PAD + 11.0, PAD + 11.0, CARD_W - 22.0, card_bottom - PAD - 22.0, 2.0, 1.0, SEPIA.with_a(0.16));
     }
@@ -683,7 +671,7 @@ pub fn rules_card(c: &mut Canvas, f: &Fonts) -> f32 {
 /// 分区标题：编号印 + 标题
 fn draw_section_head(c: &mut Canvas, f: &Fonts, y: f32, num: &str, title: &str) -> f32 {
     c.rrect_fill(CX0 + 2.0, y, 24.0, 24.0, 4.0, RED);
-    c.text_center(CX0 + 14.0, y + 12.0, num, &f.sans_b, 13.0, CREAM, 0.0);
+    c.text_center_ink(CX0 + 14.0, y + 12.0, num, &f.sans_b, 13.0, CREAM, 0.0);
     c.text(CX0 + 2.0 + 24.0 + 11.0, mid_baseline(y + 12.0, 21.0), title, &f.serif_b, 21.0, INK, 0.1 * 21.0);
     y + 25.0
 }

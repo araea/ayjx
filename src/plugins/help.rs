@@ -2,13 +2,15 @@
 //!
 //! 两条展示线并存：
 //!   - **卡片图**（默认）：把清单排版成一张图发出去，长内容不再刷屏，
-//!     版式见 [`card`]；
-//!   - **纯文本**：`image_enabled = false` 或截图失败时自动接管，
+//!     版式见 [`card`]，绘制走框架的原生渲染层，不需要浏览器；
+//!   - **纯文本**：`image_enabled = false` 或渲染失败时自动接管，
 //!     内容与图一致，绝不出现「图里一套、文字另一套」。
 //!
-//! 清单本身只有一份来源：[`describe`] 给出每个插件的说明与指令，
-//! [`SECTIONS`] 给出总览的分区顺序。新插件若忘了写进分区表，
-//! 会被兜底归入「其他」而不是从帮助里消失——单元测试也会盯着这件事。
+//! **清单只有一份来源：插件注册表**。每个插件的 `summary`、`commands`、
+//! `section` 都写在 `plugins/registry.rs` 的注册项里，帮助中心只负责按
+//! [`SECTIONS`] 分组和排版。新增一个插件不必改动本文件——它会自动出现在
+//! 总览里；忘了填 `section` 会落到「其他」而不是消失，忘了填 `summary`
+//! 则由单元测试当场拦下。
 
 mod card;
 
@@ -17,10 +19,9 @@ use crate::command::{extract_text_arg, get_prefixes, match_command};
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config, get_plugins};
-use futures_util::{FutureExt, future::BoxFuture};
+use crate::plugins::{Cmd, PluginError, get_config, get_plugins};
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use std::panic::AssertUnwindSafe;
 use toml::Value;
 
 const LOG_TARGET: &str = "Plugin/Help";
@@ -64,19 +65,6 @@ fn load_config(ctx: &Context) -> Config {
 
 const TRIGGERS: &[&str] = &["help", "帮助", "插件列表"];
 
-/// 单条指令说明：cmd 为指令（可含参数占位符），note 为用途说明（可为空）
-struct Cmd {
-    cmd: &'static str,
-    note: &'static str,
-}
-
-/// 展开为 `&'static [Cmd]`（结构体字面量，可静态提升）
-macro_rules! cmds {
-    ( $( ($c:expr, $n:expr) ),* $(,)? ) => {
-        &[ $( Cmd { cmd: $c, note: $n } ),* ]
-    };
-}
-
 /// 总览里的一个插件条目
 struct Entry {
     display: &'static str,
@@ -93,258 +81,18 @@ struct Group {
     items: Vec<Entry>,
 }
 
-/// 分区表：决定总览的分组与顺序。未列出的插件统一落到「其他」，不会丢。
-struct Section {
-    title: &'static str,
-    en: &'static str,
-    members: &'static [&'static str],
-}
-
-const SECTIONS: &[Section] = &[
-    Section {
-        title: "消息 · 媒体",
-        en: "MESSAGE",
-        members: &[
-            "media",
-            "sticker",
-            "image_split",
-            "gif",
-            "echo",
-            "recall",
-            "webshot",
-        ],
-    },
-    Section {
-        title: "互动 · 娱乐",
-        en: "PLAY",
-        members: &["repeater", "ping", "group_title", "ciyi", "oai"],
-    },
-    Section {
-        title: "统计 · 资讯",
-        en: "INSIGHT",
-        members: &["recorder", "wordcloud", "stats", "ai_news"],
-    },
-    Section {
-        title: "系统 · 运维",
-        en: "SYSTEM",
-        members: &[
-            "ctl",
-            "settings",
-            "help",
-            "restart",
-            "logger",
-            "meta_filter",
-        ],
-    },
+/// 分区表：决定总览的分组与顺序。
+///
+/// 插件在注册表里用 `section` 认领分区代号；代号对不上的（或没填的）
+/// 统一落到最后一个分区，不会从帮助里消失。分区内的顺序沿用注册表顺序，
+/// 因此新增插件不需要在这里登记第二遍。
+const SECTIONS: &[(&str, &str, &str)] = &[
+    ("message", "消息 · 媒体", "MESSAGE"),
+    ("play", "互动 · 娱乐", "PLAY"),
+    ("insight", "统计 · 资讯", "INSIGHT"),
+    ("system", "系统 · 运维", "SYSTEM"),
+    ("misc", "其他", "MISC"),
 ];
-
-/// 每个插件的完整指令清单。仅作展示用，与各插件实际指令保持同步。
-fn describe(name: &str) -> (&'static str, &'static [Cmd]) {
-    match name {
-        "meta_filter" => ("过滤心跳/元事件，避免噪声进入流水线", &[]),
-        "logger" => ("将收到的消息打印到控制台日志", &[]),
-        "recorder" => ("把消息记录到数据库，为词云、统计等插件提供数据源", &[]),
-        "media" => (
-            "媒体与链接互转：图片/视频 ↔ 直链",
-            cmds![
-                (
-                    "转链接 / 看链接 / 提取地址 / url",
-                    "将图片/视频转为直链（可引用消息）"
-                ),
-                ("转图片 / 预览", "将链接转为图片发送"),
-                ("转视频", "将链接转为视频发送"),
-            ],
-        ),
-        "sticker" => (
-            "保存/收藏对方发送的表情或图片（需引用原消息）",
-            cmds![
-                ("收 / 偷 / 存表情", "引用表情/图片后收藏"),
-                ("表情转图片", "引用动画表情后转为静态图片"),
-            ],
-        ),
-        "group_title" => (
-            "Bot 为群主时，给申请者设置群专属头衔",
-            cmds![("我要头衔 <文字>", "给自己申请一个群专属头衔")],
-        ),
-        "ping" => (
-            "心跳测试，统计全服 Ping 次数",
-            cmds![("ping", "测试 Bot 在线状态")],
-        ),
-        "recall" => (
-            "撤回引用的消息（需引用回复使用）",
-            cmds![("撤回", "引用要撤回的消息后发送")],
-        ),
-        "echo" => (
-            "回显参数内容（支持图片等富文本）",
-            cmds![("echo <内容>", "原样回显参数")],
-        ),
-        "repeater" => ("同一句话接力到阈值就跟读一次，带冷却、概率与打断复读", &[]),
-        "wordcloud" => (
-            "根据消息记录生成词云图",
-            cmds![
-                (
-                    "<范围><时间>词云",
-                    "范围：本群/跨群/我的；时间：今日/昨日/本周/上周/近7天/近30天/本月/上月/今年/去年/总"
-                ),
-                ("本群今日词云", "示例：本群今日"),
-                ("我的总词云", "示例：个人全部"),
-            ],
-        ),
-        "stats" => (
-            "群统计图表：发言/表情/消息类型排行榜与走势，支持早中晚与周月的错峰定时推送",
-            cmds![
-                (
-                    "<范围><时间><类型><图表>",
-                    "范围：本群/跨群/我的/所有群；时间：今日…总；类型：发言/表情包/消息类型；图表：排行榜/走势"
-                ),
-                ("本群今日发言排行榜", "示例"),
-                ("本群本周发言走势", "示例"),
-                ("所有群近7天发言排行榜", "示例：跨全部群"),
-            ],
-        ),
-        "gif" => (
-            "GIF 工具箱：合成、变速、倒放、缩放等",
-            cmds![
-                ("gif帮助 / gifhelp", "GIF 工具使用帮助"),
-                ("合成gif", "多张图片合成 GIF"),
-                ("gif变速", "调整播放速度"),
-                ("gif倒放", "反向播放"),
-                ("gif信息", "查看 GIF 帧数/尺寸等"),
-                ("gif缩放", "调整 GIF 尺寸"),
-                ("gif旋转", "旋转角度"),
-                ("gif翻转", "水平/垂直翻转"),
-                ("gif拆分", "拆分为单帧图片"),
-                ("gif拼图", "多张图片拼接"),
-            ],
-        ),
-        "image_split" => (
-            "将一张图按行列切片",
-            cmds![("裁剪 <行>x<列> / 切图 / 分割", "如：裁剪 3x3")],
-        ),
-        "ciyi" => (
-            "词意游戏：猜词与排行榜",
-            cmds![
-                (
-                    "词意帮助 / 词意指令 / 词意指令列表 / 词意帮助列表",
-                    "查看指令列表"
-                ),
-                ("词意玩法 / 词意规则", "查看游戏规则"),
-                ("词意猜测 [词语]", "开始猜词或提交答案"),
-                ("词意榜", "当前频道排行榜"),
-                ("词意全榜", "全服排行榜"),
-            ],
-        ),
-        "webshot" => ("自动对消息中的网页链接进行截图", &[]),
-        "oai" => (
-            "多智能体对话与模型/历史管理；内置 pi 使用 Responses API，按配置开放本机工具（符号指令）",
-            cmds![
-                ("oai", "查看完整模型、提示词与历史管理指令"),
-                ("~pi <任务>", "内置 pi 房间；需先配置可用的模型 API"),
-                ("oai <API地址> <密钥>", "配置模型 API"),
-                ("##<名称>(<描述>) <模型> <提示词>", "创建智能体"),
-                ("~<名称> <内容>", "与智能体对话"),
-                ("~<名称> 停止", "停止智能体回复"),
-                ("-#<名称>", "删除智能体"),
-                ("~#<名称>", "复制智能体"),
-                ("~=<名称> <新名>", "重命名智能体"),
-                ("##:<描述...>", "自动填充智能体描述"),
-                ("/#", "智能体列表"),
-                ("/%", "模型列表"),
-                ("-*", "清空所有公开智能体"),
-                ("-*!", "清空全部（含私有）"),
-            ],
-        ),
-        "ai_news" => (
-            "AI 资讯 / 热点 / 日报 / 模型榜（数据源 AIHOT）：一级推送只发图片，引用卡片后可按需提取正文与链接",
-            cmds![
-                ("ai资讯 / ai新闻", "最近 24 小时 AI 精选资讯"),
-                ("ai热点", "当前 AI 热点榜 Top 10"),
-                ("ai日报", "最新一期 AI 日报"),
-                (
-                    "ai模型榜 / 模型排行榜",
-                    "AIHOT 大模型排行榜：共识分、评测完整度与官网参考价"
-                ),
-                ("ai搜索 <关键词>", "近 7 天按关键词检索 AI 资讯"),
-                (
-                    "ai提取 <序号|全部>",
-                    "引用资讯图片后提取正文与链接；支持 1,3-5 批量提取"
-                ),
-                (
-                    "ai推送添加 <群|私聊> <ID>",
-                    "从任意群聊或私聊添加指定推送目标"
-                ),
-                (
-                    "ai推送删除 <群|私聊> <ID>",
-                    "从任意群聊或私聊删除指定推送目标"
-                ),
-                (
-                    "ai推送开启 / ai推送关闭",
-                    "不带参数时开启/关闭当前会话，也可指定目标"
-                ),
-                ("ai推送列表", "查看全部群聊与私聊推送目标"),
-                ("ai实时开启 / ai实时关闭", "当前或指定目标是否接收实时快报"),
-                ("ai实时模式 <精选|全部>", "默认仅推精选；可切换实时资讯来源"),
-                (
-                    "ai分类 <分类>",
-                    "当前目标独立选择模型、产品、行业、论文、技巧或全部"
-                ),
-                (
-                    "ai静默 <时间段>",
-                    "当前目标独立设置实时静默时段，如 23:30-07:30"
-                ),
-                (
-                    "ai推送状态 [目标]",
-                    "查看当前或指定目标的开关、实时参数与排期"
-                ),
-                ("ai推送重置 [目标]", "清空当前或指定目标的去重记录"),
-                (
-                    "设置 ai_news card_theme auto",
-                    "阅读主题自动切换；也可使用 light / dark"
-                ),
-            ],
-        ),
-        "ctl" => (
-            "统一管理全部插件的全局开关与配置；修改仅限 ctl.admins，初始化与排期修改需重启",
-            cmds![
-                ("ctl / 控制 / 插件", "查看完整用法和示例"),
-                ("ctl list [on|off|关键词]", "查看全局状态及待重启提示"),
-                ("ctl on <插件...>", "批量开启，支持英文名及中文显示名"),
-                ("ctl off <插件...>", "批量关闭；保留 ctl 管理入口"),
-                ("ctl show <插件> [路径]", "查看配置，密钥隐藏"),
-                ("ctl defaults <插件> [路径]", "查看默认配置"),
-                (
-                    "ctl set <插件> <路径> <值>",
-                    "校验后保存；支持数组、表及点分路径"
-                ),
-                (
-                    "ctl reset <插件> [路径] --confirm",
-                    "恢复默认；整插件重置保留开关与管理员"
-                ),
-                ("ctl diff <插件>", "比较当前配置与默认值"),
-            ],
-        ),
-        "settings" => (
-            "兼容旧版精选设置入口，仅限全局管理员；全部字段与插件开关请用 ctl",
-            cmds![
-                ("设置", "查看全部可调项"),
-                ("设置 <插件> <键>", "查看某项详情"),
-                ("设置 <插件> <键> <值>", "修改并自动保存"),
-            ],
-        ),
-        "help" => (
-            "按当前注册表展示 Satori 插件及开关；配置管理请用 ctl",
-            cmds![
-                ("help / 帮助 / 插件列表", "插件总览"),
-                ("help <插件名>", "查看插件详情与全部指令"),
-            ],
-        ),
-        "restart" => (
-            "每日定时自动重启 + 内存阈值监控，防止长时间运行卡顿",
-            cmds![("restart", "仅限 ctl.admins；需开启 allow_manual_restart")],
-        ),
-        _ => ("(暂无说明)", &[]),
-    }
-}
 
 fn is_enabled(ctx: &Context, name: &str) -> bool {
     let guard = ctx.config.read().unwrap();
@@ -357,7 +105,7 @@ fn is_enabled(ctx: &Context, name: &str) -> bool {
 }
 
 /// 符号指令（`/#`、`~名`、`##`、`-#` 等）本身就是完整指令，不再拼接前缀
-fn needs_prefix(cmd: &str) -> bool {
+pub(crate) fn needs_prefix(cmd: &str) -> bool {
     !cmd.starts_with(['/', '#', '~', '-'])
 }
 
@@ -365,41 +113,32 @@ fn prefix_of(ctx: &Context) -> String {
     get_prefixes(ctx).first().cloned().unwrap_or_default()
 }
 
-/// 按 [`SECTIONS`] 把已注册插件分组；漏配的插件归入「其他」，不会从帮助里消失。
+/// 按 [`SECTIONS`] 把已注册插件分组；代号对不上的落到最后一个分区，不会消失。
 fn grouped(ctx: &Context) -> Vec<Group> {
-    let plugins = get_plugins();
-    let entry = |name: &str| -> Option<Entry> {
-        plugins.iter().find(|p| p.name == name).map(|p| Entry {
-            display: p.display_name,
-            name: p.name,
-            desc: describe(p.name).0,
-            enabled: is_enabled(ctx, p.name),
-        })
-    };
+    let known: Vec<&str> = SECTIONS.iter().map(|(code, _, _)| *code).collect();
+    let fallback = known.last().copied().unwrap_or("misc");
 
-    let mut groups: Vec<Group> = SECTIONS
+    SECTIONS
         .iter()
-        .map(|sec| Group {
-            title: sec.title,
-            en: sec.en,
-            items: sec.members.iter().filter_map(|n| entry(n)).collect(),
+        .map(|(code, title, en)| Group {
+            title,
+            en,
+            items: get_plugins()
+                .iter()
+                .filter(|p| {
+                    let sec = if known.contains(&p.section) { p.section } else { fallback };
+                    sec == *code
+                })
+                .map(|p| Entry {
+                    display: p.display_name,
+                    name: p.name,
+                    desc: p.summary,
+                    enabled: is_enabled(ctx, p.name),
+                })
+                .collect(),
         })
         .filter(|g| !g.items.is_empty())
-        .collect();
-
-    let rest: Vec<Entry> = plugins
-        .iter()
-        .filter(|p| !SECTIONS.iter().any(|s| s.members.contains(&p.name)))
-        .filter_map(|p| entry(p.name))
-        .collect();
-    if !rest.is_empty() {
-        groups.push(Group {
-            title: "其他",
-            en: "MISC",
-            items: rest,
-        });
-    }
-    groups
+        .collect()
 }
 
 /// 与其他插件保持一致的分隔线
@@ -490,6 +229,15 @@ fn not_found(ctx: &Context, name: &str) -> String {
     )
 }
 
+/// 插件的指令清单（来自注册表）
+fn commands_of(name: &str) -> &'static [Cmd] {
+    get_plugins()
+        .iter()
+        .find(|p| p.name == name)
+        .map(|p| p.commands)
+        .unwrap_or(&[])
+}
+
 /// 按配置键或中文显示名查插件——图上两个名字都印着，用哪个都该找得到
 fn lookup(ctx: &Context, arg: &str) -> Option<Entry> {
     let arg = arg.trim();
@@ -499,7 +247,7 @@ fn lookup(ctx: &Context, arg: &str) -> Option<Entry> {
         .map(|p| Entry {
             display: p.display_name,
             name: p.name,
-            desc: describe(p.name).0,
+            desc: p.summary,
             enabled: is_enabled(ctx, p.name),
         })
 }
@@ -523,7 +271,7 @@ fn build_reply(ctx: &Context, arg: &str) -> Reply {
 
     match lookup(ctx, arg) {
         Some(entry) => {
-            let cmds = describe(entry.name).1;
+            let cmds = commands_of(entry.name);
             Reply {
                 text: render_detail(ctx, &entry, cmds),
                 card: Some(card::detail(&entry, cmds, &prefix)),
@@ -554,18 +302,16 @@ pub fn handle(
                 let reply = build_reply(&ctx, &arg);
 
                 let mut out = Message::new().reply(msg.message_id());
+                // 原生绘制是纯 CPU 工作，没有浏览器可失败；拿不到字体时
+                // render 返回 None，直接落到纯文本这一路
                 let image = match (&reply.card, config.image_enabled) {
-                    (Some(c), true) => match AssertUnwindSafe(c.capture(config.image_scale))
-                        .catch_unwind()
-                        .await
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("浏览器初始化失败")))
-                    {
-                        Ok(b64) => Some(b64),
-                        Err(e) => {
-                            warn!(target: LOG_TARGET, "帮助卡片渲染失败，改发纯文本: {}", e);
-                            None
+                    (Some(c), true) => {
+                        let b64 = c.render(config.image_scale);
+                        if b64.is_none() {
+                            warn!(target: LOG_TARGET, "没有可用的 CJK 字体，帮助改发纯文本");
                         }
-                    },
+                        b64
+                    }
                     _ => None,
                 };
                 out = match image {
@@ -586,41 +332,64 @@ pub fn handle(
 mod tests {
     use super::*;
 
+    /// 分区代号写错会静默落到「其他」，看图的人不会察觉——所以在这里拦下
     #[test]
-    fn every_registered_plugin_belongs_to_a_section() {
+    fn every_plugin_claims_a_known_section() {
+        let known: Vec<&str> = SECTIONS.iter().map(|(code, _, _)| *code).collect();
         for plugin in get_plugins() {
             assert!(
-                SECTIONS.iter().any(|s| s.members.contains(&plugin.name)),
-                "插件 {} 没有写进 SECTIONS，总览里会被归到「其他」",
-                plugin.name
+                known.contains(&plugin.section),
+                "插件 {} 的 section = {:?} 不在 SECTIONS 里；可选：{:?}",
+                plugin.name,
+                plugin.section,
+                known
             );
         }
     }
 
+    /// 注册表里漏填 summary 的插件，在总览里只剩一个名字
     #[test]
-    fn sections_only_reference_registered_plugins() {
-        for section in SECTIONS {
-            for name in section.members {
-                assert!(
-                    get_plugins().iter().any(|p| &p.name == name),
-                    "分区 {} 里的 {} 已不在插件注册表中",
-                    section.title,
-                    name
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_plugin_has_a_description() {
+    fn every_plugin_has_a_summary() {
         for plugin in get_plugins() {
-            assert_ne!(
-                describe(plugin.name).0,
-                "(暂无说明)",
-                "插件 {} 缺少说明",
+            assert!(
+                !plugin.summary.trim().is_empty(),
+                "插件 {} 在 registry.rs 里缺少 summary",
                 plugin.name
             );
         }
+    }
+
+    /// 分区表本身不该有摆设：每个代号都得有插件认领
+    #[test]
+    fn sections_are_all_in_use_or_are_the_fallback() {
+        let fallback = SECTIONS.last().expect("SECTIONS 非空").0;
+        for (code, title, _) in SECTIONS {
+            if *code == fallback {
+                continue;
+            }
+            assert!(
+                get_plugins().iter().any(|p| p.section == *code),
+                "分区 {title}（{code}）没有任何插件认领"
+            );
+        }
+    }
+
+    /// 分组必须覆盖全部插件，一个都不能丢
+    #[test]
+    fn grouping_loses_no_plugin() {
+        let known: Vec<&str> = SECTIONS.iter().map(|(code, _, _)| *code).collect();
+        let fallback = *known.last().unwrap();
+        let mut seen = 0usize;
+        for (code, _, _) in SECTIONS {
+            seen += get_plugins()
+                .iter()
+                .filter(|p| {
+                    let sec = if known.contains(&p.section) { p.section } else { fallback };
+                    sec == *code
+                })
+                .count();
+        }
+        assert_eq!(seen, get_plugins().len(), "分组前后插件数量对不上");
     }
 
     #[test]

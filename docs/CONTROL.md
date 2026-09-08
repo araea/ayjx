@@ -40,6 +40,7 @@ admins = [123456789] # 替换为维护者 QQ 号，可填多个
 | `/ctl set repeater channel { white = [123456], black = [] }` | 替换整张表 |
 | `/ctl set wordcloud font_family Noto Sans CJK SC` | 字符串可包含空格 |
 | `/ctl diff help` | 与默认值比较 |
+| `/ctl set ctl image_enabled 关` | 让 ctl 只回纯文本，不出卡片图 |
 | `/ctl reset help image_scale --confirm` | 恢复某项默认值 |
 | `/ctl reset help --confirm` | 恢复插件参数，保留其开关 |
 
@@ -191,5 +192,8 @@ ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤�
 并使用文件锁防止脚本重复启动；不要绕过脚本另外启动第二份程序。
 
 进程“运行中”不等于 QQ 已连接；连接成功应看到 Satori READY/登录就绪日志。
-`/ctl list` 查看插件开关，`/ctl show <插件>` 查看配置。截图依赖 Chrome/Chromium；
-缺少浏览器时框架继续运行，help 在渲染失败时回退为文字。
+`/ctl list` 查看插件开关，`/ctl show <插件>` 查看配置。
+
+`ctl` 与 `help` 的卡片图是原生绘制的，不需要浏览器，只依赖系统里有一份可用的
+中日韩字体；一份都找不到时两者自动回退成纯文本。网页截图（`webshot`）与
+`ai_news` 的资讯卡仍依赖 Chrome/Chromium，缺少浏览器时框架继续运行、这两项失效。
