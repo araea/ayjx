@@ -958,14 +958,14 @@ async fn query_brief(config: &AiNewsConfig, target: Option<PushTarget>) -> Paylo
             let opts = pusher::render_options(config);
             let rendered =
                 render::render_items(&format!("🤖 AI 资讯速递 · {}", window), &items, &opts);
-            let html = card::items_card(
+            let card = card::items_card(
                 "AI 资讯速递",
                 window,
                 pusher::card_slice(&items, config),
                 &opts,
                 card::resolve_theme(&config.card_theme),
             );
-            Payload::build(config, rendered, Some(html)).await
+            Payload::build(config, rendered, Some(card)).await
         }
         Ok(_) => notice(format!("📭 {}内暂无 AI 资讯。", window)),
         Err(e) => {
@@ -979,11 +979,11 @@ async fn query_hot_topics(config: &AiNewsConfig) -> Payload {
     match api::fetch_hot_topics(config.request_timeout_seconds, api::Poll::Fresh).await {
         Ok(Some(topics)) if !topics.is_empty() => {
             let rendered = render::render_hot_topics(&topics);
-            let html = card::hot_topics_card(
+            let card = card::hot_topics_card(
                 pusher::card_slice(&topics, config),
                 card::resolve_theme(&config.card_theme),
             );
-            Payload::build(config, rendered, Some(html)).await
+            Payload::build(config, rendered, Some(card)).await
         }
         Ok(_) => notice("📭 当前没有热点条目。"),
         Err(e) => {
@@ -997,12 +997,12 @@ async fn query_daily(config: &AiNewsConfig) -> Payload {
     match api::fetch_latest_daily(config.request_timeout_seconds).await {
         Ok(Some(report)) => {
             let rendered = render::render_daily(&report, config.daily_max_blocks);
-            let html = card::daily_card(
+            let card = card::daily_card(
                 &report,
                 config.daily_max_blocks,
                 card::resolve_theme(&config.card_theme),
             );
-            Payload::build(config, rendered, Some(html)).await
+            Payload::build(config, rendered, Some(card)).await
         }
         Ok(None) => notice("📭 当前没有可用的 AI 日报。"),
         Err(e) => {
@@ -1023,12 +1023,12 @@ async fn query_models(config: &AiNewsConfig) -> Payload {
     {
         Ok(board) if !board.entries.is_empty() => {
             let rendered = render::render_models(&board, max_items);
-            let html = card::models_card(
+            let card = card::models_card(
                 &board,
                 max_items,
                 card::resolve_theme(&config.card_theme),
             );
-            Payload::build(config, rendered, Some(html)).await
+            Payload::build(config, rendered, Some(card)).await
         }
         Ok(_) => notice("📭 AIHOT 模型榜当前没有可展示的条目。"),
         Err(e) => {
@@ -1062,14 +1062,14 @@ async fn query_search(config: &AiNewsConfig, keyword: &str) -> Payload {
                 )
             };
             let rendered = render::render_items(&header, &items, &opts);
-            let html = card::items_card(
+            let card = card::items_card(
                 "关键词检索",
                 &subtitle,
                 pusher::card_slice(&items, config),
                 &opts,
                 card::resolve_theme(&config.card_theme),
             );
-            Payload::build(config, rendered, Some(html)).await
+            Payload::build(config, rendered, Some(card)).await
         }
         Ok(_) => notice(format!("📭 近 7 天没有找到与「{}」相关的 AI 资讯。", keyword)),
         Err(e) => {

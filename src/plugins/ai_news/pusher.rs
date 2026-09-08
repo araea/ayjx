@@ -88,16 +88,26 @@ pub struct Payload {
 }
 
 impl Payload {
-    /// 文本 + 卡片：卡片渲染失败不影响推送，退回纯文本继续
-    pub async fn build(cfg: &AiNewsConfig, rendered: Rendered, card_html: Option<String>) -> Self {
-        let image = match card_html {
-            Some(html) if cfg.image_enabled => match card::capture(&html, cfg.image_scale).await {
-                Ok(b64) => Some(b64),
-                Err(e) => {
-                    warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
-                    None
+    /// 文本 + 卡片：卡片渲染失败不影响推送，退回纯文本继续。
+    ///
+    /// 原生出图是纯 CPU 工作，一张长卡在 3 倍下要上百毫秒——放到阻塞线程池上跑，
+    /// 免得占着异步工作线程把同时进行的收发一起卡住。
+    pub async fn build(cfg: &AiNewsConfig, rendered: Rendered, card: Option<card::Card>) -> Self {
+        let image = match card {
+            Some(card) if cfg.image_enabled => {
+                let scale = cfg.image_scale;
+                match tokio::task::spawn_blocking(move || card.render(scale)).await {
+                    Ok(Some(b64)) => Some(b64),
+                    Ok(None) => {
+                        warn!(target: LOG_TARGET, "没有可用的 CJK 字体，本次改发纯文本");
+                        None
+                    }
+                    Err(e) => {
+                        warn!(target: LOG_TARGET, "卡片渲染失败，本次改发纯文本: {}", e);
+                        None
+                    }
                 }
-            },
+            }
             _ => None,
         };
         Self { rendered, image }
@@ -292,14 +302,14 @@ pub(super) async fn deliver_items(
 ) -> bool {
     let opts = render_options(cfg);
     let rendered = render::render_items(headline.text, items, &opts);
-    let card_html = card::items_card(
+    let card = card::items_card(
         headline.card_title,
         headline.card_subtitle,
         card_slice(items, cfg),
         &opts,
         card_theme(cfg),
     );
-    let payload = Payload::build(cfg, rendered, Some(card_html)).await;
+    let payload = Payload::build(cfg, rendered, Some(card)).await;
 
     deliver(
         ctx,
@@ -569,12 +579,12 @@ pub async fn push_daily(
     };
     // 各群内容一致，卡片只截一次
     let rendered = render::render_daily(&report, cfg.daily_max_blocks);
-    let card_html = Some(card::daily_card(
+    let card = Some(card::daily_card(
         &report,
         cfg.daily_max_blocks,
         card_theme(&cfg),
     ));
-    let payload = Payload::build(&cfg, rendered, card_html).await;
+    let payload = Payload::build(&cfg, rendered, card).await;
 
     let mut attempted_any = false;
     for target in targets {
@@ -634,11 +644,11 @@ pub async fn push_hot_topics(
     }
 
     let rendered = render::render_hot_topics(&topics);
-    let card_html = Some(card::hot_topics_card(
+    let card = Some(card::hot_topics_card(
         card_slice(&topics, &cfg),
         card_theme(&cfg),
     ));
-    let payload = Payload::build(&cfg, rendered, card_html).await;
+    let payload = Payload::build(&cfg, rendered, card).await;
 
     let mut attempted_any = false;
     for target in targets {

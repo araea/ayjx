@@ -420,15 +420,19 @@ mod tests {
             crate::plugins::ai_news::render::render_models(&board, 12).to_text()
         );
 
-        // 顺带把真实数据的卡片 HTML 落盘，方便肉眼校版
+        // 顺带把真实数据的卡片出一张图落盘，方便肉眼校版
         if let Ok(dir) = std::env::var("AI_NEWS_CARD_DUMP") {
             std::fs::create_dir_all(&dir).unwrap();
-            let html = crate::plugins::ai_news::card::models_card(
+            let card = crate::plugins::ai_news::card::models_card(
                 &board,
                 12,
                 crate::plugins::ai_news::card::CardTheme::Dark,
             );
-            std::fs::write(format!("{}/models_live.html", dir), html).unwrap();
+            if let Some(b64) = card.render(3.0) {
+                use base64::{Engine, engine::general_purpose::STANDARD};
+                let bytes = STANDARD.decode(&b64).unwrap();
+                std::fs::write(format!("{dir}/models_live.png"), &bytes).unwrap();
+            }
         }
     }
 }

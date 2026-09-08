@@ -47,6 +47,12 @@ pub struct Theme {
     pub accent_soft: Ink,
     /// 「停用」灰
     pub off: Ink,
+    /// 卡片投影。深底上要重才抬得起来，浅底上同一个值就成了一圈脏灰
+    pub shadow: Ink,
+    /// 上行 / 好转
+    pub good: Ink,
+    /// 下行 / 变差
+    pub bad: Ink,
     /// 文字覆盖度伽马，见 [`Canvas::set_text_gamma`]
     pub text_gamma: f32,
 }
@@ -68,6 +74,9 @@ impl Theme {
             accent: Ink::rgb(93, 230, 201),
             accent_soft: Ink::rgb(93, 230, 201).with_a(0.12),
             off: Ink::rgb(152, 163, 181),
+            shadow: Ink::rgb(0, 0, 0).with_a(0.55),
+            good: Ink::rgb(117, 201, 149),
+            bad: Ink::rgb(227, 138, 141),
             text_gamma: 0.82,
         }
     }
@@ -88,8 +97,44 @@ impl Theme {
             accent: Ink::rgb(240, 178, 92),
             accent_soft: Ink::rgb(240, 178, 92).with_a(0.12),
             off: Ink::rgb(150, 150, 158),
+            shadow: Ink::rgb(0, 0, 0).with_a(0.55),
+            good: Ink::rgb(117, 201, 149),
+            bad: Ink::rgb(227, 138, 141),
             text_gamma: 0.82,
         }
+    }
+
+    /// 白纸：浅底。深色卡在夜里舒服，白天户外反过来——资讯卡按时段在两者间切换。
+    ///
+    /// 不是把深色主题的数值取反：浅底上细网格要更淡、文字要更黑、投影要更收，
+    /// 否则会显得脏。伽马也调低一档，浅底上的深色字本来就偏重。
+    pub const fn paper() -> Self {
+        Theme {
+            shell: Ink::rgb(233, 237, 243),
+            card: Ink::rgb(252, 253, 255),
+            grid: Ink::rgb(23, 32, 46).with_a(0.022),
+            grid_major: Ink::rgb(23, 32, 46).with_a(0.038),
+            border: Ink::rgb(23, 32, 46).with_a(0.115),
+            surface: Ink::rgb(23, 32, 46).with_a(0.042),
+            ink: Ink::rgb(23, 32, 46),
+            ink2: Ink::rgb(61, 72, 88),
+            ink3: Ink::rgb(122, 133, 150),
+            accent: Ink::rgb(14, 130, 112),
+            accent_soft: Ink::rgb(14, 130, 112).with_a(0.11),
+            off: Ink::rgb(148, 161, 178),
+            shadow: Ink::rgb(21, 32, 48).with_a(0.13),
+            good: Ink::rgb(22, 122, 82),
+            bad: Ink::rgb(186, 60, 68),
+            text_gamma: 0.94,
+        }
+    }
+
+    /// 换一个主色，其余不动。四类资讯各有自己的色相，版式却共用一套。
+    pub const fn accented(mut self, accent: Ink) -> Self {
+        self.accent = accent;
+        self.accent_soft = accent.with_a(0.12);
+        self.grid_major = accent.with_a(0.042);
+        self
     }
 }
 
@@ -158,6 +203,60 @@ pub enum Tone {
     Info,
     /// 灰色虚线框、居中：「没有内容」的占位
     Empty,
+    /// 无框小字：免责声明一类的脚注，读不读都行，别抢视线
+    Note,
+}
+
+/// 条目元信息里的一小格
+pub enum Meta {
+    /// 有底色的标签（分类、厂商）
+    Chip(String),
+    /// 纯文字（来源、时间）
+    Plain(String),
+}
+
+/// 标题后的小标记
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mark {
+    Up,
+    Down,
+    New,
+}
+
+/// 条目右栏的数字：一个大字加两行小注
+pub struct Score {
+    pub value: String,
+    pub notes: Vec<String>,
+}
+
+/// 榜单／清单里的一条。
+///
+/// 资讯、热点、模型榜三张卡的行结构其实是同一个：左边一个序号牌，右边自上而下是
+/// 标题、元信息、正文，外加可选的引用、进度条和右栏数字。与其各写一遍，不如让
+/// 用不上的部分留空——省下的不只是代码，还有「三张卡看起来不像一家人」的风险。
+pub struct Entry {
+    /// 左侧序号，空则不画序号牌
+    pub rank: String,
+    /// 前三名用实心牌，其余描边
+    pub top: bool,
+    pub title: String,
+    /// 标题后的趋势标记
+    pub mark: Option<(String, Mark)>,
+    pub meta: Vec<Meta>,
+    /// 正文摘要，可为空
+    pub body: String,
+    /// 主色引用块：（小标签, 正文）
+    pub quote: Option<(String, String)>,
+    /// 0—100 的进度条
+    pub meter: Option<f32>,
+    /// 右栏数字
+    pub score: Option<Score>,
+}
+
+/// 带圆点的一条列表项
+pub struct Bullet {
+    pub title: String,
+    pub text: String,
 }
 
 /// 卡片正文的一段。每段自带上间距，调用方只管按顺序列出来。
@@ -188,6 +287,10 @@ pub enum Block {
     Code(Vec<String>),
     /// 数字格一排
     Tiles(Vec<Tile>),
+    /// 榜单／清单
+    Entries(Vec<Entry>),
+    /// 带圆点的列表
+    Bullets(Vec<Bullet>),
     /// 引导 / 占位框
     Callout { tone: Tone, text: String },
     /// 纯粹的垂直留白
@@ -240,6 +343,26 @@ const IT_GAP_Y: f32 = 10.0;
 /// 说明最多三行——现有最长的一条正好三行，句子不会断在半途
 const IT_DESC_LINES: usize = 3;
 
+/// 条目版式：序号牌、右栏与各段行高
+const EN_RANK_W: f32 = 38.0;
+const EN_RANK_H: f32 = 27.0;
+const EN_GAP_X: f32 = 15.0;
+const EN_SCORE_W: f32 = 104.0;
+const EN_PADT: f32 = 15.0;
+const EN_PADB: f32 = 16.0;
+const EN_TITLE: f32 = 20.0;
+const EN_TITLE_LH: f32 = 28.0;
+const EN_TITLE_LINES: usize = 2;
+const EN_META_H: f32 = 23.0;
+const EN_BODY: f32 = 14.5;
+const EN_BODY_LH: f32 = 22.0;
+const EN_BODY_LINES: usize = 4;
+const EN_QUOTE_LH: f32 = 21.0;
+const EN_METER_H: f32 = 7.0;
+/// 列表项：圆点列表的行高
+const BU_TITLE_LH: f32 = 24.0;
+const BU_TEXT_LH: f32 = 22.0;
+
 const CMD_CHIP_H: f32 = 34.0;
 const CODE_LH: f32 = 21.0;
 const CALL_LH: f32 = 26.0;
@@ -281,7 +404,19 @@ impl Block {
                 16.0 + 14.0 + n as f32 * CODE_LH + 14.0
             }
             Block::Tiles(_) => 18.0 + 74.0,
+            Block::Entries(entries) => entries
+                .iter()
+                .enumerate()
+                .map(|(i, e)| entry_h(c, f, e, cw) + if i > 0 { 1.0 } else { 0.0 })
+                .sum(),
+            Block::Bullets(bullets) => {
+                14.0 + bullets.iter().map(|b| bullet_h(c, f, b, cw)).sum::<f32>()
+            }
             Block::Callout { text, tone } => {
+                if *tone == Tone::Note {
+                    let n = c.wrap(text, &f.sans, 12.5, 0.0, cw, 4).len() as f32;
+                    return 20.0 + n * 19.0;
+                }
                 let inner = if *tone == Tone::Empty {
                     cw - 48.0
                 } else {
@@ -307,6 +442,96 @@ fn item_h(c: &Canvas, f: &Fonts, it: &Item, colw: f32) -> f32 {
         )
         .len() as f32;
     IT_PADY + 23.0 + 6.0 + lines * IT_DESC_LH + IT_PADY
+}
+
+/// 条目正文可用的宽度：扣掉左边的序号牌与右边的数字栏
+fn entry_text_w(entry: &Entry, cw: f32) -> f32 {
+    let left = if entry.rank.is_empty() {
+        0.0
+    } else {
+        EN_RANK_W + EN_GAP_X
+    };
+    let right = if entry.score.is_some() {
+        EN_SCORE_W + EN_GAP_X
+    } else {
+        0.0
+    };
+    (cw - left - right).max(80.0)
+}
+
+fn entry_h(c: &Canvas, f: &Fonts, entry: &Entry, cw: f32) -> f32 {
+    let tw = entry_text_w(entry, cw);
+    // 趋势标记跟在标题后面，把首行能用的宽度让出去一点
+    let mark_w = entry
+        .mark
+        .as_ref()
+        .map(|(text, _)| c.text_w(text, &f.sans_b, 13.0, 0.0) + 14.0)
+        .unwrap_or(0.0);
+    let mut h = EN_PADT
+        + c.wrap(
+            &entry.title,
+            &f.sans_b,
+            EN_TITLE,
+            0.0,
+            tw - mark_w,
+            EN_TITLE_LINES,
+        )
+        .len() as f32
+            * EN_TITLE_LH;
+    if !entry.meta.is_empty() {
+        h += 5.0 + EN_META_H;
+    }
+    if !entry.body.is_empty() {
+        h += 7.0
+            + c.wrap(&entry.body, &f.sans, EN_BODY, 0.0, tw, EN_BODY_LINES)
+                .len() as f32
+                * EN_BODY_LH;
+    }
+    if let Some((label, text)) = &entry.quote {
+        h += 10.0 + 12.0 + quote_lines(c, f, label, text, tw).len() as f32 * EN_QUOTE_LH + 12.0;
+    }
+    if entry.meter.is_some() {
+        h += 11.0 + EN_METER_H;
+    }
+    h += EN_PADB;
+
+    // 右栏比正文高时以右栏为准，否则大字会顶穿下一条
+    if let Some(score) = &entry.score {
+        let right = EN_PADT + 36.0 + score.notes.len() as f32 * 18.0 + EN_PADB;
+        return h.max(right);
+    }
+    h
+}
+
+/// 引用块里的行。标签与正文拼在一起排，标签只是首行的一个前缀。
+fn quote_lines(c: &Canvas, f: &Fonts, label: &str, text: &str, tw: f32) -> Vec<String> {
+    let inner = tw - 26.0;
+    let indent = if label.is_empty() {
+        0.0
+    } else {
+        c.text_w(label, &f.sans_b, 13.5, 0.0) + 9.0
+    };
+    let mut lines = c.wrap(text, &f.sans, 14.0, 0.0, inner - indent, 1);
+    let first = lines.first().cloned().unwrap_or_default();
+    let consumed = first.chars().count();
+    let rest: String = text.chars().skip(consumed).collect();
+    let rest = rest.trim_start().to_string();
+    if !rest.is_empty() {
+        lines.extend(c.wrap(&rest, &f.sans, 14.0, 0.0, inner, 2));
+    }
+    lines
+}
+
+fn bullet_h(c: &Canvas, f: &Fonts, bullet: &Bullet, cw: f32) -> f32 {
+    let tw = cw - 20.0;
+    let mut h = 9.0;
+    if !bullet.title.is_empty() {
+        h += c.wrap(&bullet.title, &f.sans_b, 15.5, 0.0, tw, 2).len() as f32 * BU_TITLE_LH;
+    }
+    if !bullet.text.is_empty() {
+        h += c.wrap(&bullet.text, &f.sans, 14.0, 0.0, tw, 4).len() as f32 * BU_TEXT_LH;
+    }
+    h
 }
 
 /// 指令 chip 里的文字总宽（前缀 + 本体）
@@ -410,15 +635,7 @@ fn draw_shell(c: &mut Canvas, f: &Fonts, doc: &Doc, card_h: f32) {
     c.fill(t.shell);
 
     // 卡片投影：深底上很淡，但足以把卡面从相纸上「抬起来」
-    c.rrect_shadow(
-        SHOT,
-        SHOT + 3.0,
-        cardw,
-        card_h,
-        22.0,
-        12.0,
-        Ink::rgb(0, 0, 0).with_a(0.55),
-    );
+    c.rrect_shadow(SHOT, SHOT + 3.0, cardw, card_h, 22.0, 12.0, t.shadow);
     c.rrect_fill(SHOT, SHOT, cardw, card_h, 22.0, t.card);
 
     // 坐标纸：细网格打底，每 5 格一道主色模数线
@@ -535,6 +752,8 @@ fn draw_block(c: &mut Canvas, f: &Fonts, t: &Theme, block: &Block, x: f32, y: f3
         Block::Rows(rows) => draw_rows(c, f, t, x, y, cw, rows),
         Block::Code(lines) => draw_code(c, f, t, x, y + 16.0, cw, lines),
         Block::Tiles(tiles) => draw_tiles(c, f, t, x, y + 18.0, cw, tiles),
+        Block::Entries(entries) => draw_entries(c, f, t, x, y, cw, entries),
+        Block::Bullets(bullets) => draw_bullets(c, f, t, x, y + 14.0, cw, bullets),
         Block::Callout { tone, text } => draw_callout(c, f, t, x, y + 22.0, cw, *tone, text),
         Block::Gap(_) => {}
     }
@@ -741,6 +960,215 @@ fn draw_items(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, ite
             }
         }
         ry += tall + IT_GAP_Y;
+    }
+}
+
+/// 榜单／清单。
+///
+/// 一条之内的竖向节奏是固定的：标题 → 元信息 → 正文 → 引用 → 进度条，
+/// 缺哪段就跳过哪段的间距，于是「只有标题」的一条不会留下一片空白。
+fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, entries: &[Entry]) {
+    let mut ry = y;
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            // 条与条之间一道极淡的线：不分栏，只给眼睛一个落点
+            c.hline(
+                x,
+                x + cw,
+                ry,
+                1.0,
+                t.border.with_a(t.border.a * 0.6),
+                0.0,
+                0.0,
+            );
+            ry += 1.0;
+        }
+        let h = entry_h(c, f, entry, cw);
+        let tw = entry_text_w(entry, cw);
+        let tx = if entry.rank.is_empty() {
+            x
+        } else {
+            x + EN_RANK_W + EN_GAP_X
+        };
+
+        // 序号牌：前三名实心，其余描边——不必读数字就知道梯队
+        if !entry.rank.is_empty() {
+            let by = ry + EN_PADT + 1.0;
+            if entry.top {
+                c.rrect_fill(x, by, EN_RANK_W, EN_RANK_H, 8.0, t.accent);
+                c.text_center(
+                    x + EN_RANK_W / 2.0,
+                    by + EN_RANK_H / 2.0,
+                    &entry.rank,
+                    &f.sans_b,
+                    15.0,
+                    t.card,
+                    0.0,
+                );
+            } else {
+                c.rrect_fill(x, by, EN_RANK_W, EN_RANK_H, 8.0, t.surface);
+                c.rrect_stroke(x, by, EN_RANK_W, EN_RANK_H, 8.0, 1.0, t.border);
+                c.text_center(
+                    x + EN_RANK_W / 2.0,
+                    by + EN_RANK_H / 2.0,
+                    &entry.rank,
+                    &f.sans_b,
+                    15.0,
+                    t.ink3,
+                    0.0,
+                );
+            }
+        }
+
+        let mark_w = entry
+            .mark
+            .as_ref()
+            .map(|(text, _)| c.text_w(text, &f.sans_b, 13.0, 0.0) + 14.0)
+            .unwrap_or(0.0);
+        let title_lines = c.wrap(
+            &entry.title,
+            &f.sans_b,
+            EN_TITLE,
+            0.0,
+            tw - mark_w,
+            EN_TITLE_LINES,
+        );
+        let mut cy = ry + EN_PADT;
+        for (i, line) in title_lines.iter().enumerate() {
+            let baseline = cy + 20.0;
+            let advance = c.text(tx, baseline, line, &f.sans_b, EN_TITLE, t.ink, 0.0);
+            if i == 0
+                && let Some((text, mark)) = &entry.mark
+            {
+                let ink = match mark {
+                    Mark::Up => t.good,
+                    Mark::Down => t.bad,
+                    Mark::New => t.accent,
+                };
+                c.text(
+                    tx + advance + 9.0,
+                    baseline - 2.0,
+                    text,
+                    &f.sans_b,
+                    13.0,
+                    ink,
+                    0.0,
+                );
+            }
+            cy += EN_TITLE_LH;
+        }
+
+        if !entry.meta.is_empty() {
+            cy += 5.0;
+            draw_meta(c, f, t, tx, cy, tw, &entry.meta);
+            cy += EN_META_H;
+        }
+
+        if !entry.body.is_empty() {
+            cy += 7.0;
+            for line in c.wrap(&entry.body, &f.sans, EN_BODY, 0.0, tw, EN_BODY_LINES) {
+                c.text(tx, cy + 14.5, &line, &f.sans, EN_BODY, t.ink2, 0.0);
+                cy += EN_BODY_LH;
+            }
+        }
+
+        if let Some((label, text)) = &entry.quote {
+            cy += 10.0;
+            let lines = quote_lines(c, f, label, text, tw);
+            let qh = 12.0 + lines.len() as f32 * EN_QUOTE_LH + 12.0;
+            c.rrect_fill(tx, cy, tw, qh, 8.0, t.accent_soft);
+            c.rect(tx, cy + 6.0, 2.5, qh - 12.0, t.accent);
+            let mut qy = cy + 12.0;
+            for (i, line) in lines.iter().enumerate() {
+                let mut lx = tx + 13.0;
+                if i == 0 && !label.is_empty() {
+                    lx += c.text(lx, qy + 14.5, label, &f.sans_b, 13.5, t.accent, 0.0) + 9.0;
+                }
+                c.text(lx, qy + 14.5, line, &f.sans, 14.0, t.ink2, 0.0);
+                qy += EN_QUOTE_LH;
+            }
+            cy += qh;
+        }
+
+        if let Some(value) = entry.meter {
+            cy += 11.0;
+            // 长度直接等于分数，不做二次拉伸：读者量到的就是那个数
+            let ratio = (value / 100.0).clamp(0.0, 1.0);
+            c.rrect_fill(tx, cy, tw, EN_METER_H, 3.5, t.surface);
+            if ratio > 0.0 {
+                c.rrect_fill(tx, cy, tw * ratio, EN_METER_H, 3.5, t.accent);
+            }
+        }
+
+        if let Some(score) = &entry.score {
+            let sx = x + cw;
+            let mut sy = ry + EN_PADT;
+            c.text_right(sx, sy + 27.0, &score.value, &f.sans_b, 32.0, t.accent, 0.0);
+            sy += 36.0;
+            for note in &score.notes {
+                c.text_right(sx, sy + 12.0, note, &f.sans, 12.5, t.ink3, 0.0);
+                sy += 18.0;
+            }
+        }
+
+        ry += h;
+    }
+}
+
+/// 元信息行：chip 有底色，纯文字之间点一个分隔点；排不下就到此为止
+fn draw_meta(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, meta: &[Meta]) {
+    let cy = y + EN_META_H / 2.0;
+    let mut mx = x;
+    let mut previous_plain = false;
+    for item in meta {
+        match item {
+            Meta::Chip(text) => {
+                let w = c.text_w(text, &f.sans, 12.0, 0.0) + 16.0;
+                if mx + w > x + cw {
+                    return;
+                }
+                c.rrect_fill(mx, cy - 9.5, w, 19.0, 5.0, t.accent_soft);
+                c.text_center(mx + w / 2.0, cy, text, &f.sans, 12.0, t.accent, 0.0);
+                mx += w + 7.0;
+                previous_plain = false;
+            }
+            Meta::Plain(text) => {
+                let w = c.text_w(text, &f.sans, 12.5, 0.0);
+                let dot = if previous_plain { 12.0 } else { 0.0 };
+                if mx + dot + w > x + cw {
+                    return;
+                }
+                if previous_plain {
+                    c.circle_fill(mx + 3.0, cy, 1.5, t.ink3);
+                    mx += dot;
+                }
+                c.text(mx, midline(cy, 12.5), text, &f.sans, 12.5, t.ink3, 0.0);
+                mx += w + 7.0;
+                previous_plain = true;
+            }
+        }
+    }
+}
+
+fn draw_bullets(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, bullets: &[Bullet]) {
+    let tw = cw - 20.0;
+    let mut ry = y;
+    for bullet in bullets {
+        let mut cy = ry + 9.0;
+        c.circle_fill(x + 4.0, cy + 8.0, 3.0, t.accent.with_a(0.75));
+        if !bullet.title.is_empty() {
+            for line in c.wrap(&bullet.title, &f.sans_b, 15.5, 0.0, tw, 2) {
+                c.text(x + 20.0, cy + 15.5, &line, &f.sans_b, 15.5, t.ink, 0.0);
+                cy += BU_TITLE_LH;
+            }
+        }
+        if !bullet.text.is_empty() {
+            for line in c.wrap(&bullet.text, &f.sans, 14.0, 0.0, tw, 4) {
+                c.text(x + 20.0, cy + 14.0, &line, &f.sans, 14.0, t.ink2, 0.0);
+                cy += BU_TEXT_LH;
+            }
+        }
+        ry += bullet_h(c, f, bullet, cw);
     }
 }
 
@@ -953,6 +1381,15 @@ fn draw_callout(
     tone: Tone,
     text: &str,
 ) {
+    // 脚注不进框：它是「读不读都行」的一段，画上框就成了要读的一段
+    if tone == Tone::Note {
+        let mut ly = y - 2.0;
+        for line in c.wrap(text, &f.sans, 12.5, 0.0, cw, 4) {
+            c.text(x, ly + 12.5, &line, &f.sans, 12.5, t.ink3, 0.0);
+            ly += 19.0;
+        }
+        return;
+    }
     let inner = if tone == Tone::Empty {
         cw - 48.0
     } else {
@@ -978,6 +1415,81 @@ fn draw_callout(
                 c.text_center(x + cw / 2.0, ly - 5.0, line, &f.sans, 15.5, t.ink3, 0.0);
                 ly += CALL_LH;
             }
+        }
+        Tone::Note => unreachable!("脚注在上面已经画完并返回"),
+    }
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+
+    /// 出图不该在边上留下没画过的地方。
+    ///
+    /// 画布尺寸与裁剪高度只要对不上一点，边缘就会留一条透明或半透明的带子——
+    /// 深色底上肉眼未必立刻看出来，发到群里被别人的背景一衬就很明显。
+    /// 右上角有一团有意为之的主色柔光，会溢出到相纸上，所以那一角不参与比色。
+    #[test]
+    fn the_render_leaves_no_unpainted_edge() {
+        if Fonts::get().is_none() {
+            return; // 没有字体时 render 本来就返回 None
+        }
+        let doc = Doc {
+            theme: Theme::blueprint(),
+            width: 600.0,
+            kicker: "TEST".into(),
+            blocks: vec![
+                Block::Title {
+                    title: "边界".into(),
+                    pill: None,
+                    sub: "检查四边".into(),
+                },
+                Block::Entries(vec![Entry {
+                    rank: "01".into(),
+                    top: true,
+                    title: "一条足够长的标题，用来把版心撑满并触发折行处理".into(),
+                    mark: Some(("↑2".into(), Mark::Up)),
+                    meta: vec![Meta::Chip("分类".into()), Meta::Plain("来源".into())],
+                    body: "一段正文。".into(),
+                    quote: Some(("理由".into(), "一句说明。".into())),
+                    meter: Some(72.0),
+                    score: Some(Score {
+                        value: "89.4".into(),
+                        notes: vec!["完整度 88%".into()],
+                    }),
+                }]),
+                Block::Bullets(vec![Bullet {
+                    title: "小标题".into(),
+                    text: "一行说明。".into(),
+                }]),
+                Block::Callout {
+                    tone: Tone::Note,
+                    text: "脚注一行。".into(),
+                },
+            ],
+            foot: "foot".into(),
+            hint: ("提示".into(), "/cmd".into()),
+        };
+        let b64 = render(&doc, 1.0).expect("字体可用时应当出图");
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let image = image::load_from_memory(&STANDARD.decode(&b64).unwrap())
+            .unwrap()
+            .to_rgba8();
+        let (w, h) = image.dimensions();
+        assert!(w >= 590 && h > 200, "尺寸不对：{w}x{h}");
+        assert!(
+            image.pixels().all(|p| p.0[3] == 255),
+            "出图里有半透明像素，说明有区域没被画到"
+        );
+        let shell = doc.theme.shell;
+        // 柔光在右上角，取左上、左下、右下与底边比色
+        for (x, y) in [(0, 0), (0, h - 1), (w - 1, h - 1), (w / 2, h - 1)] {
+            let p = image.get_pixel(x, y).0;
+            assert_eq!(
+                (p[0], p[1], p[2]),
+                (shell.r, shell.g, shell.b),
+                "({x},{y}) 不是相纸底色"
+            );
         }
     }
 }

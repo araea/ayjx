@@ -123,9 +123,18 @@ msg 支持 `Message`、`&str`、`String`。下载资源用 `crate::http::downloa
 
 | 路线 | 依赖 | 谁在用 | 适用 |
 | --- | --- | --- | --- |
-| **原生卡片** `crate::render` | 系统 CJK 字体 | ciyi、help、ctl | 版式确定的清单、说明、盘面 |
-| **图表** plotters | 无 | stats | 坐标轴、折线、柱状 |
-| **浏览器截图** cdp_html_shot | Chrome/Chromium | webshot、ai_news、oai | 真实网页、富文本长图 |
+| **原生卡片** `crate::render` | 系统 CJK 字体 | ciyi、help、ctl、ai_news | 版式确定的清单、说明、盘面 |
+| **图表** plotters | 无 | stats、wordcloud | 坐标轴、折线、柱状、词云 |
+| **浏览器截图** cdp_html_shot | Chrome/Chromium | webshot、oai | 真实网页、任意 Markdown |
+
+**默认走原生**。浏览器那条路要拉起一个 Chromium 进程：慢、吃内存，而且是唯一会
+「因为外部程序起不来」而整条链路失败的一环。内容一旦是结构化的——序号、标题、
+几个字段、一个分数——就不需要排版引擎，原生几十毫秒画完，没有外部依赖。
+`ai_news` 的四张卡原本是 HTML 截图，现已全部改为原生绘制（`plugins/ai_news/card.rs`）。
+
+剩下两个仍用浏览器的，是**内容形态决定的，不是没来得及改**：
+`webshot` 要的就是真实网页的样子；`oai` 渲染的是模型产出的任意 Markdown，
+表格、代码块、嵌套列表都要排——那正是浏览器存在的理由。
 
 原生渲染层 `src/render/` 分三层，从下往上：
 
@@ -157,6 +166,18 @@ render/kit.rs      系统类卡片的成品部件：Theme + Block 序列 → PNG
 - 插件配置改动经 `plugins::update_config` 或 ctl 插件，持久化受 `config_save_lock` 串行化
 - 数据库 `data/bot.db`，插件数据目录 `data/<plugin>/`（`get_data_dir`）
 
+写配置只有一条路：**`ctl::change`**。它拿 `config_save_lock`、按插件真实的 serde 类型
+校验、先写盘再改内存，任一步失败都不留下半个状态。三个入口都汇到这里——
+
+| 入口 | 身份 | 实现 |
+| --- | --- | --- |
+| 聊天 / 控制台 `/ctl` | 消息发起人，按 `ctl.admins` 判权 | `plugins/ctl.rs` |
+| pi 房间 `ayjx --ctl` | 一次性凭据换维护者身份 | `plugins/ctl/bridge.rs` |
+| 网页面板 | 密钥换维护者身份 | `plugins/webui/` |
+
+面板不重写任何校验，只是把默认配置翻译成表单（`webui/schema.rs`），
+再把表单结果送回同一条事务；详见 [WEBUI.md](WEBUI.md)。
+
 ## 新增一个插件
 
 1. 写 `src/plugins/<name>.rs`（或 `<name>/mod.rs` 式的目录模块），
@@ -185,7 +206,7 @@ render/kit.rs      系统类卡片的成品部件：Theme + Block 序列 → PNG
 
 ```sh
 cargo check        # 快速验证
-cargo test         # 209 个测试；出图与浏览器类为 ignored
+cargo test         # 出图与浏览器类为 ignored
 cargo fmt          # 提交前
 ```
 
@@ -195,9 +216,10 @@ cargo fmt          # 提交前
 卡片版式改动要人工看图，三个插件各有一个 `ignored` 的落盘测试：
 
 ```sh
-CIYI_CARD_DUMP=/tmp/cards cargo test ciyi::card -- --ignored
-HELP_CARD_DUMP=/tmp/cards cargo test help::card -- --ignored
-CTL_CARD_DUMP=/tmp/cards  cargo test ctl::card  -- --ignored
+CIYI_CARD_DUMP=/tmp/cards    cargo test ciyi::card    -- --ignored
+HELP_CARD_DUMP=/tmp/cards    cargo test help::card    -- --ignored
+CTL_CARD_DUMP=/tmp/cards     cargo test ctl::card     -- --ignored
+AI_NEWS_CARD_DUMP=/tmp/cards cargo test ai_news::card -- --ignored
 ```
 
 它们用真实注册表造样张（含启用/停用、长昵称、超长指令表等边界），
