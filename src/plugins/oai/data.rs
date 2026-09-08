@@ -141,7 +141,12 @@ impl Manager {
         }
     }
 
-    pub async fn fetch_models(&self) -> anyhow::Result<Vec<String>> {
+    /// 拉取并按 `filter` 收敛模型列表。过滤规则来自 `[oai] model_filter`，
+    /// 由调用方读取后传入——Manager 是全局单例，够不到 `Context` 里的配置。
+    pub async fn fetch_models(
+        &self,
+        filter: &super::utils::ModelFilterConfig,
+    ) -> anyhow::Result<Vec<String>> {
         let (base, key) = {
             let c = self.config.read().await;
             (c.api_base.clone(), c.api_key.clone())
@@ -192,12 +197,16 @@ impl Manager {
         models.sort();
         models.dedup();
 
-        let filtered = super::utils::filter_models(&models);
-        let mut final_models = if filtered.is_empty() {
-            models
-        } else {
-            filtered
-        };
+        // 过滤结果为空说明关键字写错了，此时不再回落到完整列表——
+        // 悄悄塞回上千个模型比空列表更难排查。空的 `keep` 本身已经表示"全部接受"。
+        let mut final_models = super::utils::filter_models(&models, filter);
+        if final_models.is_empty() && !models.is_empty() {
+            warn!(
+                target: "Plugin/OAI",
+                "站点返回 {} 个模型，但 [oai] model_filter 过滤后为空，请检查 keep/drop 关键字",
+                models.len()
+            );
+        }
         for model in super::mj::MJ_MODELS {
             if !final_models.iter().any(|m| m == model) {
                 final_models.push((*model).to_string());

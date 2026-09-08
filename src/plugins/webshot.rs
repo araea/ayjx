@@ -3,7 +3,7 @@ use crate::command::find_url;
 use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config_or_default};
+use crate::plugins::{ChannelConfig, PluginError, get_config_or_default};
 use anyhow::{Result, anyhow};
 use cdp_html_shot::{Browser, CaptureOptions, ImageFormat, Viewport};
 use futures_util::future::BoxFuture;
@@ -15,14 +15,6 @@ use toml::Value;
 
 // ================= Config =================
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct ChannelConfig {
-    #[serde(default)]
-    pub white: Vec<i64>,
-    #[serde(default)]
-    pub black: Vec<i64>,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
@@ -33,6 +25,7 @@ pub struct Config {
     pub viewport_width: u32,
     pub device_scale_factor: f64,
     pub ignore_domains: Vec<String>,
+    /// 群名单：配了黑名单就对名单外的所有群截图，配了白名单则只对名单内的群截图。
     pub channel: ChannelConfig,
 }
 
@@ -125,23 +118,6 @@ async fn capture_url(url: &str, config: &Config, browser_path: Option<String>) -
     base64_data.map_err(|e| anyhow!("Screenshot failed: {}", e))
 }
 
-fn should_process(group_id: Option<i64>, white: &[i64], black: &[i64]) -> bool {
-    let gid = match group_id {
-        Some(id) => id,
-        None => return true, // 私聊默认处理
-    };
-
-    if black.contains(&gid) {
-        return false;
-    }
-
-    if !white.is_empty() && !white.contains(&gid) {
-        return false;
-    }
-
-    true
-}
-
 // ================= Main Handler =================
 
 pub fn handle(
@@ -163,7 +139,7 @@ pub fn handle(
 
         // 检查群组黑白名单
         let group_id = msg_event.group_id();
-        if !should_process(group_id, &config.channel.white, &config.channel.black) {
+        if !config.channel.allows(group_id) {
             return Ok(Some(ctx));
         }
 

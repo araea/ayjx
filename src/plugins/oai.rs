@@ -37,6 +37,9 @@ pub(crate) struct OaiConfig {
     plain_text_max_chars: usize,
     /// 在回复卡片页脚展示模型、耗时与工具调用轨迹。
     show_trace_footer: bool,
+    /// 模型列表过滤：中转站返回的上千个 id 里只留下当下值得用的那些。
+    /// 站点上新或下架时改这里即可，`/%` 会按新规则重新拉取。
+    pub(crate) model_filter: utils::ModelFilterConfig,
     /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
     ambient: ambient::AmbientConfig,
 }
@@ -50,6 +53,7 @@ impl Default for OaiConfig {
             pi_stall_seconds: 90,
             plain_text_max_chars: 120,
             show_trace_footer: true,
+            model_filter: utils::ModelFilterConfig::default(),
             ambient: ambient::AmbientConfig::default(),
         }
     }
@@ -79,7 +83,7 @@ pub fn default_config() -> Value {
     build_config(OaiConfig::default())
 }
 
-pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
+pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     Box::pin(async move {
         let dir = get_data_dir("oai").await?;
         if let Err(error) = ambient::init(&dir).await {
@@ -88,9 +92,10 @@ pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
         let mgr = Arc::new(data::Manager::new(dir));
 
         // 尝试预加载模型列表
+        let filter = crate::plugins::get_config_or_default::<OaiConfig>(&ctx, "oai").model_filter;
         let mgr_clone = mgr.clone();
         tokio::spawn(async move {
-            if let Err(e) = mgr_clone.fetch_models().await {
+            if let Err(e) = mgr_clone.fetch_models(&filter).await {
                 warn!(target: "Plugin/OAI", "初始化获取模型列表失败: {}", e);
             } else {
                 info!(target: "Plugin/OAI", "初始化获取模型列表成功");

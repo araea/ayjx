@@ -234,6 +234,43 @@ pub fn get_font_with_color<'a>(
     (family, size).into_font().color(color)
 }
 
+// ================= 数值排版 =================
+
+/// 千位分隔。四位数以上的计数挤在一起很难一眼读出量级，排行榜里尤其明显。
+pub fn format_thousands(value: i64) -> String {
+    let negative = value < 0;
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if negative {
+        out.push('-');
+    }
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 统一的占比文案：非零的极小占比不塌成 "0%"，达到 1% 后不再拖小数尾巴。
+/// 排行榜与信息卡共用，避免同一批数据在两张图里写法不一致。
+pub fn format_percent(value: i64, total: i64) -> String {
+    if total <= 0 || value <= 0 {
+        return "0%".to_string();
+    }
+    let pct = value as f64 / total as f64 * 100.0;
+    if pct < 0.01 {
+        "<0.01%".to_string()
+    } else if pct < 1.0 {
+        format!("{:.2}%", pct)
+    } else if pct < 10.0 {
+        format!("{:.1}%", pct)
+    } else {
+        format!("{:.0}%", pct)
+    }
+}
+
 pub fn get_contrast_color(bg_color: RGBColor) -> RGBColor {
     let (r, g, b) = (bg_color.0 as u32, bg_color.1 as u32, bg_color.2 as u32);
     // YIQ brightness formula

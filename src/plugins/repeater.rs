@@ -23,7 +23,7 @@ use crate::command::get_prefixes;
 use crate::config::build_config;
 use crate::event::{Context, EventType, SendPacket};
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config_or_default};
+use crate::plugins::{ChannelConfig, PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -39,15 +39,6 @@ use toml::Value as TomlValue;
 const LOG_TARGET: &str = "Plugin/Repeater";
 
 // ================= 配置定义 =================
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ChannelConfig {
-    /// 白名单：非空时只在这些群生效
-    pub white: Vec<i64>,
-    /// 黑名单：这些群一律不复读
-    pub black: Vec<i64>,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -294,16 +285,6 @@ fn channel_key(bot_id: &str, group_id: Option<i64>, user_id: i64) -> Option<Stri
     }
 }
 
-fn allow_channel(group_id: Option<i64>, config: &ChannelConfig) -> bool {
-    let Some(gid) = group_id else {
-        return true; // 私聊不受群名单约束
-    };
-    if config.black.contains(&gid) {
-        return false;
-    }
-    config.white.is_empty() || config.white.contains(&gid)
-}
-
 // ================= 触发判定 =================
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,7 +518,7 @@ pub fn prepare(ctx: &mut Context, writer: &LockedWriter) -> Option<PreparedRepea
     }
     let msg = ctx.as_message()?;
     let group_id = msg.group_id().filter(|id| *id != 0);
-    if !allow_channel(group_id, &config.channel) {
+    if !config.channel.allows(group_id) {
         return None;
     }
     let user_id = msg.user_id();
@@ -1007,18 +988,6 @@ mod tests {
             channel_key("20000", Some(123), 0)
         );
         assert_eq!(channel_key("10000", None, 0), None);
-    }
-
-    #[test]
-    fn blacklist_wins_over_whitelist() {
-        let config = ChannelConfig {
-            white: vec![1, 2],
-            black: vec![2],
-        };
-        assert!(allow_channel(Some(1), &config));
-        assert!(!allow_channel(Some(2), &config));
-        assert!(!allow_channel(Some(3), &config));
-        assert!(allow_channel(None, &config), "私聊不受群名单约束");
     }
 
     #[test]

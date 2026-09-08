@@ -31,6 +31,27 @@ plain_text_max_chars = 120
 # 在回复卡片页脚显示模型、耗时与工具调用轨迹。
 show_trace_footer = true
 
+# 模型列表过滤：中转站一次能吐出上千个 id，`/%` 只展示这里筛出来的那些。
+# 两份关键字都不区分大小写、按子串匹配；drop 优先于 keep。
+# keep 留空表示不筛选，全部接受。站点上新/下架时改这里即可，不必改代码：
+#   /ctl set oai model_filter.keep ["gpt-5.6", "claude-opus-5"]
+[oai.model_filter]
+keep = [
+    "gpt-5.6", "gpt-5.5", "gpt-image-2",
+    "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4-8",
+    "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro-preview",
+    "gemini-3-pro-image", "gemini-3.1-flash-image",
+    "grok-4.6", "grok-4.5",
+    "deepseek-v4-pro", "deepseek-v4-flash", "kimi-k3", "kimi-k2.6",
+    "qwen3.8-max", "glm-5.3", "minimax-m2.7", "mimo-v2.5", "doubao-seedream-5-0",
+]
+# 同一模型的重复投影：发布日期快照、低算力/低分辨率档位、中转站自加的聚合别名。
+drop = [
+    "-2025-", "-2026-", "-thinking-low", "-thinking-minimal", "thinking-*",
+    "-lite", "-512px", "-2k", "-4k", "-all", "-beta",
+    "customtools", "highspeed", "lightning", "-image-preview", "-vision-exp",
+]
+
 # 群聊搭话：让同一个 Pi Agent 以固定人格在指定群里旁听，绝大多数时候沉默。
 # 完整字段与取舍见 docs/ambient.md；人设在 data/oai/ambient/persona.md。
 [oai.ambient]
@@ -74,3 +95,25 @@ pi_control = true
 enabled = true
 # 复读超过有效期就丢弃，避免消息补推或发送排队后迟到跟读。
 max_delay_ms = 3000
+
+[stats]
+enabled = true
+
+# 群名单：查询指令与主动推送共用这一份，语义对所有带名单的插件一致——
+# 只配 black：除名单内的群以外，所有群都生效并推送；
+# 只配 white：只有名单内的群生效并推送；
+# 两个都空：对所有群生效。同时出现在两边时黑名单优先。
+#   /ctl set stats channel.black [123456789]
+[stats.channel]
+white = []
+black = []
+
+[webshot]
+enabled = true
+# 命中这些域名的链接不截图。
+ignore_domains = []
+
+# 语义同 [stats.channel]。
+[webshot.channel]
+white = []
+black = []

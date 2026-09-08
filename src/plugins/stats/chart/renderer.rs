@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use super::data_loader::{BarData, SeriesData};
 use super::utils::{
-    ColorScheme, draw_left_accent_bar, draw_rounded_rect, get_contrast_color, get_font,
-    get_font_family, get_font_with_color, mix_with_white, overlay_image, save_rgba_to_base64,
-    truncate_text_to_fit,
+    ColorScheme, draw_rounded_rect, format_percent, format_thousands, get_contrast_color,
+    get_font, get_font_family, get_font_with_color, mix_with_white, overlay_image,
+    save_rgba_to_base64, truncate_text_to_fit,
 };
 use crate::plugins::stats::StatsConfig;
 use chrono::Local;
@@ -59,22 +59,8 @@ pub fn draw_bar_chart(
     let mut max_count_text_width = 0u32;
 
     for item in data.iter() {
-        let value_text = item.value.to_string();
-        let pct = if total_val > 0 {
-            item.value as f64 / total_val as f64 * 100.0
-        } else {
-            0.0
-        };
-        let pct_str = if pct > 0.0 && pct < 0.01 {
-            "<0.01".to_string()
-        } else if pct > 0.0 && pct < 1.0 {
-            format!("{:.2}", pct)
-        } else if pct >= 1.0 {
-            format!("{:.0}", pct)
-        } else {
-            "0".to_string()
-        };
-        let pct_text = format!("{}%", pct_str);
+        let value_text = format_thousands(item.value);
+        let pct_text = format_percent(item.value, total_val);
 
         let (vw, _) = font_obj.box_size(&value_text).unwrap_or((0, 0));
         let (pw, _) = pct_font_obj.box_size(&pct_text).unwrap_or((0, 0));
@@ -286,8 +272,15 @@ pub fn draw_bar_chart(
     save_rgba_to_base64(rgba_image)
 }
 
-/// 消息类型排行榜：竖排信息卡（色条 + 圆角色块图标 + 名称/数量/占比 + 进度条）。
-/// 与发言/表情包的头像条形榜区分开，避免复用同一套「满色横条塞字」版式。
+/// 消息类型排行榜：标题区 + 构成条 + 竖排信息卡。
+///
+/// 消息类型本质上是「一个整体的构成」，而不是彼此独立的选手，所以在卡片列表之上
+/// 先放一条分段构成条：一眼看到各类型占了多大一块，再往下看逐条的名次与数字。
+/// 卡片内部按两行栅格排布——上行是名称与数值（同一条基线），下行是长度条；
+/// 左起固定是「名次 + 类型色图标」，保证每张卡的视线落点一致。
+///
+/// 与发言/表情包的头像条形榜共用配色、字号层级与时间戳/标题写法，
+/// 但不复用「满色横条塞字」的版式——那套是为头像行设计的。
 pub fn draw_message_type_ranking(
     config: &StatsConfig,
     title: &str,
@@ -299,32 +292,47 @@ pub fn draw_message_type_ranking(
 
     let s = 2u32;
     let page_bg = RGBColor(248, 250, 252);
+    let card_face = RGBColor(255, 255, 255);
     let card_border = RGBColor(226, 232, 240);
+    let card_shadow = RGBColor(228, 233, 240);
+    let track_bg = RGBColor(237, 241, 246);
     let text_primary = RGBColor(15, 23, 42);
     let text_secondary = RGBColor(100, 116, 139);
+    let text_muted = RGBColor(148, 163, 184);
 
-    let padding = 28 * s;
-    let card_gap = 16 * s;
-    let card_h = 100 * s;
-    let card_radius = 20 * s;
-    let accent_w = 10 * s;
-    let icon_size = 48 * s;
-    let icon_radius = 14 * s;
-    let inner_pad = 18 * s;
-    let progress_h = 6 * s;
-    let progress_radius = 3 * s;
+    // —— 布局常量：一切间距都是 s 的整数倍，缩放后不会出现半像素毛边 ——
+    let padding = 30 * s;
+    let card_h = 96 * s;
+    let card_gap = 14 * s;
+    let card_radius = 22 * s;
+    let border_w = 2 * s;
+    let rank_col_w = 34 * s;
+    let rail_pad = 10 * s;
+    let icon_size = 54 * s;
+    let icon_radius = 16 * s;
+    let icon_gap = 18 * s;
+    let inner_pad = 22 * s;
+    let bar_h = 8 * s;
 
     let header_font_size = 20 * s;
     let title_font_size = 32 * s;
-    let name_font_size = 28 * s;
+    let sub_font_size = 20 * s;
+    let name_font_size = 27 * s;
     let value_font_size = 32 * s;
-    let pct_font_size = 20 * s;
-    let header_margin = 10 * s;
-    let title_margin = 24 * s;
-    let top_area =
-        padding + header_font_size + header_margin + title_font_size + title_margin;
+    let pct_font_size = 21 * s;
+    let rank_font_size = 21 * s;
+    let icon_font_size = 26 * s;
 
-    let canvas_width = 720 * s;
+    let strip_h = 16 * s;
+    let strip_gap = 4 * s;
+
+    // 标题区：时间戳 → 标题 → 概览副标题 → 构成条
+    let title_y = padding + header_font_size + 8 * s;
+    let sub_y = title_y + title_font_size + 10 * s;
+    let strip_y = sub_y + sub_font_size + 24 * s;
+    let top_area = strip_y + strip_h + 28 * s;
+
+    let canvas_width = 760 * s;
     let canvas_height = top_area
         + data.len() as u32 * card_h
         + data.len().saturating_sub(1) as u32 * card_gap
@@ -338,14 +346,28 @@ pub fn draw_message_type_ranking(
     let value_font = (font_family, value_font_size).into_font();
     let pct_font = (font_family, pct_font_size).into_font();
 
+    let card_x0 = padding as i32;
+    let card_x1 = (canvas_width - padding) as i32;
+
+    // 构成条各段宽度：先按占比分配，再把不足一格的段抬到最小可见宽度，
+    // 多出来的像素从最宽的一段里扣回去，保证整条正好填满且不留缝。
+    let strip_widths = allocate_strip_widths(
+        &data,
+        total_val,
+        card_x1 - card_x0,
+        strip_gap as i32,
+        strip_h as i32,
+    );
+
     let mut buffer = vec![0u8; (canvas_width * canvas_height * 3) as usize];
     {
         let root = BitMapBackend::with_buffer(&mut buffer, (canvas_width, canvas_height))
             .into_drawing_area();
         root.fill(&page_bg).map_err(|e| e.to_string())?;
 
+        // === 标题区 ===
         let now_str = Local::now().format("%Y-%m-%d %H:%M").to_string();
-        let header_style = get_font_with_color(config, header_font_size, &text_secondary)
+        let header_style = get_font_with_color(config, header_font_size, &text_muted)
             .pos(Pos::new(HPos::Center, VPos::Top));
         root.draw_text(
             &now_str,
@@ -354,141 +376,174 @@ pub fn draw_message_type_ranking(
         )
         .map_err(|e| e.to_string())?;
 
-        let title_y = padding + header_font_size + header_margin;
         let title_style = get_font_with_color(config, title_font_size, &text_primary)
             .pos(Pos::new(HPos::Center, VPos::Top));
         root.draw_text(title, &title_style, (canvas_width as i32 / 2, title_y as i32))
             .map_err(|e| e.to_string())?;
 
-        let card_x0 = padding as i32;
-        let card_x1 = (canvas_width - padding) as i32;
+        let subtitle = format!(
+            "共 {} 条消息 · {} 种类型",
+            format_thousands(total_val),
+            data.len()
+        );
+        let sub_style = get_font_with_color(config, sub_font_size, &text_secondary)
+            .pos(Pos::new(HPos::Center, VPos::Top));
+        root.draw_text(
+            &subtitle,
+            &sub_style,
+            (canvas_width as i32 / 2, sub_y as i32),
+        )
+        .map_err(|e| e.to_string())?;
 
+        // === 构成条：整体占比的一眼概览 ===
+        let strip_radius = (strip_h / 2) as i32;
+        let mut seg_x = card_x0;
+        for (item, width) in data.iter().zip(strip_widths.iter()) {
+            draw_rounded_rect(
+                &root,
+                seg_x,
+                strip_y as i32,
+                seg_x + width,
+                (strip_y + strip_h) as i32,
+                strip_radius,
+                item.theme_color,
+            )?;
+            seg_x += width + strip_gap as i32;
+        }
+
+        // === 信息卡 ===
         for (i, item) in data.iter().enumerate() {
             let y0 = (top_area + i as u32 * (card_h + card_gap)) as i32;
             let y1 = y0 + card_h as i32;
-            let inner_x0 = card_x0 + (2 * s as i32);
-            let inner_y0 = y0 + (2 * s as i32);
-            let inner_x1 = card_x1 - (2 * s as i32);
-            let inner_y1 = y1 - (2 * s as i32);
-            let inner_r = (card_radius - 2 * s) as i32;
+            let cy = y0 + (card_h / 2) as i32;
             let accent = item.theme_color;
-            let wash = mix_with_white(accent, 0.07);
+            let leading = i == 0;
 
-            // 描边底 + 淡色卡面，类型色微染增强层次
+            // 卡片：投影 → 描边 → 卡面。榜首用更明显的类型色微染做视觉锚点。
             draw_rounded_rect(
-                &root, card_x0, y0, card_x1, y1, card_radius as i32, card_border,
+                &root,
+                card_x0,
+                y0 + (3 * s) as i32,
+                card_x1,
+                y1 + (4 * s) as i32,
+                card_radius as i32,
+                card_shadow,
             )?;
             draw_rounded_rect(
-                &root, inner_x0, inner_y0, inner_x1, inner_y1, inner_r, wash,
+                &root,
+                card_x0,
+                y0,
+                card_x1,
+                y1,
+                card_radius as i32,
+                if leading {
+                    mix_with_white(accent, 0.22)
+                } else {
+                    card_border
+                },
             )?;
+            let inner_x0 = card_x0 + border_w as i32;
+            let inner_y0 = y0 + border_w as i32;
+            let inner_x1 = card_x1 - border_w as i32;
+            let inner_y1 = y1 - border_w as i32;
+            let inner_r = (card_radius - border_w) as i32;
+            let face = if leading {
+                mix_with_white(accent, 0.06)
+            } else {
+                card_face
+            };
+            draw_rounded_rect(&root, inner_x0, inner_y0, inner_x1, inner_y1, inner_r, face)?;
 
-            // 左侧类型色条：仅左上/左下圆角，右侧平切
-            let ax0 = inner_x0;
-            let ax1 = ax0 + accent_w as i32;
-            draw_left_accent_bar(&root, ax0, inner_y0, ax1, inner_y1, inner_r, accent)?;
+            // 名次：卡片左起的第一段，弱化处理，只作次序参照
+            let rank_color = if leading {
+                accent
+            } else {
+                mix_with_white(accent, 0.62)
+            };
+            let rank_style = get_font_with_color(config, rank_font_size, &rank_color)
+                .pos(Pos::new(HPos::Center, VPos::Center));
+            root.draw_text(
+                &(i + 1).to_string(),
+                &rank_style,
+                (
+                    inner_x0 + (rail_pad + rank_col_w / 2) as i32,
+                    cy + (2 * s) as i32,
+                ),
+            )
+            .map_err(|e| e.to_string())?;
 
-            // 圆角色块图标（饱和底 + 对比色字）
-            let icon_x0 = ax1 + inner_pad as i32;
-            let icon_y0 = inner_y0 + (16 * s as i32);
+            // 类型图标：淡色底 + 同色字，比满色底更耐看，也不抢数值的视线
+            let icon_x0 = inner_x0 + (rail_pad + rank_col_w) as i32;
+            let icon_y0 = cy - (icon_size / 2) as i32;
             let icon_x1 = icon_x0 + icon_size as i32;
-            let icon_y1 = icon_y0 + icon_size as i32;
-            let icon_fill = mix_with_white(accent, 0.90);
+            let icon_fill = mix_with_white(accent, 0.16);
             draw_rounded_rect(
                 &root,
                 icon_x0,
                 icon_y0,
                 icon_x1,
-                icon_y1,
+                icon_y0 + icon_size as i32,
                 icon_radius as i32,
                 icon_fill,
             )?;
             if let Some(icon_char) = item.icon_char.as_deref() {
-                let icon_fg = get_contrast_color(icon_fill);
-                let icon_style = get_font_with_color(config, 26 * s, &icon_fg)
+                let icon_style = get_font_with_color(config, icon_font_size, &accent)
                     .pos(Pos::new(HPos::Center, VPos::Center));
                 root.draw_text(
                     icon_char,
                     &icon_style,
                     (
                         icon_x0 + (icon_size / 2) as i32,
-                        icon_y0 + (icon_size / 2) as i32 + (2 * s as i32),
+                        cy + (2 * s) as i32,
                     ),
                 )
                 .map_err(|e| e.to_string())?;
             }
 
-            // 右侧：数量在上、占比在下
-            let pct = if total_val > 0 {
-                item.value as f64 / total_val as f64 * 100.0
-            } else {
-                0.0
-            };
-            let pct_text = if pct > 0.0 && pct < 1.0 {
-                format!("{:.1}%", pct)
-            } else {
-                format!("{:.0}%", pct)
-            };
-            let value_text = item.value.to_string();
-
-            let (vw, _) = value_font.box_size(&value_text).unwrap_or((0, 0));
+            // 上行右侧：数值（主色大字）+ 占比（次级小字），右对齐收边
+            let value_text = format_thousands(item.value);
+            let pct_text = format_percent(item.value, total_val);
             let (pw, _) = pct_font.box_size(&pct_text).unwrap_or((0, 0));
-            let right_pad = inner_pad as i32;
-            let stats_right = inner_x1 - right_pad;
-            let stats_width = vw.max(pw);
-            let stats_left = stats_right - stats_width as i32;
+            let (vw, _) = value_font.box_size(&value_text).unwrap_or((0, 0));
 
-            let value_style = get_font_with_color(config, value_font_size, &text_primary)
-                .pos(Pos::new(HPos::Right, VPos::Center));
+            let stats_right = inner_x1 - inner_pad as i32;
+            let top_row_y = cy - (13 * s) as i32;
             let pct_style = get_font_with_color(config, pct_font_size, &text_secondary)
                 .pos(Pos::new(HPos::Right, VPos::Center));
-            let value_y = icon_y0 + (18 * s as i32);
-            let pct_y = value_y + (28 * s as i32);
-            root.draw_text(&value_text, &value_style, (stats_right, value_y))
+            root.draw_text(&pct_text, &pct_style, (stats_right, top_row_y))
                 .map_err(|e| e.to_string())?;
-            root.draw_text(&pct_text, &pct_style, (stats_right, pct_y))
+            let value_right = stats_right - pw as i32 - (14 * s) as i32;
+            let value_style = get_font_with_color(config, value_font_size, &text_primary)
+                .pos(Pos::new(HPos::Right, VPos::Center));
+            root.draw_text(&value_text, &value_style, (value_right, top_row_y))
                 .map_err(|e| e.to_string())?;
 
-            // 类型名（图标与数值之间）
-            let name_x = icon_x1 + (14 * s as i32);
-            let name_max_w = (stats_left - name_x - (16 * s as i32)).max(0) as u32;
+            // 上行左侧：类型名，与数值同基线；过长按可用宽度截断
+            let name_x = icon_x1 + icon_gap as i32;
+            let name_max_w =
+                (value_right - vw as i32 - (20 * s) as i32 - name_x).max(0) as u32;
             let display_name = truncate_text_to_fit(&name_font, &item.label, name_max_w);
-            let name_style = get_font_with_color(config, name_font_size, &text_primary)
-                .pos(Pos::new(HPos::Left, VPos::Center));
-            let name_y = icon_y0 + (icon_size / 2) as i32 + (2 * s as i32);
             if !display_name.is_empty() {
-                root.draw_text(&display_name, &name_style, (name_x, name_y))
+                let name_style = get_font_with_color(config, name_font_size, &text_primary)
+                    .pos(Pos::new(HPos::Left, VPos::Center));
+                root.draw_text(&display_name, &name_style, (name_x, top_row_y))
                     .map_err(|e| e.to_string())?;
             }
 
-            // 底部进度条：更细，长度相对第一名
-            let bar_x0 = icon_x0;
+            // 下行：相对榜首的长度条，贯通名称到数值的整个宽度
+            let bar_x0 = name_x;
             let bar_x1 = stats_right;
-            let bar_y1 = inner_y1 - (14 * s as i32);
-            let bar_y0 = bar_y1 - progress_h as i32;
-            let track = mix_with_white(accent, 0.12);
-            draw_rounded_rect(
-                &root,
-                bar_x0,
-                bar_y0,
-                bar_x1,
-                bar_y1,
-                progress_radius as i32,
-                track,
-            )?;
+            let bar_y0 = cy + (17 * s) as i32;
+            let bar_y1 = bar_y0 + bar_h as i32;
+            let bar_radius = (bar_h / 2) as i32;
+            draw_rounded_rect(&root, bar_x0, bar_y0, bar_x1, bar_y1, bar_radius, track_bg)?;
 
-            let ratio = item.value as f64 / max_val as f64;
-            let fill_w = ((bar_x1 - bar_x0) as f64 * ratio).round() as i32;
-            if fill_w > 0 {
-                let fill_x1 = (bar_x0 + fill_w).max(bar_x0 + progress_radius as i32);
-                draw_rounded_rect(
-                    &root,
-                    bar_x0,
-                    bar_y0,
-                    fill_x1.min(bar_x1),
-                    bar_y1,
-                    progress_radius as i32,
-                    accent,
-                )?;
+            if item.value > 0 {
+                // 至少画成一个圆点，否则量级极小的类型在条上会完全消失
+                let ratio = (item.value as f64 / max_val as f64).clamp(0.0, 1.0);
+                let fill_w = ((bar_x1 - bar_x0) as f64 * ratio).round() as i32;
+                let fill_x1 = (bar_x0 + fill_w.max(bar_h as i32)).min(bar_x1);
+                draw_rounded_rect(&root, bar_x0, bar_y0, fill_x1, bar_y1, bar_radius, accent)?;
             }
         }
 
@@ -508,6 +563,55 @@ pub fn draw_message_type_ranking(
     }
 
     save_rgba_to_base64(rgba_image)
+}
+
+/// 构成条的分段宽度。按占比切分总宽度（已扣除段间空隙），再把小到看不见的段
+/// 抬到 `min_width`，多出来的像素从当前最宽的段里逐格扣回，最后把舍入误差补给
+/// 最宽的一段——这样整条始终正好填满，不会因为四舍五入在右端留下一道缝。
+fn allocate_strip_widths(
+    data: &[BarData],
+    total_val: i64,
+    strip_width: i32,
+    gap: i32,
+    min_width: i32,
+) -> Vec<i32> {
+    let count = data.len() as i32;
+    let usable = (strip_width - gap * (count - 1)).max(count * min_width);
+    if total_val <= 0 {
+        let even = usable / count;
+        return (0..count).map(|_| even).collect();
+    }
+
+    let mut widths: Vec<i32> = data
+        .iter()
+        .map(|d| {
+            ((usable as f64 * d.value as f64 / total_val as f64).round() as i32).max(min_width)
+        })
+        .collect();
+
+    let widest = |widths: &[i32]| {
+        widths
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, w)| **w)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+
+    let mut sum: i32 = widths.iter().sum();
+    while sum > usable {
+        let i = widest(&widths);
+        if widths[i] <= min_width {
+            break;
+        }
+        widths[i] -= 1;
+        sum -= 1;
+    }
+    if sum < usable {
+        let i = widest(&widths);
+        widths[i] += usable - sum;
+    }
+    widths
 }
 
 // ================= 走势图 (与排行榜统一的手绘风格) =================
@@ -839,4 +943,93 @@ pub fn draw_line_chart(
     }
 
     save_rgba_to_base64(rgba_image)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugins::stats::chart::data_loader::message_type_style;
+
+    fn sample(label: &str, value: i64) -> BarData {
+        let (color, icon) = message_type_style(label);
+        BarData {
+            label: label.to_string(),
+            value,
+            user_id: None,
+            avatar_url: None,
+            avatar_img: None,
+            theme_color: color,
+            icon_char: Some(icon.to_string()),
+        }
+    }
+
+    #[test]
+    fn strip_segments_fill_the_width_exactly() {
+        let data = vec![
+            sample("文本", 8_120),
+            sample("图片", 2_004),
+            sample("表情", 1),
+        ];
+        let total: i64 = data.iter().map(|d| d.value).sum();
+        let (width, gap, min) = (1400, 8, 16);
+        let widths = allocate_strip_widths(&data, total, width, gap, min);
+
+        assert_eq!(widths.len(), 3);
+        let laid_out: i32 = widths.iter().sum::<i32>() + gap * (data.len() as i32 - 1);
+        assert_eq!(laid_out, width, "分段加空隙应正好铺满整条");
+        assert!(widths.iter().all(|w| *w >= min), "极小占比也要看得见");
+        assert!(widths[0] > widths[1] && widths[1] > widths[2]);
+    }
+
+    #[test]
+    fn strip_handles_single_and_empty_totals() {
+        let one = vec![sample("文本", 5)];
+        assert_eq!(allocate_strip_widths(&one, 5, 600, 8, 16), vec![600]);
+
+        // 全为 0 时不做除零，均分即可
+        let zeros = vec![sample("文本", 0), sample("图片", 0)];
+        let widths = allocate_strip_widths(&zeros, 0, 600, 8, 16);
+        assert_eq!(widths, vec![296, 296]);
+    }
+
+    #[test]
+    fn message_type_ranking_renders_a_png() {
+        let config = StatsConfig::default();
+        let data = vec![
+            sample("文本", 8_120),
+            sample("图片", 2_004),
+            sample("动画表情", 947),
+            sample("表情", 133),
+            sample("语音", 21),
+            sample("视频", 2),
+        ];
+        let out = draw_message_type_ranking(&config, "本群 今日 消息类型 排行榜", data)
+            .expect("消息类型排行榜应当能渲染");
+        save_preview(&out, "AYJX_CHART_PREVIEW");
+    }
+
+    #[test]
+    fn bar_chart_still_renders_with_the_shared_number_formatting() {
+        let config = StatsConfig::default();
+        let data = vec![
+            sample("文本", 12_345),
+            sample("图片", 678),
+            sample("语音", 3),
+        ];
+        let out = draw_bar_chart(&config, "本群 今日 发言 排行榜", data)
+            .expect("发言排行榜应当能渲染");
+        save_preview(&out, "AYJX_CHART_PREVIEW_BAR");
+    }
+
+    /// 断言产物是 PNG；设了环境变量时顺手落盘一份，方便人工看效果。
+    fn save_preview(out: &str, env_key: &str) {
+        assert!(out.starts_with("base64://"));
+        if let Ok(path) = std::env::var(env_key) {
+            use base64::{Engine as _, engine::general_purpose};
+            let bytes = general_purpose::STANDARD
+                .decode(out.trim_start_matches("base64://"))
+                .unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+    }
 }

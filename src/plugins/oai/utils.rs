@@ -7,29 +7,98 @@ use std::sync::OnceLock;
 pub static RE_API: OnceLock<Regex> = OnceLock::new();
 pub static RE_IDX: OnceLock<Regex> = OnceLock::new();
 
-pub const MODEL_KEYWORDS: &[&str] = &[
+/// 默认保留的模型关键字：中转站一次吐出近千个 id，其中绝大多数是历史快照、
+/// 小参数量档位和语音/视频等与聊天无关的条目。这里只列当前仍值得用的旗舰对话
+/// 与图像模型；关键字按不区分大小写的子串匹配，因此写到"系列"粒度即可。
+///
+/// 站点上新时改 `[oai] model_filter.keep` 即可，不必改代码。
+pub const DEFAULT_MODEL_KEEP: &[&str] = &[
+    // OpenAI
     "gpt-5.6",
     "gpt-5.5",
-    "gpt-image",
-    "claude-mythos-5",
+    "gpt-image-2",
+    // Anthropic
     "claude-opus-5",
     "claude-fable-5",
     "claude-sonnet-5",
-    "claude-opus-4",
-    "gemini-3.7",
-    "gemini-3.6",
-    "gemini-3.5",
-    "gemini-3.1",
-    "deepseek-v4",
+    "claude-opus-4-8",
+    // Google
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3-pro-image",
+    "gemini-3.1-flash-image",
+    // xAI
+    "grok-4.6",
+    "grok-4.5",
+    // 国内
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
     "kimi-k3",
-    "qwen3.8",
-    "qwen3.7",
-    "grok-4",
-    "glm-5",
-    "minimax",
-    "hy3",
-    "mimo",
+    "kimi-k2.6",
+    "qwen3.8-max",
+    "glm-5.3",
+    "minimax-m2.7",
+    "mimo-v2.5",
+    "doubao-seedream-5-0",
 ];
+
+/// 默认剔除的模型关键字，优先于 `DEFAULT_MODEL_KEEP`。
+/// 命中的多是同一模型的重复投影：带发布日期的快照、低算力/低分辨率档位，
+/// 以及中转站自己加的 `-all` / `thinking-*` 之类的聚合别名。
+pub const DEFAULT_MODEL_DROP: &[&str] = &[
+    "-2025-",
+    "-2026-",
+    "-thinking-low",
+    "-thinking-minimal",
+    "thinking-*",
+    "-lite",
+    "-512px",
+    "-2k",
+    "-4k",
+    "-all",
+    "-beta",
+    "customtools",
+    "highspeed",
+    "lightning",
+    "-image-preview",
+    "-vision-exp",
+];
+
+/// 模型列表过滤规则。两份关键字都不区分大小写、按子串匹配。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ModelFilterConfig {
+    /// 保留：只留下命中任一关键字的模型。留空表示不筛选，接受站点返回的全部模型。
+    pub keep: Vec<String>,
+    /// 剔除：命中任一关键字的模型一律去掉，优先于 `keep`。
+    pub drop: Vec<String>,
+}
+
+impl Default for ModelFilterConfig {
+    fn default() -> Self {
+        Self {
+            keep: DEFAULT_MODEL_KEEP.iter().map(|s| s.to_string()).collect(),
+            drop: DEFAULT_MODEL_DROP.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+impl ModelFilterConfig {
+    /// 单个模型 id 是否留下。
+    pub fn accepts(&self, model: &str) -> bool {
+        let lower = model.to_lowercase();
+        let hit = |list: &[String]| {
+            list.iter()
+                .filter(|kw| !kw.trim().is_empty())
+                .any(|kw| lower.contains(&kw.to_lowercase()))
+        };
+        if hit(&self.drop) {
+            return false;
+        }
+        self.keep.iter().all(|kw| kw.trim().is_empty()) || hit(&self.keep)
+    }
+}
 
 /// async-openai 会在 API 基址后拼接 `/chat/completions`。管理员只填写服务裸域名时，
 /// 自动补齐 OpenAI 兼容接口通用的 `/v1`，已有自定义路径则原样保留。
@@ -119,15 +188,46 @@ pub fn parse_indices(s: &str) -> Vec<usize> {
     v
 }
 
-pub fn filter_models(models: &[String]) -> Vec<String> {
+pub fn filter_models(models: &[String], filter: &ModelFilterConfig) -> Vec<String> {
     models
         .iter()
-        .filter(|m| {
-            let lower = m.to_lowercase();
-            MODEL_KEYWORDS.iter().any(|kw| lower.contains(kw))
-        })
+        .filter(|m| filter.accepts(m))
         .cloned()
         .collect()
+}
+
+/// 模型 id 归属的厂商分组名，用于模型列表分区展示。
+///
+/// 分组不跟着过滤关键字走：关键字可由管理员随意增删，拿它当标题会拆出
+/// 「Gpt-5.6 Series」这类碎片；厂商前缀稳定得多，也更接近用户的心智。
+pub fn model_vendor(model: &str) -> &'static str {
+    let lower = model.to_lowercase();
+    const VENDORS: &[(&str, &str)] = &[
+        ("gpt-", "OpenAI"),
+        ("o1", "OpenAI"),
+        ("o3", "OpenAI"),
+        ("o4", "OpenAI"),
+        ("chatgpt", "OpenAI"),
+        ("claude", "Anthropic"),
+        ("gemini", "Google"),
+        ("grok", "xAI"),
+        ("deepseek", "DeepSeek"),
+        ("kimi", "Moonshot"),
+        ("moonshot", "Moonshot"),
+        ("qwen", "Qwen"),
+        ("qwq", "Qwen"),
+        ("glm", "智谱 GLM"),
+        ("minimax", "MiniMax"),
+        ("mimo", "MiMo"),
+        ("doubao", "豆包"),
+        ("hunyuan", "混元"),
+        ("mj", "Midjourney"),
+    ];
+    VENDORS
+        .iter()
+        .find(|(prefix, _)| lower.starts_with(prefix))
+        .map(|(_, name)| *name)
+        .unwrap_or("其他")
 }
 
 pub fn escape_markdown_special(s: &str) -> String {
@@ -514,7 +614,7 @@ pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::openai_api_base;
+    use super::{ModelFilterConfig, model_vendor, openai_api_base};
 
     #[test]
     fn middle_truncation_keeps_both_ends() {
@@ -541,5 +641,68 @@ mod tests {
             openai_api_base("https://example.com/openai"),
             "https://example.com/openai"
         );
+    }
+
+    #[test]
+    fn default_filter_keeps_flagships_and_drops_noise() {
+        let filter = ModelFilterConfig::default();
+        for keep in [
+            "gpt-5.6-luna",
+            "claude-opus-5-thinking",
+            "gemini-3.8-flash",
+            "grok-4.6",
+            "deepseek-v4-pro",
+            "glm-5.3",
+            "MiniMax-M2.7",
+        ] {
+            assert!(filter.accepts(keep), "{keep} 应当保留");
+        }
+        for drop in [
+            "gpt-4o",
+            "claude-3-5-sonnet-20241022",
+            "gpt-5.5-2026-04-23",
+            "gemini-3.1-flash-lite-preview",
+            "gemini-3.8-flash-thinking-low",
+            "gpt-5-thinking-all",
+            "MiniMax-Hailuo-2.3",
+            "minimax/speech-2.6-hd",
+            "qwen3-embedding-8b",
+        ] {
+            assert!(!filter.accepts(drop), "{drop} 应当剔除");
+        }
+    }
+
+    #[test]
+    fn drop_wins_and_empty_keep_accepts_everything() {
+        let filter = ModelFilterConfig {
+            keep: vec!["gpt-5".into()],
+            drop: vec!["-pro".into()],
+        };
+        assert!(filter.accepts("gpt-5.6"));
+        assert!(!filter.accepts("gpt-5.6-pro"), "剔除优先于保留");
+        assert!(!filter.accepts("claude-opus-5"));
+
+        let passthrough = ModelFilterConfig {
+            keep: vec![],
+            drop: vec![],
+        };
+        assert!(passthrough.accepts("whatever-1"));
+
+        // 关键字不区分大小写，管理员照抄站点上的原始 id 也能命中
+        let cased = ModelFilterConfig {
+            keep: vec!["MiniMax-M2".into()],
+            drop: vec![],
+        };
+        assert!(cased.accepts("minimax-m2.7"));
+    }
+
+    #[test]
+    fn vendor_grouping_covers_the_default_keeps() {
+        assert_eq!(model_vendor("gpt-image-2"), "OpenAI");
+        assert_eq!(model_vendor("claude-fable-5-1"), "Anthropic");
+        assert_eq!(model_vendor("gemini-3-pro-image"), "Google");
+        assert_eq!(model_vendor("MiniMax-M2.7"), "MiniMax");
+        assert_eq!(model_vendor("mj-describe"), "Midjourney");
+        assert_eq!(model_vendor("something-else"), "其他");
     }
 }

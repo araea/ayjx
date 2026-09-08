@@ -4,7 +4,7 @@ use crate::config::build_config;
 use crate::db::utils::get_time_range;
 use crate::event::Context;
 use crate::message::Message;
-use crate::plugins::{PluginError, get_config};
+use crate::plugins::{ChannelConfig, PluginError, get_config};
 use crate::scheduler::{Pace, PushFrequency};
 use chrono::Weekday;
 use futures_util::future::BoxFuture;
@@ -27,6 +27,10 @@ pub struct StatsConfig {
     pub font_family: String,
     pub width: u32,
     pub height: u32,
+
+    /// 群名单：配了黑名单就对名单外的所有群生效并推送，配了白名单则只对名单内的群
+    /// 生效并推送。查询指令与主动推送共用这份名单，不会出现"能查不能推"的错位。
+    pub channel: ChannelConfig,
 
     // —— 主动推送总开关与阈值 ——
     /// 群在统计区间内消息数低于此值则跳过推送（避免打扰冷群）
@@ -72,6 +76,7 @@ impl Default for StatsConfig {
             font_family: "Noto Sans CJK SC".to_string(),
             width: 960,
             height: 800,
+            channel: ChannelConfig::default(),
             push_min_messages: 20,
             push_group_gap_min_seconds: 20,
             push_group_gap_max_seconds: 75,
@@ -131,6 +136,12 @@ pub fn handle(
             Some(c) => c,
             None => return Ok(Some(ctx)),
         };
+
+        // 群名单外的群不响应查询，与主动推送保持同一套生效范围
+        let config: StatsConfig = get_config(&ctx, "stats").unwrap_or_default();
+        if !config.channel.allows(msg.group_id()) {
+            return Ok(Some(ctx));
+        }
 
         let (scope, time_str, data_type, chart_type, is_all_groups) =
             if let Some(caps) = get_regex_global().captures(content) {
@@ -305,7 +316,7 @@ pub fn on_connected(
                         current.weekend_fun_enabled,
                         current.monthly_recap_enabled,
                     ];
-                    if current.enabled && switches[index] {
+                    if current.enabled && switches[index] && current.channel.allows_group(gid) {
                         runner(c, w, gid, current.push_min_messages).await;
                     }
                 },

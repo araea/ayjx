@@ -819,7 +819,9 @@ pub async fn execute(
             mgr.save(&c);
             drop(c);
             reply_text(ctx, writer, &msg_event, format!("✅ API 已配置：{}", url)).await;
-            match mgr.fetch_models().await {
+            let filter = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
+                .model_filter;
+            match mgr.fetch_models(&filter).await {
                 Ok(models) => {
                     reply_text(
                         ctx,
@@ -1103,7 +1105,9 @@ pub async fn execute(
             reply_text(ctx, writer, &msg_event, "⏳ 正在刷新模型列表...").await;
 
             // 尝试获取，如果失败则仅提示警告，后续继续尝试展示缓存
-            if let Err(e) = mgr.fetch_models().await {
+            let filter = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
+                .model_filter;
+            if let Err(e) = mgr.fetch_models(&filter).await {
                 reply_text(
                     ctx,
                     writer,
@@ -1120,7 +1124,7 @@ pub async fn execute(
                     ctx,
                     writer,
                     &msg_event,
-                    "📭 未找到可用模型（请检查过滤关键字）",
+                    "📭 未找到可用模型（过滤规则见 [oai] model_filter.keep / .drop）",
                 )
                 .await;
                 return;
@@ -1132,26 +1136,22 @@ pub async fn execute(
                 *usage_count.entry(agent.model.clone()).or_insert(0) += 1;
             }
 
-            let mut groups: HashMap<String, Vec<(usize, String)>> = HashMap::new();
-            let mut other_models = Vec::new();
+            // 按厂商分区；分区顺序取各组首次出现的次序，模型列表本身已按 id 排序，
+            // 因此同一厂商的条目天然连在一起，顺序稳定可预期。
+            let mut groups: HashMap<&'static str, Vec<(usize, String)>> = HashMap::new();
+            let mut group_order: Vec<&'static str> = Vec::new();
             for (i, m) in models.iter().enumerate() {
-                let idx = i + 1;
-                let lower = m.to_lowercase();
-                let mut matched = false;
-                for &kw in crate::plugins::oai::utils::MODEL_KEYWORDS {
-                    if lower.contains(kw) {
-                        let group_name = format!(
-                            "{} Series",
-                            kw.chars().next().unwrap().to_uppercase().to_string() + &kw[1..]
-                        );
-                        groups.entry(group_name).or_default().push((idx, m.clone()));
-                        matched = true;
-                        break;
-                    }
-                }
-                if !matched {
-                    other_models.push((idx, m.clone()));
-                }
+                let vendor = crate::plugins::oai::utils::model_vendor(m);
+                let entry = groups.entry(vendor).or_insert_with(|| {
+                    group_order.push(vendor);
+                    Vec::new()
+                });
+                entry.push((i + 1, m.clone()));
+            }
+            // 认不出厂商的一律排到最后，别插在正经分区中间
+            if let Some(pos) = group_order.iter().position(|v| *v == "其他") {
+                let other = group_order.remove(pos);
+                group_order.push(other);
             }
             let mut html = String::new();
             let render_group = |title: &str, items: &Vec<(usize, String)>| -> String {
@@ -1170,17 +1170,10 @@ pub async fn execute(
                 s.push_str("</div></div>");
                 s
             };
-            for &kw in crate::plugins::oai::utils::MODEL_KEYWORDS {
-                let group_name = format!(
-                    "{} Series",
-                    kw.chars().next().unwrap().to_uppercase().to_string() + &kw[1..]
-                );
-                if let Some(items) = groups.get(&group_name) {
-                    html.push_str(&render_group(&group_name, items));
+            for vendor in group_order {
+                if let Some(items) = groups.get(vendor) {
+                    html.push_str(&render_group(vendor, items));
                 }
-            }
-            if !other_models.is_empty() {
-                html.push_str(&render_group("Other Models", &other_models));
             }
             reply(
                 ctx,

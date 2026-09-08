@@ -4,7 +4,7 @@ use crate::adapters::satori::{LockedWriter, dispatch_packet};
 use crate::event::{BotStatus, Context, Event, EventType};
 use crate::matcher::Matcher;
 use futures_util::future::BoxFuture;
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -319,6 +319,39 @@ pub async fn run(mut ctx: Context, writer: LockedWriter) -> Result<(), PluginErr
     Ok(())
 }
 
+// ================= 群名单 =================
+
+/// 群黑白名单。语义在所有使用它的插件之间保持一致：
+/// 黑名单命中即排除；白名单非空时只放行名单内的群；两者都留空即对所有群生效。
+///
+/// 黑名单优先于白名单——同时写进两边的群按"明确禁止"处理。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelConfig {
+    /// 白名单：非空时只在这些群生效
+    pub white: Vec<i64>,
+    /// 黑名单：这些群一律不生效
+    pub black: Vec<i64>,
+}
+
+impl ChannelConfig {
+    /// 群是否放行。`None`（私聊）不受群名单约束。
+    pub fn allows(&self, group_id: Option<i64>) -> bool {
+        match group_id {
+            Some(gid) => self.allows_group(gid),
+            None => true,
+        }
+    }
+
+    /// 群是否放行。主动推送只发群，没有"私聊放行"这一说，因此单独一个入口。
+    pub fn allows_group(&self, group_id: i64) -> bool {
+        if self.black.contains(&group_id) {
+            return false;
+        }
+        self.white.is_empty() || self.white.contains(&group_id)
+    }
+}
+
 // ================= 工具函数 =================
 
 /// 将伪造/修改过的事件推送回流水线
@@ -502,5 +535,34 @@ mod satori_compat_tests {
         let key = "satori-plugin-audit/reconnect".to_string();
         assert!(mark_connected(key.clone()));
         assert!(!mark_connected(key));
+    }
+
+    #[test]
+    fn channel_list_semantics() {
+        let empty = ChannelConfig::default();
+        assert!(empty.allows_group(1), "两个名单都空时对所有群生效");
+
+        let black = ChannelConfig {
+            white: vec![],
+            black: vec![2],
+        };
+        assert!(black.allows_group(1), "只配黑名单时其余群照常生效");
+        assert!(!black.allows_group(2));
+
+        let white = ChannelConfig {
+            white: vec![1],
+            black: vec![],
+        };
+        assert!(white.allows_group(1));
+        assert!(!white.allows_group(3), "配了白名单就只对名单内的群生效");
+
+        let both = ChannelConfig {
+            white: vec![1, 2],
+            black: vec![2],
+        };
+        assert!(!both.allows_group(2), "黑名单优先于白名单");
+
+        assert!(white.allows(None), "私聊不受群名单约束");
+        assert!(!white.allows(Some(3)));
     }
 }
