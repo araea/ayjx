@@ -89,7 +89,7 @@ impl Matcher {
     }
 
     /// 尝试分发事件给等待者。如果事件被消费（匹配成功），返回 None；否则返回原事件。
-    pub async fn dispatch(&self, event: Event) -> Option<Event> {
+    pub fn dispatch(&self, event: Event) -> Option<Event> {
         // 快速路径：当前没有等待者，直接放行
         if self.waiter_count.load(Ordering::Acquire) == 0 {
             return Some(event);

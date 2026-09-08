@@ -186,6 +186,9 @@ pub enum EventType {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SendPacket {
     pub action: String,
+    /// Repeater cancellation, checked again after BeforeSend hooks.
+    #[serde(skip)]
+    pub repeat_guard: Option<crate::plugins::repeater::RepeatGuard>,
     pub params: OwnedValue,
     /// 原始触发事件（不参与序列化发送给 Bot）
     #[serde(skip)]

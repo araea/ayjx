@@ -35,3 +35,8 @@ show_trace_footer = true
 [ctl]
 enabled = true
 admins = [] # 填写维护者 QQ 号，例如 [123456789]
+
+[repeater]
+enabled = true
+# 复读超过有效期就丢弃，避免消息补推或发送排队后迟到跟读。
+max_delay_ms = 3000

@@ -16,19 +16,20 @@
 //! 触发点上依次过三道闸：冷却 → 概率 → 打断。命中打断则改发一句打断语，
 //! 概率未命中不置位 `repeated`，同一句话的下一条仍有机会触发。
 
-use crate::adapters::satori::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_repeater_msg};
 use crate::command::get_prefixes;
 use crate::config::build_config;
-use crate::event::{Context, EventType};
+use crate::event::{Context, EventType, SendPacket};
 use crate::message::Message;
 use crate::plugins::{PluginError, get_config_or_default};
 use futures_util::future::BoxFuture;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
-use simd_json::base::ValueAsArray;
+use simd_json::base::{ValueAsArray, ValueAsMutObject};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 use toml::Value as TomlValue;
@@ -56,6 +57,8 @@ pub struct RepeaterConfig {
     pub probability: f64,
     /// 同一频道两次复读之间的冷却秒数，0 为不限制
     pub cooldown_seconds: u64,
+    /// 触发消息超过此毫秒数就放弃跟读（至少 1ms），避免补发旧话题
+    pub max_delay_ms: u64,
     /// 参与判定的文本长度上限，超长不复读；0 为不限制
     pub max_chars: usize,
     /// 是否允许同一个人自己刷屏凑够阈值
@@ -79,6 +82,7 @@ impl Default for RepeaterConfig {
             min_times: 2,
             probability: 1.0,
             cooldown_seconds: 15,
+            max_delay_ms: 3000,
             max_chars: 200,
             allow_same_user: false,
             ignore_commands: true,
@@ -125,11 +129,13 @@ struct ChannelState {
     /// 上次实际复读的时间戳（跨轮保留，用于冷却）
     last_repeat_at: u64,
     last_active: u64,
+    generation: u64,
 }
 
 impl ChannelState {
     /// 换了一句话：重置接力，但保留冷却与活跃时间
     fn restart(&mut self, sig: String, content: OwnedValue, sender: Sender) {
+        self.generation = next_generation();
         self.sig = sig;
         self.content = content;
         self.times = if sender == Sender::Bot { 0 } else { 1 };
@@ -140,6 +146,7 @@ impl ChannelState {
 
     /// 打断接力：下一条消息一律从头开始数
     fn interrupt_chain(&mut self) {
+        self.generation = next_generation();
         self.sig.clear();
         self.times = 0;
         self.repeated = false;
@@ -328,6 +335,7 @@ fn feed(
 
     // Bot 自己重复了这句话：只压住后续跟读，不计数
     if sender == Sender::Bot {
+        state.generation = next_generation();
         state.repeated = true;
         state.last_sender = Some(Sender::Bot);
         return Action::Silent;
@@ -390,90 +398,243 @@ fn observe(
     feed(state, sig, content, sender, config, now)
 }
 
+// Updated synchronously at ingress, before event tasks can be reordered.
+const OBSERVED: &str = "_ayjx_repeater_observed";
+
+fn next_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[derive(Debug, Clone)]
+pub struct RepeatGuard {
+    key: String,
+    generation: u64,
+    pub expires_at: u64,
+    pub message_id: String,
+}
+
+impl RepeatGuard {
+    pub fn is_current(&self) -> bool {
+        now_ms() < self.expires_at
+            && states()
+                .get(&self.key)
+                .is_some_and(|state| state.generation == self.generation)
+    }
+}
+
+pub struct PreparedRepeat {
+    guard: RepeatGuard,
+    group_id: Option<i64>,
+    user_id: i64,
+    content: OwnedValue,
+}
+
+fn scoped_key(
+    ctx: &Context,
+    writer: &LockedWriter,
+    group: Option<i64>,
+    user: i64,
+) -> Option<String> {
+    channel_key(
+        &format!(
+            "{}|{}|{}",
+            writer.connection_key(),
+            ctx.bot.platform,
+            ctx.bot.login_user.id
+        ),
+        group,
+        user,
+    )
+}
+
+/// Consumed interactive input still breaks a conversation's pending repeat.
+pub fn interrupt(ctx: &Context, writer: &LockedWriter) {
+    if let Some(msg) = ctx.as_message() {
+        if let Some(key) = scoped_key(
+            ctx,
+            writer,
+            msg.group_id().filter(|id| *id != 0),
+            msg.user_id(),
+        ) {
+            break_chain(key, now_secs());
+        }
+    }
+}
+
+/// Record a confirmed conditional send without overwriting a newer conversation.
+pub fn confirm_send(ctx: &Context, packet: &SendPacket) {
+    let Some(guard) = &packet.repeat_guard else {
+        return;
+    };
+    let config: RepeaterConfig = get_config_or_default(ctx, "repeater");
+    let content = packet.message().cloned().unwrap_or_default();
+    let mut map = states();
+    let Some(state) = map.get_mut(&guard.key) else {
+        return;
+    };
+    if state.generation != guard.generation {
+        return;
+    }
+    match content.as_array().and_then(|arr| signature(arr, &config)) {
+        Some(sig) => {
+            feed(state, sig, content, Sender::Bot, &config, now_secs());
+        }
+        None => state.interrupt_chain(),
+    }
+}
+
+pub fn prepare(ctx: &mut Context, writer: &LockedWriter) -> Option<PreparedRepeat> {
+    let EventType::Satori(event) = &mut ctx.event else {
+        return None;
+    };
+    if event.get_str("post_type") != Some("message") || event.get_bool(OBSERVED) == Some(true) {
+        return None;
+    }
+    event.as_object_mut()?.insert(OBSERVED.into(), true.into());
+    let config: RepeaterConfig = get_config_or_default(ctx, "repeater");
+    if !ctx
+        .config
+        .read()
+        .unwrap()
+        .plugins
+        .get("repeater")
+        .and_then(|v| v.get("enabled"))
+        .and_then(TomlValue::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let msg = ctx.as_message()?;
+    let group_id = msg.group_id().filter(|id| *id != 0);
+    if !allow_channel(group_id, &config.channel) {
+        return None;
+    }
+    let user_id = msg.user_id();
+    let key = scoped_key(ctx, writer, group_id, user_id)?;
+    let EventType::Satori(event) = &ctx.event else {
+        return None;
+    };
+    let now = now_ms();
+    let source = event
+        .get("_satori")
+        .and_then(|body| {
+            body.get("message")
+                .and_then(|m| m.get_u64("created_at"))
+                .filter(|t| *t > 0)
+                .or_else(|| body.get_u64("timestamp").filter(|t| *t > 0))
+        })
+        .unwrap_or(now);
+    let expires_at = source.min(now).saturating_add(config.max_delay_ms.max(1));
+    let sig = event
+        .get_array("message")
+        .and_then(|segments| signature(segments, &config));
+    if now >= expires_at
+        || (config.ignore_commands && is_command(&get_prefixes(ctx), msg.text()))
+        || sig.is_none()
+    {
+        break_chain(key, now / 1000);
+        return None;
+    }
+    let self_id = ctx.bot.login_user.id.parse::<i64>().unwrap_or(0);
+    let sender = if user_id != 0 && user_id == self_id {
+        Sender::Bot
+    } else {
+        Sender::User(user_id)
+    };
+    let content = event.get("message")?.clone();
+    let mut map = states();
+    maybe_evict(&mut map, now / 1000);
+    let state = map.entry(key.clone()).or_default();
+    let action = feed(
+        state,
+        sig.unwrap(),
+        content.clone(),
+        sender,
+        &config,
+        now / 1000,
+    );
+    let content = match action {
+        Action::Silent => return None,
+        Action::Repeat => content,
+        Action::Interrupt(text) => {
+            simd_json::serde::to_owned_value(Message::new().text(text)).ok()?
+        }
+    };
+    Some(PreparedRepeat {
+        guard: RepeatGuard {
+            key,
+            generation: state.generation,
+            expires_at,
+            message_id: event
+                .get_str("message_id_str")
+                .map(str::to_owned)
+                .unwrap_or_else(|| msg.message_id().to_string()),
+        },
+        group_id,
+        user_id,
+        content,
+    })
+}
+
+pub async fn send_prepared(
+    ctx: &Context,
+    writer: LockedWriter,
+    pending: Option<PreparedRepeat>,
+) -> Result<(), PluginError> {
+    if let Some(pending) = pending {
+        if pending.guard.is_current() {
+            send_repeater_msg(
+                ctx,
+                writer,
+                pending.group_id,
+                Some(pending.user_id),
+                pending.content,
+                pending.guard,
+            )
+            .await?;
+        } else {
+            debug!(target: LOG_TARGET, "丢弃过时复读");
+        }
+    }
+    Ok(())
+}
+
 pub fn handle(
-    ctx: Context,
+    mut ctx: Context,
     writer: LockedWriter,
 ) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
     Box::pin(async move {
-        let config: RepeaterConfig = get_config_or_default(&ctx, "repeater");
-        let now = now_secs();
-
-        // === 场景 A: 收到消息 ===
-        if let Some(msg) = ctx.as_message() {
-            let group_id = msg.group_id().filter(|id| *id != 0);
-            if !allow_channel(group_id, &config.channel) {
+        if ctx.as_message().is_some() {
+            let pending = prepare(&mut ctx, &writer);
+            send_prepared(&ctx, writer, pending).await?;
+        } else if let EventType::BeforeSend(packet) = &ctx.event {
+            // An interrupt phrase must not invalidate its own pending send.
+            if packet.repeat_guard.is_some() {
                 return Ok(Some(ctx));
             }
-
-            let user_id = msg.user_id();
-            let Some(key) = channel_key(&ctx.bot.login_user.id, group_id, user_id) else {
-                return Ok(Some(ctx));
-            };
-            let EventType::Satori(event) = &ctx.event else {
-                return Ok(Some(ctx));
-            };
-            let Some(segments) = event.get_array("message") else {
-                break_chain(key, now);
-                return Ok(Some(ctx));
-            };
-
-            if config.ignore_commands && is_command(&get_prefixes(&ctx), msg.text()) {
-                break_chain(key, now);
-                return Ok(Some(ctx));
-            }
-            let Some(sig) = signature(segments, &config) else {
-                break_chain(key, now);
-                return Ok(Some(ctx));
-            };
-
-            // 实现端回显的自身消息与 BeforeSend 走同一条路径，避免重复计数
-            let self_id = ctx.bot.login_user.id.parse::<i64>().unwrap_or(0);
-            let sender = if user_id != 0 && user_id == self_id {
-                Sender::Bot
-            } else {
-                Sender::User(user_id)
-            };
-
-            let content = event
-                .get("message")
-                .cloned()
-                .unwrap_or_else(|| OwnedValue::from(Vec::<OwnedValue>::new()));
-
-            match observe(key, sig, content.clone(), sender, &config, now) {
-                Action::Silent => {}
-                Action::Repeat => {
-                    debug!(target: LOG_TARGET, "触发复读");
-                    send_msg(&ctx, writer, group_id, Some(user_id), content).await?;
-                }
-                Action::Interrupt(text) => {
-                    debug!(target: LOG_TARGET, "打断复读: {}", text);
-                    let message = Message::new().text(text);
-                    send_msg(&ctx, writer, group_id, Some(user_id), message).await?;
-                }
-            }
-        }
-        // === 场景 B: 消息发送前 (Before Send) ===
-        else if let EventType::BeforeSend(packet) = &ctx.event {
+            let config: RepeaterConfig = get_config_or_default(&ctx, "repeater");
+            let now = now_secs();
             let group_id = packet.group_id().filter(|id| *id != 0);
             let user_id = packet.user_id().unwrap_or(0);
-            let Some(key) = channel_key(&ctx.bot.login_user.id, group_id, user_id) else {
+            let Some(key) = scoped_key(&ctx, &writer, group_id, user_id) else {
                 return Ok(Some(ctx));
             };
-
-            let content = packet
-                .message()
-                .cloned()
-                .unwrap_or_else(|| OwnedValue::from(Vec::<OwnedValue>::new()));
-            let sig = content.as_array().and_then(|arr| signature(arr, &config));
-
-            match sig {
+            let content = packet.message().cloned().unwrap_or_default();
+            match content.as_array().and_then(|arr| signature(arr, &config)) {
                 Some(sig) => {
                     observe(key, sig, content, Sender::Bot, &config, now);
                 }
                 None => break_chain(key, now),
             }
         }
-
         Ok(Some(ctx))
     })
 }
@@ -501,7 +662,12 @@ mod tests {
         }
     }
 
-    fn feed_text(state: &mut ChannelState, text: &str, user: i64, config: &RepeaterConfig) -> Action {
+    fn feed_text(
+        state: &mut ChannelState,
+        text: &str,
+        user: i64,
+        config: &RepeaterConfig,
+    ) -> Action {
         feed_text_at(state, text, user, config, 1_000)
     }
 
@@ -516,6 +682,62 @@ mod tests {
         let sig = signature(&segments, config).expect("文本应当可复读");
         let content = OwnedValue::from(segments);
         feed(state, sig, content, Sender::User(user), config, now)
+    }
+
+    #[test]
+    fn pending_repeat_is_cancelled_by_bot_echo_and_chain_changes() {
+        let mut state = ChannelState::default();
+        let config = cfg();
+        feed_text(&mut state, "哈哈", 1, &config);
+        assert_eq!(feed_text(&mut state, "哈哈", 2, &config), Action::Repeat);
+        let original = state.generation;
+        let segments = text_chain("哈哈");
+        feed(
+            &mut state,
+            signature(&segments, &config).unwrap(),
+            segments.into(),
+            Sender::Bot,
+            &config,
+            1000,
+        );
+        assert_ne!(
+            state.generation, original,
+            "self echo cancels an unsent repeat"
+        );
+        feed_text(&mut state, "是吧还可以吧", 3, &config);
+        feed_text(&mut state, "哈哈", 4, &config);
+        assert_ne!(
+            state.generation, original,
+            "returning to the same text must not revive an old send"
+        );
+        let before_interrupt = state.generation;
+        state.interrupt_chain();
+        assert_ne!(state.generation, before_interrupt);
+    }
+
+    #[test]
+    fn expired_or_evicted_repeat_guard_never_sends() {
+        let key = format!("guard-test-{}", next_generation());
+        let generation = next_generation();
+        states().insert(
+            key.clone(),
+            ChannelState {
+                generation,
+                ..Default::default()
+            },
+        );
+        let mut guard = RepeatGuard {
+            key: key.clone(),
+            generation,
+            expires_at: now_ms() + 60_000,
+            message_id: "2".into(),
+        };
+        assert!(guard.is_current());
+        guard.expires_at = 0;
+        assert!(!guard.is_current());
+        guard.expires_at = now_ms() + 60_000;
+        states().remove(&key);
+        assert!(!guard.is_current());
     }
 
     #[test]

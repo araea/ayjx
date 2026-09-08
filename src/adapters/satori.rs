@@ -2,7 +2,7 @@ use crate::config::{AppConfig, BotConfig};
 use crate::event::{BotStatus, Context, Event, EventType, LoginUser, SendPacket};
 use crate::matcher::Matcher;
 use crate::scheduler::Scheduler;
-use crate::{error, info, plugins, warn};
+use crate::{debug, error, info, plugins, warn};
 use futures_util::future::BoxFuture;
 use futures_util::{SinkExt, StreamExt};
 use sea_orm::DatabaseConnection;
@@ -420,20 +420,19 @@ async fn listen(
                         let config_path = config_path.clone();
                         let matcher = matcher.clone();
                         let bot = bot_status.clone();
+                        let processing = process_event(
+                            event,
+                            writer,
+                            config,
+                            db,
+                            scheduler,
+                            save_lock,
+                            config_path,
+                            matcher,
+                            bot,
+                        );
                         tokio::spawn(async move {
-                            if let Err(err) = process_event(
-                                event,
-                                writer,
-                                config,
-                                db,
-                                scheduler,
-                                save_lock,
-                                config_path,
-                                matcher,
-                                bot,
-                            )
-                            .await
-                            {
+                            if let Err(err) = processing.await {
                                 error!(target: "Bot", "Satori event processing error: {}", err);
                             }
                         });
@@ -516,8 +515,10 @@ fn events_url(endpoint: &str) -> Result<String, BotError> {
     Ok(url.into())
 }
 
+/// Prepare conversation state synchronously in receive order; only then spawn/poll
+/// the returned future. Serializing the entire pipeline would block interactive commands.
 #[allow(clippy::too_many_arguments)]
-pub async fn process_event(
+pub fn process_event(
     event: Event,
     writer: LockedWriter,
     config: Arc<RwLock<AppConfig>>,
@@ -527,15 +528,7 @@ pub async fn process_event(
     config_path: Arc<str>,
     matcher: Arc<Matcher>,
     bot: Arc<BotStatus>,
-) -> Result<(), BotError> {
-    let event = if event.get_str("post_type") == Some("message") {
-        match matcher.dispatch(event).await {
-            Some(event) => event,
-            None => return Ok(()),
-        }
-    } else {
-        event
-    };
+) -> BoxFuture<'static, Result<(), BotError>> {
     let group_id = event
         .get_i64("group_id")
         .or_else(|| event.get_u64("group_id").map(|value| value as i64));
@@ -551,11 +544,11 @@ pub async fn process_event(
             }
         };
         if should_drop {
-            return Ok(());
+            return Box::pin(async { Ok(()) });
         }
     }
 
-    let ctx = Context {
+    let mut ctx = Context {
         event: EventType::Satori(event),
         config,
         config_save_lock: save_lock,
@@ -565,8 +558,27 @@ pub async fn process_event(
         config_path,
         bot,
     };
-    plugins::run(ctx, writer).await?;
-    Ok(())
+    // Matcher dispatch only uses a synchronous mutex. Consume interactive input in
+    // receive order as well, and let consumed messages interrupt pending repeats.
+    if let EventType::Satori(event) = &ctx.event {
+        if event.get_str("post_type") == Some("message") {
+            match ctx.matcher.dispatch(event.clone()) {
+                Some(event) => ctx.event = EventType::Satori(event),
+                None => {
+                    plugins::repeater::interrupt(&ctx, &writer);
+                    return Box::pin(async { Ok(()) });
+                }
+            }
+        }
+    }
+    let pending = plugins::repeater::prepare(&mut ctx, &writer);
+    Box::pin(async move {
+        if let Err(err) = plugins::repeater::send_prepared(&ctx, writer.clone(), pending).await {
+            error!(target: "Plugin/Repeater", "复读发送失败: {}", err);
+        }
+        plugins::run(ctx, writer).await?;
+        Ok(())
+    })
 }
 
 pub async fn send_msg<M>(
@@ -579,7 +591,7 @@ pub async fn send_msg<M>(
 where
     M: Serialize,
 {
-    dispatch_send(ctx, writer, group_id, user_id, message)
+    dispatch_send(ctx, writer, group_id, user_id, message, None)
         .await
         .map(|_| ())
 }
@@ -595,7 +607,7 @@ pub async fn send_msg_ack<M>(
 where
     M: Serialize,
 {
-    dispatch_send(ctx, writer, group_id, user_id, message).await?;
+    dispatch_send(ctx, writer, group_id, user_id, message, None).await?;
     Ok(true)
 }
 
@@ -613,10 +625,24 @@ pub async fn send_msg_id<M>(
 where
     M: Serialize,
 {
-    Ok(dispatch_send(ctx, writer, group_id, user_id, message)
+    Ok(dispatch_send(ctx, writer, group_id, user_id, message, None)
         .await?
         .into_iter()
         .next())
+}
+
+/// A best-effort repeat may be dropped if the conversation advances while sending.
+pub async fn send_repeater_msg<M: Serialize>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+    guard: plugins::repeater::RepeatGuard,
+) -> Result<(), BotError> {
+    dispatch_send(ctx, writer, group_id, user_id, message, Some(guard))
+        .await
+        .map(|_| ())
 }
 
 async fn dispatch_send<M>(
@@ -625,6 +651,7 @@ async fn dispatch_send<M>(
     group_id: Option<i64>,
     user_id: Option<i64>,
     message: M,
+    repeat_guard: Option<plugins::repeater::RepeatGuard>,
 ) -> Result<Vec<String>, BotError>
 where
     M: Serialize,
@@ -650,6 +677,7 @@ where
     let receipt_message_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
     let packet = SendPacket {
         action: "message.create".to_string(),
+        repeat_guard,
         params,
         original_event,
         receipt_message_ids: receipt_message_ids.clone(),
@@ -693,13 +721,23 @@ pub async fn dispatch_packet(
         .message()
         .map(message::to_content)
         .unwrap_or_default();
-    let created: Vec<Value> = writer
-        .call(
-            ctx,
-            "message.create",
-            json!({"channel_id": channel_id, "content": content}),
-        )
-        .await?;
+    let mut params = json!({"channel_id": channel_id, "content": content});
+    if let Some(guard) = &packet.repeat_guard {
+        if !guard.is_current() {
+            debug!(target: "Plugin/Repeater", "发送前丢弃过时复读");
+            return Ok(());
+        }
+        if ctx.bot.adapter == "satori-qq" {
+            params["satori_qq"] = json!({
+                "if_latest_message_id": guard.message_id,
+                "expires_at": guard.expires_at,
+            });
+        }
+    }
+    let created: Vec<Value> = writer.call(ctx, "message.create", params).await?;
+    if !created.is_empty() {
+        plugins::repeater::confirm_send(ctx, packet);
+    }
     let ids = created
         .iter()
         .map(|message| raw_id(message.get("id")))
@@ -902,6 +940,268 @@ fn value_id(value: &Value) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A local HTTP peer exercises the actual BeforeSend -> message.create path.
+    // It never contacts QQ or sends messages to a real chat.
+    async fn repeat_fixture() -> (
+        Context,
+        LockedWriter,
+        tokio::sync::mpsc::UnboundedReceiver<Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let server = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut bytes = Vec::new();
+                let mut buf = [0; 4096];
+                loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(start) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..start]).to_ascii_lowercase();
+                        let len: usize = headers
+                            .lines()
+                            .find_map(|s| s.strip_prefix("content-length:"))
+                            .unwrap()
+                            .trim()
+                            .parse()
+                            .unwrap();
+                        if bytes.len() < start + 4 + len {
+                            continue;
+                        }
+                        tx.send(
+                            serde_json::from_slice(&bytes[start + 4..start + 4 + len]).unwrap(),
+                        )
+                        .unwrap();
+                        let body = r#"[{"id":"bot-reply"}]"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        stream.write_all(response.as_bytes()).await.unwrap();
+                        break;
+                    }
+                }
+            }
+        });
+        let mut config = AppConfig::default();
+        config.plugins.insert(
+            "repeater".into(),
+            crate::config::build_config(plugins::repeater::RepeaterConfig {
+                cooldown_seconds: 0,
+                max_delay_ms: 60_000,
+                ..Default::default()
+            }),
+        );
+        let ctx = Context {
+            event: EventType::Init,
+            config: Arc::new(RwLock::new(config)),
+            config_save_lock: Arc::new(AsyncMutex::new(())),
+            db: sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+            scheduler: Arc::new(Scheduler::new()),
+            matcher: Arc::new(Matcher::new()),
+            config_path: Arc::from("unused-repeater-test.toml"),
+            bot: Arc::new(BotStatus {
+                adapter: "satori-qq".into(),
+                platform: "red".into(),
+                login_user: LoginUser {
+                    id: "10000".into(),
+                    ..Default::default()
+                },
+            }),
+        };
+        (ctx, Arc::new(SatoriClient::new(endpoint, None)), rx, server)
+    }
+
+    fn incoming(ctx: &Context, text: &str, user: i64, id: &str, timestamp: u64) -> Event {
+        normalize_event(
+            &json!({
+                "type": "message-created", "timestamp": timestamp,
+                "channel": {"id": "123", "type": 0},
+                "user": {"id": user.to_string()},
+                "message": {"id": id, "content": text, "created_at": timestamp},
+            }),
+            &ctx.bot,
+            &Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn receive(
+        ctx: &Context,
+        writer: &LockedWriter,
+        event: Event,
+    ) -> BoxFuture<'static, Result<(), BotError>> {
+        process_event(
+            event,
+            writer.clone(),
+            ctx.config.clone(),
+            ctx.db.clone(),
+            ctx.scheduler.clone(),
+            ctx.config_save_lock.clone(),
+            ctx.config_path.clone(),
+            ctx.matcher.clone(),
+            ctx.bot.clone(),
+        )
+    }
+
+    fn timestamp_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[tokio::test]
+    async fn repeat_is_discarded_when_later_message_runs_first() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        // Prepare all events in WS receive order, then deliberately execute tasks out of order.
+        let first = receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now));
+        let repeat = receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now));
+        let third = receive(&ctx, &writer, incoming(&ctx, "是吧还可以吧", 3, "3", now));
+        third.await.unwrap();
+        repeat.await.unwrap();
+        first.await.unwrap();
+        assert!(sent.try_recv().is_err(), "stale 哈哈 must never reach HTTP");
+        // The newer chain must remain usable after the old task completes.
+        receive(&ctx, &writer, incoming(&ctx, "是吧还可以吧", 4, "4", now))
+            .await
+            .unwrap();
+        assert_eq!(sent.try_recv().unwrap()["content"], "是吧还可以吧");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn normal_repeat_sends_once_with_server_freshness_condition() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now))
+            .await
+            .unwrap();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now))
+            .await
+            .unwrap();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 3, "3", now))
+            .await
+            .unwrap();
+        let request = sent.try_recv().unwrap();
+        assert_eq!(request["content"], "哈哈");
+        assert_eq!(request["satori_qq"]["if_latest_message_id"], "2");
+        assert_eq!(request["satori_qq"]["expires_at"], now + 60_000);
+        assert!(sent.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn replayed_old_messages_do_not_trigger_a_repeat() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        for (user, id) in [(1, "1"), (2, "2")] {
+            receive(
+                &ctx,
+                &writer,
+                incoming(&ctx, "哈哈", user, id, now - 120_000),
+            )
+            .await
+            .unwrap();
+        }
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 3, "3", now))
+            .await
+            .unwrap();
+        assert!(
+            sent.try_recv().is_err(),
+            "history must not count towards a fresh chain"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn command_consumption_cannot_leave_a_pending_repeat_alive() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now))
+            .await
+            .unwrap();
+        let repeat = receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now));
+        receive(&ctx, &writer, incoming(&ctx, "/help", 3, "3", now))
+            .await
+            .unwrap();
+        repeat.await.unwrap();
+        assert!(sent.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn interactive_input_interrupts_pending_repeat_without_blocking() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now))
+            .await
+            .unwrap();
+        let repeat = receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now));
+        let input = ctx.wait_input(Some(123), Some(3), Duration::from_secs(5));
+        tokio::pin!(input);
+        assert!(futures_util::poll!(&mut input).is_pending());
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 3, "3", now))
+            .await
+            .unwrap();
+        assert!(
+            input.await.is_some(),
+            "interactive waiter must still receive its message"
+        );
+        repeat.await.unwrap();
+        assert!(
+            sent.try_recv().is_err(),
+            "even same-text interactive input consumes the chain"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn interrupt_phrase_survives_its_own_before_send_hooks() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        {
+            let mut config = ctx.config.write().unwrap();
+            let repeater = config
+                .plugins
+                .get_mut("repeater")
+                .unwrap()
+                .as_table_mut()
+                .unwrap();
+            repeater.insert("interrupt_probability".into(), toml::Value::Float(1.0));
+            repeater.insert(
+                "interrupt_texts".into(),
+                toml::Value::Array(vec![toml::Value::String("打断".into())]),
+            );
+        }
+        let now = timestamp_ms();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now))
+            .await
+            .unwrap();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now))
+            .await
+            .unwrap();
+        assert_eq!(sent.try_recv().unwrap()["content"], "打断");
+        receive(&ctx, &writer, incoming(&ctx, "打断", 3, "3", now))
+            .await
+            .unwrap();
+        receive(&ctx, &writer, incoming(&ctx, "打断", 4, "4", now))
+            .await
+            .unwrap();
+        assert!(
+            sent.try_recv().is_err(),
+            "bot must not repeat its own interruption"
+        );
+        server.abort();
+    }
 
     #[test]
     fn normalizes_message_event() {
