@@ -42,10 +42,14 @@ gate_model = "gpt-5.6-luna"
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
 reply_model = "apilio/claude-sonnet-5"
 thinking = "low"
-# 发言时开放给 pi 的工具白名单；去掉 bash 即禁止群聊触发命令执行。
+# 发言时开放的辅助工具白名单；每轮额外加载三个 satori 聊天工具。
+# 去掉 bash 可关闭本轮命令执行工具。
 tools = "read,bash,web_search,fetch_content,get_search_content"
 # 开口意愿分门槛，调高更沉默；关注中的自然续聊另行判断，见 docs/ambient.md。
 score_threshold = 45
+# 每轮最多 3 条消息、6 个平台写动作（含消息、点赞、撤回和失败尝试）。
+max_messages = 3
+max_actions = 6
 # 默认不因沉默而强行降低门槛。
 silence_relief_per_10min = 0
 silence_relief_cap = 0

@@ -22,6 +22,8 @@ pub(crate) struct Turn {
     pub text: String,
     /// 图片直链，供多模态判定使用。
     pub images: Vec<String>,
+    /// 保留资源和引用参数，供工具按消息 ID 复用。
+    pub elements: crate::message::Message,
     pub message_id: i64,
     /// 是否 @ 了机器人自己。
     pub mentions_me: bool,
@@ -92,6 +94,20 @@ impl GroupState {
         }
         self.running = true;
         true
+    }
+
+    pub(crate) fn recall(&mut self, id: i64) {
+        if let Some(turn) = self
+            .turns
+            .iter_mut()
+            .find(|turn| turn.message_id == id && id != 0)
+        {
+            turn.text = "[消息已撤回]".into();
+            turn.images.clear();
+            turn.elements = crate::message::Message::new();
+            // 不再允许引用、转发或再次撤回这个 ID。
+            turn.message_id = 0;
+        }
     }
 
     pub(crate) fn take_mention(&mut self) -> bool {
@@ -184,12 +200,14 @@ pub(crate) fn transcript(turns: &[Turn]) -> String {
                     .to_string()
             })
             .unwrap_or_else(|| "--:--".to_string());
-        let who = if turn.from_me {
+        let who = if turn.from_me && turn.user_id == 0 {
+            "平台事件（操作者未知）".to_string()
+        } else if turn.from_me {
             "你自己".to_string()
         } else {
             format!("{}({})", turn.name, turn.user_id)
         };
-        out.push_str(&format!("[{clock}] {who}: "));
+        out.push_str(&format!("[{clock} id={}] {who}: ", turn.message_id));
         out.push_str(turn.text.trim());
         if !turn.images.is_empty() {
             out.push_str(&format!("〔图片 ×{}〕", turn.images.len()));
@@ -223,6 +241,7 @@ mod tests {
             user_id: 1,
             name: "谁".into(),
             text: text.into(),
+            elements: crate::message::Message::new(),
             images: Vec::new(),
             message_id: 1,
             mentions_me: false,
@@ -295,6 +314,22 @@ mod tests {
         let text = transcript(&[theirs, mine]);
         assert!(text.contains("谁(1): 看这个〔图片 ×1〕〔@了你〕"), "{text}");
         assert!(text.contains("你自己: 嗯"), "{text}");
+    }
+
+    #[test]
+    fn recall_erases_content_and_media_and_invalidates_target() {
+        let mut state = GroupState::default();
+        let mut t = turn("不再显示", true);
+        t.images.push("https://example.com/private.png".into());
+        t.elements = crate::message::Message::new().text("不再显示");
+        state.receive(t);
+        state.recall(1);
+        let t = &state.recent(1)[0];
+        assert_eq!(t.text, "[消息已撤回]");
+        assert!(t.images.is_empty());
+        assert!(t.elements.0.is_empty());
+        assert!(!state.is_own_message(1));
+        assert_eq!(t.message_id, 0);
     }
 
     #[test]

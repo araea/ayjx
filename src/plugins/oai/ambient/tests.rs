@@ -71,6 +71,7 @@ process.stdin.on('end', () => {{
         user_id: 42,
         name: "群友".into(),
         text: "@你 测试话题".into(),
+        elements: crate::message::Message::new(),
         images: vec![],
         message_id: id,
         mentions_me: true,
@@ -136,6 +137,7 @@ async fn live_persona_and_gate_dialogue() {
             user_id: 114514,
             name: "群友甲".into(),
             text: (*text).into(),
+            elements: crate::message::Message::new(),
             images: vec![],
             message_id: index as i64 + 1,
             mentions_me: false,
@@ -166,6 +168,7 @@ async fn live_persona_and_gate_dialogue() {
             &[],
             false,
             &rhythm,
+            None,
         )
         .await
         .unwrap();
@@ -191,6 +194,7 @@ async fn live_persona_and_gate_dialogue() {
                         user_id: 10000,
                         name: "我".into(),
                         text,
+                        elements: crate::message::Message::new(),
                         images: vec![],
                         message_id: 0,
                         mentions_me: false,
@@ -214,6 +218,7 @@ async fn live_persona_and_gate_dialogue() {
             user_id: 114514,
             name: "群友甲".into(),
             text: text.into(),
+            elements: crate::message::Message::new(),
             images: vec![],
             message_id: 9,
             mentions_me: false,

@@ -1,4 +1,4 @@
-use crate::adapters::satori::{LockedWriter, api};
+use crate::adapters::satori::{LockedWriter, api, forward};
 use crate::event::Context;
 use regex::Regex;
 use simd_json::base::ValueAsScalar;
@@ -140,6 +140,38 @@ pub fn escape_markdown_special(s: &str) -> String {
     }
 }
 
+/// 一条转发不该把视觉预算吃光。
+const MAX_FORWARD_IMAGES: usize = 4;
+
+/// 展开一条合并转发，按引用块并进提示词，顺带把转发里的图片交给视觉输入。
+async fn append_forward(
+    ctx: &Context,
+    writer: &LockedWriter,
+    source: forward::Source,
+    label: &str,
+    quote_text: &mut String,
+    imgs: &mut Vec<String>,
+) {
+    let view = forward::expand(ctx, writer, source).await;
+    let body = view.transcript();
+    if body.trim().is_empty() {
+        return;
+    }
+    quote_text.push_str(label);
+    quote_text.push('\n');
+    for line in body.lines() {
+        quote_text.push_str("> ");
+        quote_text.push_str(line);
+        quote_text.push('\n');
+    }
+    quote_text.push('\n');
+    for url in view.images().into_iter().take(MAX_FORWARD_IMAGES) {
+        if !imgs.contains(&url) {
+            imgs.push(url);
+        }
+    }
+}
+
 pub async fn get_full_content(
     ctx: &Context,
     writer: &LockedWriter,
@@ -218,10 +250,35 @@ pub async fn get_full_content(
                 }
                 quote_text.push('\n');
             }
+
+            // 引用一条合并转发时，正文本身是空的：不展开等于什么都没引用。
+            if let Some(source) = forward::source_of(&ret.message, Some(ret.message_id)) {
+                append_forward(ctx, writer, source, "引用的合并转发：", &mut quote_text, &mut imgs)
+                    .await;
+            }
         }
     }
 
-    // 2. 提取当前消息内容
+    // 2. 当前消息自带的合并转发同样要展开，否则只剩一个占位符。
+    if let Some(source) = message_arr
+        .iter()
+        .find(|seg| seg.get_str("type") == Some("forward"))
+        .and_then(|seg| seg.get("data"))
+        .and_then(|data| data.get_str("id"))
+        .map(|id| forward::Source::new(Some(id.to_string()), Some(crate::event::MessageEvent(event).message_id())))
+    {
+        append_forward(
+            ctx,
+            writer,
+            source,
+            "本条消息里的合并转发：",
+            &mut quote_text,
+            &mut imgs,
+        )
+        .await;
+    }
+
+    // 3. 提取当前消息内容
     let mut found_trigger = false;
 
     for seg in message_arr {

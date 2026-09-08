@@ -251,6 +251,10 @@ pub(crate) struct PiRun<'a> {
     pub thinking: Option<&'a str>,
     /// 额外载入的 skill 文件或目录。
     pub skills: &'a [PathBuf],
+    /// 显式加载的 Pi 工具扩展。
+    pub extensions: &'a [PathBuf],
+    /// 有外部动作的会话不能在静默后重放整轮。
+    pub retry_stalled: bool,
     /// 工具白名单（逗号分隔）；`None` 用 pi 默认工具集。
     pub tools: Option<&'a str>,
     /// 是否加载工作目录里的 AGENTS.md / CLAUDE.md。
@@ -277,6 +281,8 @@ impl<'a> PiRun<'a> {
             model: None,
             thinking: None,
             skills: &[],
+            extensions: &[],
+            retry_stalled: true,
             tools: None,
             context_files: true,
             env: &[],
@@ -320,7 +326,7 @@ pub(crate) async fn run(run: PiRun<'_>) -> anyhow::Result<PiReply> {
     let first = attempt(&run, &args, prompt).await;
     match first {
         Err(error) => match error.downcast_ref::<Stalled>() {
-            Some(stalled) if !stalled.partial => {
+            Some(stalled) if !stalled.partial && run.retry_stalled => {
                 warn!(target: "Plugin/OAI", "{error}，重试一次");
                 attempt(&run, &args, prompt).await
             }
@@ -354,6 +360,10 @@ fn build_args(run: &PiRun<'_>, temp: &TempFiles) -> Vec<String> {
     if let Some(thinking) = run.thinking.filter(|value| !value.trim().is_empty()) {
         args.push("--thinking".into());
         args.push(thinking.to_string());
+    }
+    for extension in run.extensions {
+        args.push("--extension".into());
+        args.push(extension.to_string_lossy().into());
     }
     for skill in run.skills {
         args.push("--skill".into());
@@ -711,9 +721,7 @@ mod tests {
     #[test]
     fn repeated_tool_calls_merge_and_overflow_is_counted() {
         let mut events = Events::default();
-        let call = |name: &str, query: &str| {
-            json!({"type": "tool_execution_start", "toolName": name, "args": {"query": query}})
-        };
+        let call = |name: &str, query: &str| json!({"type": "tool_execution_start", "toolName": name, "args": {"query": query}});
         events.accept(&call("web_search", "auto-summary"));
         events.accept(&call("web_search", "auto-summary"));
         events.accept(&call("bash", "uname -a"));
@@ -922,7 +930,15 @@ process.stdin.on('end', () => {
         ];
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            conversation(command.to_str().unwrap(), &dir.0, "", "", None, &history, None),
+            conversation(
+                command.to_str().unwrap(),
+                &dir.0,
+                "",
+                "",
+                None,
+                &history,
+                None,
+            ),
         )
         .await
         .unwrap()
@@ -997,7 +1013,16 @@ setInterval(()=>{{}},1000);
         base: PathBuf,
         history: Vec<ChatMessage>,
     ) -> anyhow::Result<PiReply> {
-        conversation(command.to_str().unwrap(), &base, "", "", None, &history, None).await
+        conversation(
+            command.to_str().unwrap(),
+            &base,
+            "",
+            "",
+            None,
+            &history,
+            None,
+        )
+        .await
     }
 
     #[tokio::test]

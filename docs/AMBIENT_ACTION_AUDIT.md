@@ -1,0 +1,117 @@
+# 群聊模拟对话审计与改造（2026-09-08）
+
+结论：存在明显增强空间，主要瓶颈在 ayjx 的群聊接入层。现有 satori-qq 已支持所需的
+普通成员互动，不需要为了本次改造重新安装 QQ 模块。原有 Pi 群聊虽然有搜索工具，
+平台输出却仍主要依赖“逐行文字 + 少量标记”，无法根据动作结果继续调整。
+
+## 审计发现与实现
+
+| 原有限制 | 本次处理 |
+| --- | --- |
+| 只有少量输出标记，点赞/撤回/文件/转发未接入人格 | 新增类型化 satori_action，直接落到现有 Satori API |
+| 引用只能指向最后一条消息，模型看不到消息 ID | transcript 和 context 提供精确 ID，工具支持 reply_to |
+| 图片、商城表情、引用参数在上下文中被压成占位符 | 保存原始 Message 元素，支持按 message_id 复用表情包/图片 |
+| 戳一戳、撤回和表态被 as_message 过滤掉 | 新增事件观察；撤回清正文/媒体，表态不虚构操作者 |
+| 最终输出之后才发送，模型看不到回执 | 本轮 Unix RPC 把真实成功/失败结果送回 Pi，可继续决策 |
+| Pi 静默后可能整轮重试，外部动作会重复 | 有平台工具的调用关闭整轮静默重试，请求 ID 缓存回执 |
+| 本机 Pi 的 --tools 会把新扩展工具过滤掉 | compose 显式附加三个工具名，并验证实际加载后的活跃工具 |
+| 本地文件路径无法直接由 QQ 读取 | 从本轮 cwd/素材目录读取并 upload.create，再发资源消息 |
+| 空回执也可能计入成功发言 | 无 ID 不计作成功；动作只在确认后计入频率 |
+| “短句、省标点、一行一条”容易限制认真回答 | 工具 text 保留空格/换行/标点，允许检索、步骤、文件和材料整理 |
+
+采用 Pi 的小型工具扩展、上下文和回执驱动后续决策的方式，使用现有 Pi 执行层。
+实现参照本机安装包的 extension API 和
+[Pi 官方扩展示例](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/dynamic-tools.ts)。
+Pi 全局模型、搜索插件、普通房间配置保持原有来源，每轮显式注入本群聊天扩展。
+
+```mermaid
+flowchart LR
+  A[群消息与平台事件] --> B[每群窗口：作者、ID、资源、关注]
+  B --> C[轻量判定 / 新点名]
+  C --> D[Pi 人格]
+  D --> E[satori_context / satori_read]
+  E --> D
+  D --> F[satori_action]
+  F --> G[当前群 / 时序 / 额度 / 参数检查]
+  G --> H[Satori HTTP → QQ]
+  H --> I[回执与窗口记录]
+  I --> D
+  D --> J[继续互动或沉默]
+```
+
+## 动作映射
+
+| 能力 | 调用 |
+| --- | --- |
+| 文字、引用、提及、表情、图片、文件、语音、视频 | message.create，经现有插件发送链 |
+| 表情包 | 复用入站 image/mface 元素，或发送已存在的 GIF/图片 |
+| 合并转发 | Message.node_custom → Satori message forward；保留已有作者或以自己署名整理 |
+| 本地媒体 | upload.create → internal 资源 → message.create |
+| 戳一戳 | internal/poke（固定当前 guild_id） |
+| 资料卡点赞 | internal/like |
+| 消息表态与取消自己的表态 | reaction.create / reaction.delete |
+| 撤回自己的消息 | message.delete |
+| 获取原消息 | message.get |
+| 展开合并转发 | internal/get_forward，先 `native:<父消息 ID>` 后 resId，见下节 |
+| 可用能力 | login.get；QQ 扩展以 adapter=satori-qq 识别，失败以真实回执为准 |
+
+本机只读探测确认 satori-qq 0.8.9.27 在线，internal/capabilities 可访问。
+动作字段按本机 `satori-qq/docs/SATORI_SUPPORT.md`、`SatoriHub.java`、`Codec.java` 核对。
+
+## 验证
+
+- 全套 Rust 测试：206 项通过；另有需要显式网络/环境的 ignored 测试。
+- 本地假 Satori HTTP + 真 Unix RPC：验证引用、提及、换行、表情包、资料卡赞、表态/取消、
+  文件上传、合并转发、回执编号精度、撤回、重复请求、停用和过时上下文。
+- 本机真实 Pi CLI：三个扩展工具被注册并进入 --tools 白名单，schema 与 RPC 回执验证通过。
+- 真实 `apilio/claude-sonnet-5` 隔离试聊：“给这条消息点个赞的表态，不用再发文字”。
+  模型实际调用 login.get 和 reaction.create，最终 [silent]，没有 message.create。
+  该测试的 QQ 端全部是本地假服务，没有向真实群发送测试消息。
+
+- 本机真实 satori-qq 只读核对：在两个群里各找一条真实合并转发展开，文字转发拿回
+  发送者、时间和全部五条正文，图片转发拿回七条 `[图片]` 与可下载的资源直链。
+  全过程只调用 `internal/message_search` 和 `internal/get_forward`，没有发送任何消息。
+
+复现：`cargo test --offline`、`node tests/satori-tools.cjs`。
+合并转发真机只读核对：
+`AYJX_FORWARD_LIVE_CHANNEL=<群号> cargo test --offline live_forward_expansion -- --ignored --nocapture`。
+真实模型隔离测试：
+`cargo test --offline live_pi_social_tool_selection -- --ignored --nocapture`。
+后者会调用本机 Pi 已配置的模型，需要网络，但不连接真实 QQ。
+
+## 合并转发的完整读取（2026-09-09 追加）
+
+原来的实现只把 `internal/get_forward` 的原始 JSON 丢给模型，普通房间对话则完全不展开。
+对本机 satori-qq 0.8.9.27 做只读核对后确认这不够：
+
+- 只读探测三条真实转发，resId 路径把其中两条读成了**空节点**：
+  `<message><author/></message>`，没有图片也没有逐条消息 ID。这是从外部观察到的结果；
+  没有进模块里验证成因，最可能是 NT 客户端的图片走 CommonElem，而 `LongMsg.parseElem`
+  只认 CustomFace / NotOnlineImage，解析不到就退化成一个空文本段。
+- 同样三条转发改用 `native:<父消息 ID>`，两条立刻读回完整图片资源、逐条 ID 和时间戳；
+  第三条因为父消息已被内核缓存淘汰而失败。两条路径互补，都需要保留。
+- 普通房间的 `get_full_content` 只处理 text/image/video：引用一条合并转发等于什么都没引用。
+
+因此新增 `src/adapters/satori/forward.rs` 作为唯一展开器：先内核、失败退回 resId、
+退回时在 `notes` 里说明协议已丢失媒体，嵌套转发沿节点自己的消息 ID 逐层展开，
+受 60 节点 / 3 层双预算约束。`satori_read` 返回 transcript、nodes、images、truncated、notes；
+`get_full_content` 把展开结果作为引用块并入提示词，转发内图片最多取 4 张作为视觉输入。
+
+本次没有改 satori-qq：内核路径已经能覆盖仍在缓存里的转发，而修补 resId 路径的
+CommonElem 解析需要重装 Xposed 模块（本机签名密钥已丢失，只能卸载重装）。
+若要连缓存过期的旧转发也拿到图片，下一步就是给 `LongMsg.parseElem` 补上 CommonElem。
+
+## 实际边界和后续方向
+
+功能可调用并不代表 QQ 服务端永远接受：表态种类、资料卡赞次数、撤回时限、媒体过期、
+服务端权限和网络问题仍可能失败。动作超时可能已经送达，禁止自动重放。
+发出前会检查群聊是否更新；已交给平台的请求无法撤销，HTTP 排队期间仍有时序竞争窗口。
+本次没有对真实群逐项发送测试，所以不把假服务验证冒充每项 QQ 服务端实测。
+
+人格、关注和窗口提供当轮连续性；不声称新增了长期关系记忆、自动语音识别/合成或图像生成。
+需要长期熟人感时，下一步可增加每群可编辑的偏好与事实摘要，保留证据和时间，允许纠正和遗忘；
+需要更多表情风格时，可在 media 放入命名清晰的素材并增加描述索引。
+语气变化由上下文和人设决定，避免把情绪、幽默或空格做成强制轮换的随机模式。
+
+工具接口只开放当前群的普通成员动作，限制当前窗口目标、自己的撤回、单轮额度和媒体目录。
+既有 read/bash 白名单属于原来的本机 Pi 信任模型，本次没有把它变成操作系统沙箱。

@@ -19,6 +19,7 @@ use tokio_tungstenite::{
 };
 
 pub mod api;
+pub mod forward;
 pub mod message;
 
 pub type BotError = Box<dyn std::error::Error + Send + Sync>;
@@ -35,7 +36,7 @@ pub struct SatoriClient {
 }
 
 impl SatoriClient {
-    fn new(endpoint: String, token: Option<String>) -> Self {
+    pub(crate) fn new(endpoint: String, token: Option<String>) -> Self {
         Self {
             endpoint,
             token: token.filter(|value| !value.trim().is_empty()),

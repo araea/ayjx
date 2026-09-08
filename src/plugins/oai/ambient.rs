@@ -7,7 +7,7 @@
 //! 2. **判**——群里安静下来之后，用一个便宜的多模态模型读窗口，只回一个
 //!    开口意愿分（[`gate`]）。分数不过线就什么都不发生，这是常态。
 //! 3. **说**——过线才唤起本机 pi（[`speak`]），带人设、带工具、带描述 Satori
-//!    消息元素的 skill；产出按行拆成几条消息，再按打字速度错开发出（[`pace`]）。
+//!    消息元素的 skill；通过带回执的平台工具执行动作（[`bridge`]），保留旧文字输出兼容。
 //!
 //! 判定与措辞分开，是因为它们的成本和失败方式都不一样：判定要便宜、要多、
 //! 要能看图；措辞要慢、要少、要有工具。合成一次调用就只能两头将就。
@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod actions;
 mod attention;
+mod bridge;
 mod gate;
 #[cfg(test)]
 #[path = "ambient/tests.rs"]
@@ -81,6 +83,8 @@ pub(crate) struct AmbientConfig {
     pub reply_on_mention: bool,
     /// 一次发言最多拆成几条消息。
     pub max_messages: usize,
+    /// 每轮平台写动作总数（含消息、点赞、撤回）。
+    pub max_actions: usize,
     /// 打字速度（字/分钟）。调低更像在慢慢敲。
     pub typing_cpm: u32,
     /// 长句改用语音输入时的等效速度（字/分钟）。
@@ -114,6 +118,7 @@ impl Default for AmbientConfig {
             hourly_limit: 0,
             reply_on_mention: true,
             max_messages: 3,
+            max_actions: 6,
             typing_cpm: 150,
             voice_cpm: 420,
             think_seconds: 3.0,
@@ -192,6 +197,12 @@ pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
     let skill = skill_dir(oai_data);
     tokio::fs::create_dir_all(&skill).await?;
     tokio::fs::write(skill.join("SKILL.md"), SKILL).await?;
+    tokio::fs::write(
+        base_dir(oai_data).join("satori-tools.ts"),
+        include_str!("../../../res/ambient/satori-tools.ts"),
+    )
+    .await?;
+    tokio::fs::create_dir_all(base_dir(oai_data).join("media")).await?;
     Ok(())
 }
 
@@ -204,6 +215,7 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
         return;
     }
     let Some(event) = ctx.as_message() else {
+        observe_notice(ctx, writer, mgr, &config).await;
         return;
     };
     let Some(group) = event.group_id().filter(|id| config.groups.contains(id)) else {
@@ -249,6 +261,105 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     });
 }
 
+/// 戳一戳和撤回也是互动；表态没有操作者，不能凭空归到某位群友头上。
+async fn observe_notice(
+    ctx: &Context,
+    writer: &LockedWriter,
+    mgr: &Arc<super::data::Manager>,
+    config: &AmbientConfig,
+) {
+    let crate::event::EventType::Satori(raw) = &ctx.event else {
+        return;
+    };
+    let Some(group) = raw
+        .get_i64("group_id")
+        .filter(|g| config.groups.contains(g))
+    else {
+        return;
+    };
+    let Some((turn, recalled)) = notice_turn(raw, ctx.bot.login_user.id.parse().unwrap_or(0))
+    else {
+        return;
+    };
+    let start = window::with_group(group, |state| {
+        if let Some(id) = recalled {
+            state.recall(id);
+        }
+        state.receive(turn)
+    });
+    if start {
+        let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
+        tokio::spawn(async move {
+            if let Err(error) = consider(&ctx, &writer, &mgr, group).await {
+                warn!(target: LOG_TARGET, "群 {group} 互动处理失败：{error:#}");
+            }
+        });
+    }
+}
+
+fn notice_turn(raw: &simd_json::OwnedValue, me: i64) -> Option<(Turn, Option<i64>)> {
+    let user = raw.get_i64("user_id").unwrap_or(0);
+    let mid = raw.get_i64("message_id").unwrap_or(0);
+    let kind = raw.get_str("satori_type").unwrap_or("");
+    let mut recalled = None;
+    let mut mentions_me = false;
+    let mut from_me = user == me;
+    let text = match kind {
+        "internal" if raw.get_str("sub_type") == Some("poke") => {
+            let data = raw.get("satori_data")?;
+            let target = data
+                .get_str("target_id")
+                .and_then(|s| s.parse::<i64>().ok())
+                .or_else(|| data.get_i64("target_id"))
+                .unwrap_or(0);
+            mentions_me = target == me && user != me;
+            format!("[戳一戳：{user} 戳了 {target}]")
+        }
+        "message-deleted" => {
+            recalled = Some(mid);
+            format!("[消息 {mid} 已撤回]")
+        }
+        "reaction-added" | "reaction-removed" => {
+            let emoji = raw
+                .get("_satori")?
+                .get("emoji")?
+                .get_str("id")
+                .unwrap_or("?");
+            // 只记录、不靠这类无操作者回声唤醒，避免自己点赞→自己接话的循环。
+            from_me = true;
+            format!(
+                "[平台事件：消息 {mid} {}表态 {emoji}；操作者未知]",
+                if kind == "reaction-added" {
+                    "新增"
+                } else {
+                    "减少"
+                }
+            )
+        }
+        _ => return None,
+    };
+    Some((
+        Turn {
+            user_id: user,
+            name: if from_me && user == 0 {
+                "平台事件".into()
+            } else {
+                user.to_string()
+            },
+            text,
+            images: vec![],
+            elements: Message::new(),
+            message_id: 0,
+            mentions_me,
+            from_me,
+            at: raw
+                .get_i64("time")
+                .unwrap_or_else(|| chrono::Local::now().timestamp()),
+        },
+        recalled,
+    ))
+}
+
 /// 事件 → 窗口里的一条消息。
 fn build_turn(event: &MessageEvent<'_>, me: i64) -> Turn {
     let mut text = String::new();
@@ -283,10 +394,18 @@ fn build_turn(event: &MessageEvent<'_>, me: i64) -> Turn {
                     }
                     text.push_str("[图片]");
                 }
-                "face" => text.push_str("[表情]"),
+                "face" => text.push_str(&format!("[表情:{}]", data.get_str("id").unwrap_or("?"))),
                 "record" => text.push_str("[语音]"),
                 "video" => text.push_str("[视频]"),
-                "reply" => {}
+                "reply" => text.push_str(&format!("[引用:{}] ", data.get_str("id").unwrap_or("?"))),
+                "file" => text.push_str(&format!(
+                    "[文件:{}]",
+                    data.get_str("name").unwrap_or("未命名")
+                )),
+                "forward" | "node" => text.push_str("[合并转发，可用 satori_read 展开]"),
+                "poke" => text.push_str("[戳一戳]"),
+                "dice" => text.push_str("[骰子]"),
+                "rps" => text.push_str("[猜拳]"),
                 _ => {}
             }
         }
@@ -302,6 +421,11 @@ fn build_turn(event: &MessageEvent<'_>, me: i64) -> Turn {
         name: event.sender_name().to_string(),
         text,
         images,
+        elements: event
+            .0
+            .get("message")
+            .and_then(|v| simd_json::serde::from_owned_value(v.clone()).ok())
+            .unwrap_or_default(),
         message_id: event.message_id(),
         mentions_me,
         from_me: event.user_id() == me && me != 0,
@@ -488,6 +612,7 @@ async fn speak_up(
         &images,
         mentioned,
         rhythm,
+        Some((ctx, writer, group, seq)),
     )
     .await?;
 
@@ -582,8 +707,12 @@ async fn speak_up(
         }
         message.0.extend(utterance.message.0.iter().cloned());
         let spoken = plain_text(&utterance.message);
-        let id = match send_msg_id(ctx, writer.clone(), Some(group), None, message).await {
-            Ok(id) => id.and_then(|id| id.parse::<i64>().ok()).unwrap_or_default(),
+        let id = match send_msg_id(ctx, writer.clone(), Some(group), None, &message).await {
+            Ok(Some(id)) => id.parse::<i64>().unwrap_or_default(),
+            Ok(None) => {
+                warn!(target: LOG_TARGET, "群 {group} 无消息回执，不计入成功发言");
+                break;
+            }
             Err(error) => {
                 warn!(target: LOG_TARGET, "群 {group} 发言发送失败：{error}");
                 break;
@@ -601,6 +730,7 @@ async fn speak_up(
                 user_id: me,
                 name: "我".to_string(),
                 text: spoken,
+                elements: message.clone(),
                 images: Vec::new(),
                 message_id: id,
                 mentions_me: false,
@@ -637,7 +767,11 @@ fn plain_text(message: &Message) -> String {
             "poke" => out.push_str("[戳一戳]"),
             "dice" => out.push_str("[骰子]"),
             "rps" => out.push_str("[猜拳]"),
-            "image" => out.push_str("[图片]"),
+            "image" | "mface" => out.push_str("[图片/表情包]"),
+            "file" => out.push_str("[文件]"),
+            "record" => out.push_str("[语音]"),
+            "video" => out.push_str("[视频]"),
+            "node" | "forward" => out.push_str("[合并转发]"),
             _ => {}
         }
     }
@@ -725,7 +859,7 @@ mod tests {
         }));
         let turn = build_turn(&MessageEvent(&raw), 3_373_167_460);
         assert_eq!(turn.name, "老张");
-        assert_eq!(turn.text, "@我 你怎么看[图片]");
+        assert_eq!(turn.text, "[引用:6] @我 你怎么看[图片]");
         assert!(turn.mentions_me);
         assert!(!turn.from_me);
         assert_eq!(turn.images, ["https://example.com/a.png"]);
@@ -744,6 +878,29 @@ mod tests {
         let turn = build_turn(&MessageEvent(&raw), 3_373_167_460);
         assert!(turn.from_me);
         assert_eq!(turn.text, "[图片]");
+    }
+
+    #[test]
+    fn platform_events_preserve_targets_without_inventing_reaction_authors() {
+        let poke = event(
+            serde_json::json!({"satori_type":"internal","sub_type":"poke","user_id":42,"satori_data":{"target_id":"10000"}}),
+        );
+        let (turn, _) = notice_turn(&poke, 10000).unwrap();
+        assert!(turn.mentions_me);
+        assert!(!turn.from_me);
+        assert_eq!(turn.message_id, 0);
+        let reaction = event(
+            serde_json::json!({"satori_type":"reaction-added","message_id":123,"_satori":{"emoji":{"id":"76"}}}),
+        );
+        let (turn, _) = notice_turn(&reaction, 10000).unwrap();
+        assert_eq!(turn.user_id, 0);
+        assert!(turn.from_me);
+        assert!(!turn.mentions_me);
+        assert!(window::transcript(&[turn]).contains("操作者未知"));
+        let recall = event(
+            serde_json::json!({"satori_type":"message-deleted","message_id":123,"user_id":42}),
+        );
+        assert_eq!(notice_turn(&recall, 10000).unwrap().1, Some(123));
     }
 
     #[test]
