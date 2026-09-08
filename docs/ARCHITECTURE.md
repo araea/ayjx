@@ -119,22 +119,24 @@ msg 支持 `Message`、`&str`、`String`。下载资源用 `crate::http::downloa
 
 ## 出图与渲染
 
-框架里有三条出图路线，按内容形态选，不要混用：
+框架里有几条出图路线，按内容形态选，不要混用：
 
 | 路线 | 依赖 | 谁在用 | 适用 |
 | --- | --- | --- | --- |
-| **原生卡片** `crate::render` | 系统 CJK 字体 | ciyi、help、ctl、ai_news | 版式确定的清单、说明、盘面 |
+| **原生卡片** `crate::render` | 系统 CJK 字体 | help、ctl | 版式确定的清单与说明 |
+| **原生卡片（插件私有）** `ciyi/painter.rs` | 系统 CJK 字体 | ciyi | 宣纸风盘面 |
 | **图表** plotters | 无 | stats、wordcloud | 坐标轴、折线、柱状、词云 |
-| **浏览器截图** cdp_html_shot | Chrome/Chromium | webshot、oai | 真实网页、任意 Markdown |
+| **浏览器截图** cdp_html_shot | Chrome/Chromium | webshot、ai_news、oai | 真实网页、资讯长图、任意 Markdown |
 
-**默认走原生**。浏览器那条路要拉起一个 Chromium 进程：慢、吃内存，而且是唯一会
-「因为外部程序起不来」而整条链路失败的一环。内容一旦是结构化的——序号、标题、
-几个字段、一个分数——就不需要排版引擎，原生几十毫秒画完，没有外部依赖。
-`ai_news` 的四张卡原本是 HTML 截图，现已全部改为原生绘制（`plugins/ai_news/card.rs`）。
+**结构化清单走原生**。浏览器那条路要拉起一个 Chromium 进程：慢、吃内存，而且是
+唯一会「因为外部程序起不来」而整条链路失败的一环。help 与 ctl 的内容就是几行
+字段，不需要排版引擎，原生几十毫秒画完。
 
-剩下两个仍用浏览器的，是**内容形态决定的，不是没来得及改**：
-`webshot` 要的就是真实网页的样子；`oai` 渲染的是模型产出的任意 Markdown，
-表格、代码块、嵌套列表都要排——那正是浏览器存在的理由。
+**读的东西以人眼为准**。`ai_news` 的四张卡与 `ciyi` 的宣纸卡都为「被人一行行读完」
+而排，行距、字重、留白差一点就明显难读——这两处的版式各自调到位，就不再为了省一个
+进程去动它：ai_news 保持 HTML 截图，ciyi 保持自己那份 `painter.rs`。省下来的开销
+不值得拿阅读体验去换。剩下的 `webshot` 要的就是真实网页的样子，`oai` 渲染的是模型
+产出的任意 Markdown，表格、代码块、嵌套列表都要排——那正是浏览器存在的理由。
 
 原生渲染层 `src/render/` 分三层，从下往上：
 
@@ -148,7 +150,7 @@ render/kit.rs      系统类卡片的成品部件：Theme + Block 序列 → PNG
   `image_scale`，1—4 倍，默认 3）。同一份版式换倍率不用改一个数字。
 - **先量后画**：`kit::render` 先用一张 1×1 的量尺画布算出每个 Block 的高度，
   累加得到卡片真实高度后再开画布。既不会「先给足高度再裁」而静默截断，
-  也不必猜上界。ciyi 的宣纸卡版式独特，自己画，但同样先算后裁。
+  也不必猜上界。ciyi 的宣纸卡版式独特，用自己的 `painter.rs` 画，但同样先算后裁。
 - **折行**：`Canvas::wrap` 西文按词断、中文避头点避尾点，末行超宽加省略号。
 - **换皮不改版式**：`kit::Theme` 收拢全部配色。help 用 `blueprint()`（青绿），
   ctl 用 `graphite()`（琥珀），同一套版式语言、不同色相，一眼能分辨两张卡的来路。
@@ -216,10 +218,10 @@ cargo fmt          # 提交前
 卡片版式改动要人工看图，三个插件各有一个 `ignored` 的落盘测试：
 
 ```sh
-CIYI_CARD_DUMP=/tmp/cards    cargo test ciyi::card    -- --ignored
-HELP_CARD_DUMP=/tmp/cards    cargo test help::card    -- --ignored
-CTL_CARD_DUMP=/tmp/cards     cargo test ctl::card     -- --ignored
-AI_NEWS_CARD_DUMP=/tmp/cards cargo test ai_news::card -- --ignored
+CIYI_CARD_DUMP=/tmp/cards    cargo test ciyi::card     -- --ignored
+HELP_CARD_DUMP=/tmp/cards    cargo test help::card     -- --ignored
+CTL_CARD_DUMP=/tmp/cards     cargo test ctl::card      -- --ignored
+AI_NEWS_CARD_DUMP=/tmp/cards cargo test live_page_is_parseable -- --ignored  # 落盘 HTML
 ```
 
 它们用真实注册表造样张（含启用/停用、长昵称、超长指令表等边界），

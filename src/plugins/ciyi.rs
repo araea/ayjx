@@ -1,8 +1,8 @@
 //! 词意：每日一个两字词，全群一起用「语义排名」把它逼出来。
 //!
 //! 呈现方式：盘面、揭晓、排行榜、玩法说明都原生绘制成一张宣纸风的卡片图
-//! （见 `card.rs`，绘制基元取自框架的 `crate::render`），一局下来翻回去看历次
-//! 提示不必在聊天记录里大海捞针；「不在词库中」这类即时纠错仍走纯文本——它要的是快，
+//! （见 `card.rs` 与 `painter.rs`），一局下来翻回去看历次提示不必在聊天
+//! 记录里大海捞针；「不在词库中」这类即时纠错仍走纯文本——它要的是快，
 //! 不是好看。绘制不走浏览器截图：文字由 ab_glyph 直接光栅化，环境里
 //! 连一个可用字体都没有时才退回文本，功能不受影响。
 
@@ -11,6 +11,7 @@ pub mod config;
 pub mod data;
 pub mod engine;
 pub mod entity;
+pub mod painter;
 pub mod view;
 
 use crate::adapters::satori::{LockedWriter, send_msg};
