@@ -46,6 +46,7 @@ Termux 下 ./bot start 会取得唤醒锁；需要使用 tmux 时执行 ./bot se
 
 - [插件控制](docs/CONTROL.md)
 - [Satori 接入](docs/SATORI.md)
+- [Pi 房间](docs/pi-agent.md)
 - [插件兼容性审计](docs/SATORI_PLUGIN_AUDIT.md)
 - [架构说明](docs/ARCHITECTURE.md)
 
