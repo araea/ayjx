@@ -210,6 +210,17 @@ register_plugins!(
         on_init: Some(ai_news::init),
         on_connected: Some(ai_news::on_connected)
     },
+    webui {
+        display_name: "网页面板",
+        section: "system",
+        summary: "本机网页控制台：可视化管理全部插件的开关与配置，与 /ctl 同一套校验和保存；默认只监听 127.0.0.1，凭密钥访问",
+        commands: cmds![
+            ("webui / 面板 / 网页面板", "取回带密钥的面板地址；仅限私聊或本机控制台"),
+            ("webui 状态", "查看监听地址与运行状态"),
+            ("webui 重置密钥", "作废旧密钥并生成新的"),
+        ],
+        on_init: Some(webui::init)
+    },
     settings {
         display_name: "设置",
         section: "system",

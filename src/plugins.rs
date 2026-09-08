@@ -478,7 +478,7 @@ mod satori_compat_tests {
     use std::sync::RwLock;
     use tokio::sync::Mutex as AsyncMutex;
 
-    /// 一条规范化 Satori 群消息必须能无副作用地走完全部 22 个插件。
+    /// 一条规范化 Satori 群消息必须能无副作用地走完全部注册插件。
     #[tokio::test]
     async fn every_plugin_accepts_a_normalized_satori_message() {
         let db = Database::connect("sqlite::memory:").await.unwrap();

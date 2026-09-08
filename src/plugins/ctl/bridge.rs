@@ -130,7 +130,7 @@ fn enabled(ctx: &Context) -> bool {
 /// ctl 内部按 `is_manager` 判权，而本机控制台一向等同维护者；这条通道既然对所有人
 /// 开放，就走同一条身份，免得同一份命令在两处得到两种结果。ctl 自己的保命规则
 /// （不能关掉 ctl、不能把管理入口锁死）仍然生效，它们防的是误操作而不是权限。
-fn maintainer(ctx: &Context) -> Context {
+pub(crate) fn maintainer(ctx: &Context) -> Context {
     let mut ctx = ctx.clone();
     ctx.bot = std::sync::Arc::new(crate::event::BotStatus {
         adapter: "console".to_string(),

@@ -61,20 +61,20 @@ pub fn is_manager(ctx: &Context) -> bool {
 }
 pub const DENIED: &str = "此操作仅限 ctl.admins 中的全局管理员；请由本机维护者在 config.toml 的 [ctl] 中配置 admins = [QQ号]。";
 
-fn resolve(name: &str) -> Result<&'static Plugin, String> {
+pub(crate) fn resolve(name: &str) -> Result<&'static Plugin, String> {
     get_plugins()
         .iter()
         .find(|p| p.name.eq_ignore_ascii_case(name) || p.display_name == name)
         .ok_or_else(|| format!("未找到插件「{name}」，请用 ctl list 查看名称。"))
 }
-fn enabled(cfg: &AppConfig, name: &str) -> bool {
+pub(crate) fn enabled(cfg: &AppConfig, name: &str) -> bool {
     cfg.plugins
         .get(name)
         .and_then(|v| v.get("enabled"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
-fn at<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+pub(crate) fn at<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
         return Some(value);
     }
@@ -91,7 +91,7 @@ fn at_mut<'a>(value: &'a mut Value, path: &str) -> Option<&'a mut Value> {
         _ => None,
     })
 }
-fn sensitive(key: &str) -> bool {
+pub(crate) fn sensitive(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
     [
         "token",
@@ -105,7 +105,7 @@ fn sensitive(key: &str) -> bool {
     .iter()
     .any(|s| key.contains(s))
 }
-fn redacted(value: &Value) -> Value {
+pub(crate) fn redacted(value: &Value) -> Value {
     match value {
         Value::Table(t) => Value::Table(
             t.iter()
@@ -226,7 +226,21 @@ fn constraints(value: &Value, path: &str) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate(p: &Plugin, value: &Value) -> Result<(), String> {
+/// 只能取固定几个值的配置项。
+///
+/// 校验与面板读同一张表：`validate` 拿它拦下写错的值，网页面板拿它把输入框
+/// 变成下拉框。分成两处写迟早会对不上——那时用户会在面板上选到一个存不进去的值。
+pub(crate) fn options(plugin: &str, path: &str) -> &'static [&'static str] {
+    match (plugin, path) {
+        ("ai_news", "mode" | "realtime_mode") => &["all", "selected"],
+        ("ai_news", "card_theme") => &[
+            "auto", "light", "dark", "day", "night", "白天", "日间", "夜晚", "夜间",
+        ],
+        _ => &[],
+    }
+}
+
+pub(crate) fn validate(p: &Plugin, value: &Value) -> Result<(), String> {
     let mut expected = (p.default_config)();
     if p.name == "wordcloud" {
         for key in ["font_path", "font_family"] {
@@ -241,27 +255,15 @@ fn validate(p: &Plugin, value: &Value) -> Result<(), String> {
     shape(&expected, value)?;
     (p.validate_config)(value)?;
     constraints(value, "")?;
-    if p.name == "ai_news" {
-        for key in ["mode", "realtime_mode"] {
-            if value
+    for key in ["mode", "realtime_mode", "card_theme"] {
+        let allowed = options(p.name, key);
+        if !allowed.is_empty()
+            && value
                 .get(key)
                 .and_then(Value::as_str)
-                .is_some_and(|s| !["all", "selected"].contains(&s))
-            {
-                return Err(format!("{key} 只能是 all 或 selected"));
-            }
-        }
-        if value
-            .get("card_theme")
-            .and_then(Value::as_str)
-            .is_some_and(|s| {
-                ![
-                    "auto", "light", "dark", "day", "night", "白天", "日间", "夜晚", "夜间",
-                ]
-                .contains(&s)
-            })
+                .is_some_and(|s| !allowed.contains(&s))
         {
-            return Err("card_theme 应为 auto、light 或 dark".into());
+            return Err(format!("{key} 只能是 {}", allowed.join("、")));
         }
     }
     Ok(())
@@ -326,7 +328,7 @@ pub async fn set_value(
     })
     .await
 }
-fn effect(name: &str) -> &'static str {
+pub(crate) fn effect(name: &str) -> &'static str {
     if needs_startup(name) {
         "消息开关立即生效；首次启用、初始化参数及定时排期需重启后完整生效，已在执行的任务不强制中断。"
     } else {
@@ -572,7 +574,7 @@ pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<Output, String
         _ => Err(format!("未知操作「{action}」。发送 {prefix}ctl 查看用法。")),
     }
 }
-fn differences(default: &Value, current: &Value, path: &str, out: &mut Vec<String>) {
+pub(crate) fn differences(default: &Value, current: &Value, path: &str, out: &mut Vec<String>) {
     if default == current {
         return;
     }

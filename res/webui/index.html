@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>ayjx 控制台</title>
+<style>
+:root{
+  --bg:#070a0f; --bg2:#0b0f16; --card:#10151e; --card2:#141b26;
+  --line:rgba(255,255,255,.085); --line2:rgba(255,255,255,.14);
+  --ink:#f2f5f8; --ink2:#9fb0c4; --ink3:#6b7c92;
+  --accent:#5de6c9; --accent-dim:rgba(93,230,201,.14); --accent-line:rgba(93,230,201,.34);
+  --warn:#f0b25c; --warn-dim:rgba(240,178,92,.15);
+  --bad:#f2777f; --bad-dim:rgba(242,119,127,.15);
+  --off:#5d6b7e;
+  --r:12px; --r2:9px;
+  --shadow:0 18px 46px rgba(0,0,0,.45);
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans CJK SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+}
+html[data-theme="light"]{
+  --bg:#eef1f6; --bg2:#e6eaf1; --card:#ffffff; --card2:#f6f8fb;
+  --line:rgba(16,24,38,.10); --line2:rgba(16,24,38,.18);
+  --ink:#131a24; --ink2:#4c5a6c; --ink3:#7b8798;
+  --accent:#0e9c86; --accent-dim:rgba(14,156,134,.12); --accent-line:rgba(14,156,134,.32);
+  --warn:#a5670a; --warn-dim:rgba(165,103,10,.12);
+  --bad:#c23b46; --bad-dim:rgba(194,59,70,.10);
+  --off:#94a1b2;
+  --shadow:0 14px 34px rgba(21,32,48,.12);
+}
+*{box-sizing:border-box}
+/* .gate 与 #app 都有自己的 display，光靠 hidden 属性盖不住它们 */
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--sans);
+  -webkit-font-smoothing:antialiased;overscroll-behavior:none;
+}
+button,input,textarea,select{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0}
+code,kbd{font-family:var(--mono)}
+::selection{background:var(--accent-dim)}
+:focus-visible{outline:2px solid var(--accent-line);outline-offset:2px;border-radius:6px}
+
+/* ================= 骨架 ================= */
+#app{display:flex;flex-direction:column;height:100%}
+.bar{
+  display:flex;align-items:center;gap:12px;padding:10px 16px;
+  padding-top:calc(10px + env(safe-area-inset-top));
+  background:linear-gradient(180deg,var(--bg2),rgba(0,0,0,0));
+  border-bottom:1px solid var(--line);position:relative;z-index:5;
+}
+.brand{display:flex;align-items:baseline;gap:9px;flex:0 0 auto}
+.brand b{font-size:16px;letter-spacing:.4px}
+.brand .dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px var(--accent-dim);align-self:center}
+.brand small{color:var(--ink3);font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+.bar .grow{flex:1 1 auto}
+.stat{display:flex;gap:6px;align-items:center;color:var(--ink2);font-size:12.5px;white-space:nowrap}
+.stat b{color:var(--ink);font-variant-numeric:tabular-nums}
+.iconbtn{
+  width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+  color:var(--ink2);border:1px solid transparent;font-size:15px;
+}
+.iconbtn:hover{background:var(--card2);color:var(--ink);border-color:var(--line)}
+
+.wrap{flex:1 1 auto;display:flex;min-height:0}
+.side{
+  width:326px;flex:0 0 326px;display:flex;flex-direction:column;min-height:0;
+  border-right:1px solid var(--line);background:var(--bg2);
+}
+.search{padding:12px 12px 8px;display:flex;flex-direction:column;gap:8px}
+.search .box{position:relative;display:flex;align-items:center}
+.search .box span{position:absolute;left:11px;color:var(--ink3);font-size:13px;pointer-events:none}
+.search input{
+  width:100%;padding:9px 30px 9px 30px;border-radius:10px;background:var(--card);
+  border:1px solid var(--line);color:var(--ink);
+}
+.search input::placeholder{color:var(--ink3)}
+.search .clear{position:absolute;right:6px;width:22px;height:22px;border-radius:6px;color:var(--ink3);display:none}
+.search input:not(:placeholder-shown)~.clear{display:grid;place-items:center}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{
+  padding:4px 10px;border-radius:999px;font-size:12.5px;color:var(--ink2);
+  border:1px solid var(--line);background:var(--card);white-space:nowrap;
+}
+.chip[aria-pressed="true"]{color:var(--bg);background:var(--accent);border-color:var(--accent);font-weight:600}
+html[data-theme="light"] .chip[aria-pressed="true"]{color:#fff}
+
+.list{flex:1 1 auto;overflow:auto;padding:4px 8px 24px;scrollbar-width:thin}
+.grouphead{
+  display:flex;align-items:center;gap:8px;padding:14px 8px 6px;
+  font-size:11.5px;letter-spacing:.12em;color:var(--ink3);text-transform:uppercase;
+}
+.grouphead i{flex:1 1 auto;height:1px;background:var(--line);font-style:normal}
+.row{
+  display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:9px 10px;border-radius:var(--r2);border:1px solid transparent;
+}
+.row:hover{background:var(--card)}
+.row[aria-current="true"]{background:var(--card);border-color:var(--line2)}
+.row .led{width:7px;height:7px;border-radius:50%;background:var(--off);flex:0 0 auto;transition:.18s}
+.row.on .led{background:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.row .txt{flex:1 1 auto;min-width:0}
+.row .nm{display:block;font-size:14px;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .ky{display:block;font-family:var(--mono);font-size:11px;color:var(--ink3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row.off .nm{color:var(--ink2)}
+.row .mark{font-size:10.5px;color:var(--warn);background:var(--warn-dim);padding:2px 6px;border-radius:6px;flex:0 0 auto}
+
+/* 开关 */
+.sw{width:38px;height:22px;border-radius:999px;background:var(--line2);position:relative;flex:0 0 auto;transition:.2s;border:1px solid transparent}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:.2s cubic-bezier(.3,1.4,.5,1)}
+.sw[aria-checked="true"]{background:var(--accent)}
+.sw[aria-checked="true"]::after{transform:translateX(16px)}
+.sw[data-busy="1"]{opacity:.5;pointer-events:none}
+.sw.lg{width:46px;height:26px}
+.sw.lg::after{width:20px;height:20px}
+.sw.lg[aria-checked="true"]::after{transform:translateX(20px)}
+
+/* ================= 详情 ================= */
+.main{flex:1 1 auto;min-width:0;overflow:auto;scrollbar-width:thin}
+.pad{max-width:820px;margin:0 auto;padding:22px 22px 90px}
+.back{display:none;align-items:center;gap:6px;color:var(--ink2);font-size:13px;margin-bottom:12px}
+.head{display:flex;align-items:flex-start;gap:14px;margin-bottom:6px}
+.head h1{margin:0;font-size:23px;line-height:1.25;letter-spacing:.2px}
+.head .keychip{
+  font-family:var(--mono);font-size:12px;color:var(--accent);
+  background:var(--accent-dim);border:1px solid var(--accent-line);
+  padding:2px 8px;border-radius:7px;vertical-align:3px;margin-left:9px;white-space:nowrap;
+}
+.head .sw{margin-top:5px}
+.badges{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0 0}
+.badge{font-size:11.5px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--ink2)}
+.badge.warn{color:var(--warn);border-color:var(--warn-dim);background:var(--warn-dim)}
+.badge.acc{color:var(--accent);border-color:var(--accent-line);background:var(--accent-dim)}
+.summary{color:var(--ink2);margin:12px 0 0;font-size:14px;line-height:1.65}
+
+.tabs{display:flex;gap:2px;margin:20px 0 16px;border-bottom:1px solid var(--line)}
+.tab{padding:9px 14px;color:var(--ink3);font-size:14px;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--ink2)}
+
+.group{border:1px solid var(--line);border-radius:var(--r);background:var(--card);margin-bottom:12px;overflow:hidden}
+.group>summary{
+  list-style:none;cursor:pointer;padding:12px 15px;display:flex;align-items:center;gap:9px;
+  font-size:13px;color:var(--ink2);background:var(--card2);
+}
+.group>summary::-webkit-details-marker{display:none}
+.group>summary .caret{transition:.2s;color:var(--ink3);font-size:11px}
+.group[open]>summary .caret{transform:rotate(90deg)}
+.group>summary code{color:var(--ink);font-size:12.5px}
+.group .inner{padding:2px 0}
+
+.field{padding:13px 15px;border-top:1px solid var(--line);display:flex;gap:14px;align-items:flex-start}
+.field:first-child{border-top:0}
+.field .meta{flex:1 1 auto;min-width:0}
+.field .name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.field .name b{font-weight:600;font-size:14px}
+.field .name code{font-size:11.5px;color:var(--ink3)}
+.field .sub{color:var(--ink3);font-size:12px;margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.field .sub .def{font-family:var(--mono)}
+.field .ctrl{flex:0 0 auto;display:flex;align-items:center;gap:8px;max-width:52%}
+.field.wide{flex-direction:column;gap:10px}
+.field.wide .ctrl{max-width:none;width:100%;align-items:stretch;flex-direction:column}
+.field.dirty{background:linear-gradient(90deg,var(--accent-dim),transparent 55%)}
+.field.bad{background:linear-gradient(90deg,var(--bad-dim),transparent 55%)}
+.field .err{color:var(--bad);font-size:12px;margin-top:5px}
+.reset{
+  font-size:11.5px;color:var(--ink3);border:1px solid var(--line);
+  border-radius:7px;padding:3px 8px;opacity:0;transition:.15s;
+}
+.field:hover .reset,.field.dirty .reset,.reset:focus-visible{opacity:1}
+.reset:hover{color:var(--accent);border-color:var(--accent-line)}
+
+input.txt,select.txt,textarea.txt{
+  background:var(--bg2);border:1px solid var(--line2);border-radius:9px;
+  padding:7px 10px;width:190px;color:var(--ink);transition:border-color .15s;
+}
+input.txt:focus,select.txt:focus,textarea.txt:focus{border-color:var(--accent-line);outline:none}
+input.num{width:110px;text-align:right;font-variant-numeric:tabular-nums;font-family:var(--mono)}
+textarea.txt{width:100%;min-height:120px;font-family:var(--mono);font-size:12.5px;line-height:1.6;resize:vertical}
+.saving{width:14px;height:14px;border-radius:50%;border:2px solid var(--line2);border-top-color:var(--accent);animation:spin .7s linear infinite;flex:0 0 auto}
+@keyframes spin{to{transform:rotate(360deg)}}
+.tick{color:var(--accent);font-size:13px;animation:pop .3s ease}
+@keyframes pop{from{transform:scale(.4);opacity:0}}
+
+/* 标签数组 */
+.tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center;width:100%}
+.tag{
+  display:inline-flex;align-items:center;gap:6px;padding:3px 4px 3px 9px;border-radius:8px;
+  background:var(--card2);border:1px solid var(--line);font-family:var(--mono);font-size:12.5px;
+}
+.tag button{color:var(--ink3);width:18px;height:18px;border-radius:5px;line-height:1}
+.tag button:hover{color:var(--bad);background:var(--bad-dim)}
+.tags input{
+  background:none;border:0;padding:4px 2px;min-width:104px;flex:1 1 104px;font-family:var(--mono);font-size:12.5px;
+}
+.tags input:focus{outline:none}
+.tagbox{
+  display:flex;flex-wrap:wrap;gap:6px;padding:6px;border:1px solid var(--line2);
+  border-radius:9px;background:var(--bg2);width:100%;
+}
+.tagbox:focus-within{border-color:var(--accent-line)}
+.emptyhint{color:var(--ink3);font-size:12px;padding:2px}
+
+.tools{display:flex;gap:8px;align-items:center;margin:-2px 0 14px}
+.tools input{flex:1 1 auto;width:auto}
+.tools .chip[aria-pressed="true"]{color:var(--bg);background:var(--accent);border-color:var(--accent)}
+html[data-theme="light"] .tools .chip[aria-pressed="true"]{color:#fff}
+select.txt{cursor:pointer;appearance:none;padding-right:26px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--ink3) 50%),linear-gradient(135deg,var(--ink3) 50%,transparent 50%);
+  background-position:calc(100% - 15px) calc(50% + 1px),calc(100% - 10px) calc(50% + 1px);
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+select.txt option{background:var(--card);color:var(--ink)}
+.cmd{display:flex;gap:12px;padding:11px 15px;border-top:1px solid var(--line);align-items:baseline}
+.cmd:first-child{border-top:0}
+.cmd code{font-size:13px;color:var(--accent);white-space:nowrap}
+.cmd code .ph{color:var(--warn)}
+.cmd code .alias{color:var(--ink3)}
+.cmd .note{color:var(--ink2);font-size:13px;flex:1 1 auto}
+.difline{padding:9px 15px;border-top:1px solid var(--line);font-family:var(--mono);font-size:12.5px;color:var(--ink2);word-break:break-all}
+.difline:first-child{border-top:0}
+.empty{padding:26px 16px;text-align:center;color:var(--ink3);font-size:13.5px}
+.danger{margin-top:22px;display:flex;justify-content:flex-end}
+.danger button{font-size:12.5px;color:var(--ink3);border:1px solid var(--line);border-radius:8px;padding:6px 12px}
+.danger button:hover{color:var(--bad);border-color:var(--bad-dim);background:var(--bad-dim)}
+
+/* ================= 提示 ================= */
+.toasts{position:fixed;right:16px;bottom:16px;bottom:calc(16px + env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:8px;z-index:50;max-width:min(420px,calc(100vw - 32px))}
+.toast{
+  background:var(--card);border:1px solid var(--line2);border-left:3px solid var(--accent);
+  border-radius:10px;padding:10px 13px;box-shadow:var(--shadow);font-size:13px;line-height:1.5;
+  animation:rise .22s cubic-bezier(.2,.9,.3,1);color:var(--ink2);
+}
+.toast.bad{border-left-color:var(--bad)}
+.toast b{color:var(--ink);display:block;margin-bottom:2px;font-size:13px}
+@keyframes rise{from{transform:translateY(10px);opacity:0}}
+
+/* ================= 登录 ================= */
+.gate{position:fixed;inset:0;display:grid;place-items:center;background:var(--bg);z-index:100;padding:22px}
+.gate .box{width:min(400px,100%);text-align:center}
+.gate h2{margin:0 0 6px;font-size:19px}
+.gate p{color:var(--ink3);font-size:13px;line-height:1.7;margin:0 0 18px}
+.gate input{width:100%;text-align:center;font-family:var(--mono);letter-spacing:.08em}
+.gate button.go{margin-top:10px;width:100%;padding:10px;border-radius:10px;background:var(--accent);color:#04120f;font-weight:600}
+.gate .err{color:var(--bad);font-size:12.5px;margin-top:10px;min-height:18px}
+
+/* ================= 窄屏 ================= */
+@media (max-width:880px){
+  .side{position:absolute;inset:0;top:0;width:100%;flex:1 1 auto;z-index:3;border-right:0}
+  .main{width:100%}
+  .wrap{position:relative}
+  body[data-view="detail"] .side{display:none}
+  body[data-view="list"] .main{display:none}
+  .back{display:flex}
+  .pad{padding:18px 16px 90px}
+  .field{flex-direction:column;gap:9px;align-items:stretch}
+  .field .ctrl{max-width:none;justify-content:flex-start}
+  .reset{opacity:1}
+  .bar .stat.hide-sm{display:none}
+  input.txt,select.txt{width:100%}
+}
+</style>
+</head>
+<body data-view="list">
+<div id="app" hidden>
+  <header class="bar">
+    <div class="brand"><span class="dot"></span><b>ayjx</b><small>控制台</small></div>
+    <div class="grow"></div>
+    <div class="stat hide-sm">前缀 <b id="s-prefix">/</b></div>
+    <div class="stat">插件 <b id="s-count">0/0</b></div>
+    <button class="iconbtn" id="theme" title="切换明暗">◐</button>
+    <button class="iconbtn" id="refresh" title="刷新">⟳</button>
+  </header>
+
+  <div class="wrap">
+    <nav class="side">
+      <div class="search">
+        <label class="box">
+          <span>⌕</span>
+          <input id="q" placeholder="搜索插件、指令或配置项" autocomplete="off" spellcheck="false">
+          <button class="clear" id="qclear" title="清空">✕</button>
+        </label>
+        <div class="chips" id="filters">
+          <button class="chip" data-f="all" aria-pressed="true">全部</button>
+          <button class="chip" data-f="on" aria-pressed="false">已启用</button>
+          <button class="chip" data-f="off" aria-pressed="false">已关闭</button>
+          <button class="chip" data-f="diff" aria-pressed="false">已改动</button>
+        </div>
+      </div>
+      <div class="list" id="list"></div>
+    </nav>
+    <main class="main" id="main"><div class="pad" id="detail"></div></main>
+  </div>
+</div>
+
+<div class="gate" id="gate" hidden>
+  <div class="box">
+    <div class="brand" style="justify-content:center;margin-bottom:14px"><span class="dot"></span><b>ayjx</b><small>控制台</small></div>
+    <h2>需要访问密钥</h2>
+    <p>密钥写在 config.toml 的 <code>[webui] token</code> 里，<br>也可以在私聊或本机控制台发送 <code>webui</code> 取回带密钥的链接。</p>
+    <input class="txt" id="key" placeholder="粘贴访问密钥" autocomplete="off" spellcheck="false">
+    <button class="go" id="enter">进入</button>
+    <div class="err" id="gate-err"></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+"use strict";
+const $ = (s, r) => (r || document).querySelector(s);
+const el = (tag, cls, txt) => { const n = document.createElement(tag); if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const TOKEN_KEY = "ayjx.webui.token", THEME_KEY = "ayjx.webui.theme", LAST_KEY = "ayjx.webui.last";
+const store = { get(k){ try { return localStorage.getItem(k); } catch (_) { return null; } },
+                set(k,v){ try { localStorage.setItem(k,v); } catch (_) {} } };
+
+/* 框架级配置键的中文说明。只收录含义与插件无关的那些——
+   拿不准的一律只显示原键名，宁可少说，不可说错。 */
+const LABELS = {
+  image_enabled:"输出为卡片图", image_scale:"出图倍率", channel:"群名单", white:"白名单",
+  black:"黑名单", groups:"推送群", admins:"管理员", probability:"触发概率",
+  cooldown_seconds:"冷却时间", enabled:"启用", debug:"调试日志", width:"宽度", height:"高度",
+  limit:"数量上限", token:"访问密钥", bind:"监听地址", port:"端口", public_url:"对外地址",
+  font_path:"字体文件", font_family:"字体名称", retention_days:"保留天数",
+  request_timeout_seconds:"请求超时", timeout_seconds:"超时", quality:"图片质量",
+  max_chars:"字数上限", min_times:"触发次数", time:"执行时刻"
+};
+const label = (key) => LABELS[key] || key;
+
+/* ================= 会话 ================= */
+let TOKEN = null, STATE = null, CURRENT = null, TAB = "config";
+let filter = "all", query = "", busy = 0, poller = null;
+
+(function boot(){
+  const theme = store.get(THEME_KEY);
+  if (theme) document.documentElement.dataset.theme = theme;
+  const url = new URL(location.href);
+  const k = url.searchParams.get("k");
+  // 内存里的这一份才是权威：浏览器可能根本不给 localStorage（隐私窗口、禁用站点
+  // 数据），那时链接里的密钥仍旧要一次就能用，只是下次得重新带上。
+  if (k) { TOKEN = k; store.set(TOKEN_KEY, k); url.searchParams.delete("k"); history.replaceState(null, "", url.pathname + url.hash); }
+  else TOKEN = store.get(TOKEN_KEY);
+  TOKEN ? start() : gate();
+})();
+
+function gate(message){
+  $("#app").hidden = true; $("#gate").hidden = false;
+  if (message) $("#gate-err").textContent = message;
+  const input = $("#key");
+  input.focus();
+  const submit = () => {
+    const value = input.value.trim();
+    if (!value) return;
+    TOKEN = value; store.set(TOKEN_KEY, value); $("#gate-err").textContent = ""; start();
+  };
+  $("#enter").onclick = submit;
+  input.onkeydown = (e) => { if (e.key === "Enter") submit(); };
+}
+
+async function api(path, options){
+  const res = await fetch(path, Object.assign({
+    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" }
+  }, options || {}));
+  if (res.status === 401) { store.set(TOKEN_KEY, ""); TOKEN = null; throw new Error("密钥无效"); }
+  const data = await res.json();
+  if (!res.ok && data.message) throw new Error(data.message);
+  return data;
+}
+
+async function start(){
+  try {
+    const data = await api("/api/state");
+    $("#gate").hidden = true; $("#app").hidden = false;
+    apply(data.state);
+    // 打开顺序：地址栏里指名的 → 上次看的 → 第一个真有可调项的。
+    // 最后那条不是随手一挑：注册表第一位是个只有总开关的后台插件，
+    // 拿它当门面等于告诉人「这里没什么可看」。
+    const first = STATE.plugins.find(p => p.fields.length) || STATE.plugins[0];
+    const linked = pick(hashPlugin());
+    CURRENT = linked || pick(store.get(LAST_KEY)) || (first && first.name);
+    // 带 #p= 打开的链接是「我要看这一个」；窄屏上就该直接落在它的详情里
+    if (linked) document.body.dataset.view = "detail";
+    render();
+    bind();
+    watch();
+  } catch (e) {
+    gate(e.message === "密钥无效" ? "密钥无效，请重新输入。" : "连接失败：" + e.message);
+  }
+}
+
+const pick = (name) => (name && STATE.plugins.some(p => p.name === name) ? name : null);
+const hashPlugin = () => decodeURIComponent((location.hash.match(/^#p=(.+)$/) || [])[1] || "");
+const plugin = (name) => STATE.plugins.find(p => p.name === name);
+function apply(state){ STATE = state; $("#s-prefix").textContent = state.prefix || "（无）";
+  $("#s-count").textContent = state.summary.enabled + "/" + state.summary.total; }
+
+/* 配置在别处被改动（聊天里的 /ctl、手改文件后重启）时自己跟上，
+   但不打断正在输入的人：有焦点在输入框里就先按住不动。 */
+function watch(){
+  clearInterval(poller);
+  poller = setInterval(async () => {
+    if (busy || document.hidden) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && active.id !== "q") return;
+    try {
+      const data = await api("/api/version");
+      if (data.version !== STATE.version) { apply((await api("/api/state")).state); render(); }
+    } catch (_) {}
+  }, 4000);
+}
+
+/* ================= 写入 ================= */
+async function send(command, node){
+  busy++;
+  let spinner = null;
+  if (node) { spinner = el("div", "saving"); node.appendChild(spinner); }
+  try {
+    const data = await api("/api/command", { method: "POST", body: JSON.stringify(command) });
+    apply(data.state);
+    if (spinner) spinner.remove();
+    if (data.ok) { if (node) flash(node); toast(data.message, false); }
+    else { toast(data.message, true); }
+    render();
+    return data.ok;
+  } catch (e) {
+    if (spinner) spinner.remove();
+    if (!TOKEN) { clearInterval(poller); gate("密钥已失效，请重新输入。"); return false; }
+    toast("请求失败：" + e.message, true);
+    return false;
+  } finally { busy--; }
+}
+
+function flash(node){
+  const tick = el("span", "tick", "✓");
+  node.appendChild(tick);
+  setTimeout(() => tick.remove(), 1100);
+}
+
+function toast(text, bad){
+  if (!text) return;
+  const box = el("div", "toast" + (bad ? " bad" : ""));
+  const lines = String(text).split("\n").filter(Boolean);
+  box.appendChild(el("b", null, bad ? "未完成" : "已保存"));
+  box.appendChild(document.createTextNode(lines.join(" ")));
+  $("#toasts").appendChild(box);
+  const life = bad ? 7000 : 3200;
+  const kill = () => { box.style.opacity = "0"; box.style.transition = "opacity .2s"; setTimeout(() => box.remove(), 220); };
+  box.onclick = kill;
+  setTimeout(kill, life);
+}
+
+/* ================= 侧栏 ================= */
+function matches(p){
+  if (filter === "on" && !p.enabled) return false;
+  if (filter === "off" && p.enabled) return false;
+  if (filter === "diff" && !p.diff.length) return false;
+  if (!query) return true;
+  const q = query.toLowerCase();
+  if (p.name.toLowerCase().includes(q) || p.display.includes(query) || p.summary.toLowerCase().includes(q)) return true;
+  if (p.commands.some(c => c.cmd.toLowerCase().includes(q) || c.note.includes(query))) return true;
+  return flatten(p.fields).some(f => f.path.toLowerCase().includes(q));
+}
+function flatten(fields){
+  const out = [];
+  const walk = (list) => list.forEach(f => { out.push(f); if (f.children.length) walk(f.children); });
+  walk(fields); return out;
+}
+
+function renderList(){
+  const list = $("#list"); list.textContent = "";
+  const shown = STATE.plugins.filter(matches);
+  if (!shown.length) { list.appendChild(el("div", "empty", "没有匹配的插件")); return; }
+  STATE.sections.forEach(section => {
+    const items = shown.filter(p => p.section === section.code);
+    if (!items.length) return;
+    const head = el("div", "grouphead");
+    head.appendChild(el("span", null, section.title));
+    head.appendChild(el("i"));
+    head.appendChild(el("span", null, String(items.length)));
+    list.appendChild(head);
+    items.forEach(p => list.appendChild(listRow(p)));
+  });
+}
+
+function listRow(p){
+  const row = el("button", "row " + (p.enabled ? "on" : "off"));
+  row.setAttribute("aria-current", String(p.name === CURRENT));
+  row.appendChild(el("span", "led"));
+  const txt = el("span", "txt");
+  txt.appendChild(el("b", "nm", p.display));
+  txt.appendChild(el("span", "ky", p.name));
+  row.appendChild(txt);
+  if (p.pending) row.appendChild(el("span", "mark", "待重启"));
+  else if (p.diff.length) row.appendChild(el("span", "mark", "已改"));
+  row.appendChild(toggle(p, false));
+  row.onclick = (e) => { if (e.target.closest(".sw")) return; select(p.name); };
+  return row;
+}
+
+function toggle(p, large){
+  const sw = el("button", "sw" + (large ? " lg" : ""));
+  sw.setAttribute("role", "switch");
+  sw.setAttribute("aria-checked", String(p.enabled));
+  sw.setAttribute("aria-label", (p.enabled ? "关闭 " : "启用 ") + p.display);
+  sw.onclick = async (e) => {
+    e.stopPropagation();
+    sw.dataset.busy = "1";
+    sw.setAttribute("aria-checked", String(!p.enabled));   // 先动，再等回执
+    await send({ action: "toggle", name: p.name, on: !p.enabled });
+  };
+  return sw;
+}
+
+function select(name){
+  CURRENT = name; TAB = "config"; fieldQuery = ""; onlyChanged = false; store.set(LAST_KEY, name);
+  document.body.dataset.view = "detail";
+  // 地址栏跟着走：刷新回到原处，浏览器的返回键也就成了「回到上一个插件」。
+  if (hashPlugin() !== name) history.pushState(null, "", "#p=" + encodeURIComponent(name));
+  render();
+  $("#main").scrollTop = 0;
+}
+
+/* ================= 详情 ================= */
+function render(){ renderList(); renderDetail(); }
+
+/* 重画表单而不夺走筛选框的焦点与光标 */
+function redrawConfig(p, input){
+  const at = input.selectionStart;
+  renderDetail();
+  const next = $(".tools input");
+  if (next) { next.focus(); next.setSelectionRange(at, at); }
+}
+
+function renderDetail(){
+  const pad = $("#detail"); pad.textContent = "";
+  const p = plugin(CURRENT);
+  if (!p) { pad.appendChild(el("div", "empty", "选择左侧的一个插件开始")); return; }
+
+  const back = el("button", "back");
+  back.textContent = "‹ 插件列表";
+  back.onclick = () => { document.body.dataset.view = "list"; };
+  pad.appendChild(back);
+
+  const head = el("div", "head");
+  const title = el("div", null); title.style.flex = "1 1 auto";
+  const h1 = el("h1", null, p.display);
+  const key = el("code", "keychip", p.name);
+  h1.appendChild(key);
+  title.appendChild(h1);
+  head.appendChild(title);
+  head.appendChild(toggle(p, true));
+  pad.appendChild(head);
+
+  const badges = el("div", "badges");
+  badges.appendChild(el("span", "badge", p.section_title));
+  if (p.enabled) badges.appendChild(el("span", "badge acc", "已启用"));
+  else badges.appendChild(el("span", "badge", "已关闭"));
+  if (p.pending) badges.appendChild(el("span", "badge warn", "待重启生效"));
+  else if (p.restart) badges.appendChild(el("span", "badge", "排期改动需重启"));
+  if (p.diff.length) badges.appendChild(el("span", "badge acc", "已改 " + p.diff.length + " 项"));
+  pad.appendChild(badges);
+  pad.appendChild(el("p", "summary", p.summary));
+
+  const tabs = el("div", "tabs");
+  [["config", "配置"], ["cmds", "指令 " + (p.commands.length || "")], ["diff", "差异 " + (p.diff.length || "")]]
+    .forEach(([id, text]) => {
+      const tab = el("button", "tab", text.trim());
+      tab.setAttribute("aria-selected", String(TAB === id));
+      tab.onclick = () => { TAB = id; renderDetail(); };
+      tabs.appendChild(tab);
+    });
+  pad.appendChild(tabs);
+
+  if (TAB === "config") renderConfig(pad, p);
+  else if (TAB === "cmds") renderCmds(pad, p);
+  else renderDiff(pad, p);
+}
+
+let fieldQuery = "", onlyChanged = false;
+
+/* 一个字段能不能被这次筛选看见：自己命中，或者它的某个子项命中 */
+function fieldVisible(f){
+  const hit = (x) => (!fieldQuery || x.path.toLowerCase().includes(fieldQuery) || label(x.key).includes(fieldQuery))
+                  && (!onlyChanged || x.changed);
+  return hit(f) || f.children.some(fieldVisible);
+}
+
+function renderConfig(pad, p){
+  if (!p.fields.length) {
+    pad.appendChild(box(el("div", "empty", "这个插件只有一个总开关，没有别的可调项。")));
+    return;
+  }
+
+  // 配置项一多，翻找就成了主要成本；超过一屏才给筛选，少的时候不添乱
+  const many = flatten(p.fields).length > 12;
+  if (many) {
+    const tools = el("div", "tools");
+    const find = el("input", "txt");
+    find.placeholder = "筛选配置项"; find.value = fieldQuery; find.spellcheck = false;
+    find.oninput = () => { fieldQuery = find.value.trim().toLowerCase(); redrawConfig(p, find); };
+    const only = el("button", "chip", "只看已改动");
+    only.setAttribute("aria-pressed", String(onlyChanged));
+    only.onclick = () => { onlyChanged = !onlyChanged; renderDetail(); };
+    tools.appendChild(find); tools.appendChild(only);
+    pad.appendChild(tools);
+  }
+
+  const visible = p.fields.filter(fieldVisible);
+  if (!visible.length) {
+    pad.appendChild(box(el("div", "empty", onlyChanged ? "这个插件的配置与默认值完全一致。" : "没有匹配的配置项")));
+    return;
+  }
+  const loose = visible.filter(f => f.kind !== "table");
+  const tables = visible.filter(f => f.kind === "table");
+  if (loose.length) {
+    const group = box();
+    loose.forEach(f => group.add(field(p, f)));
+    pad.appendChild(group);
+  }
+  tables.forEach(f => pad.appendChild(tableGroup(p, f)));
+
+  const danger = el("div", "danger");
+  const reset = el("button", null, "恢复该插件全部默认值");
+  reset.onclick = async () => {
+    if (!confirm("将 " + p.display + " 的全部配置恢复为默认值？开关与管理员会保留。")) return;
+    await send({ action: "reset", name: p.name, path: "" }, null);
+  };
+  danger.appendChild(reset);
+  pad.appendChild(danger);
+}
+
+/* 一个带边框的卡片容器；内容往 .add() 里塞，外层的圆角与描边不被打断 */
+function box(child){
+  const group = el("div", "group");
+  const inner = el("div", "inner");
+  group.appendChild(inner);
+  if (child) inner.appendChild(child);
+  group.add = (node) => inner.appendChild(node);
+  return group;
+}
+
+function tableGroup(p, f){
+  const open = store.get("ayjx.open." + p.name + "." + f.path) !== "0";
+  const details = el("details", "group");
+  details.open = open;
+  const summary = el("summary");
+  summary.appendChild(el("span", "caret", "▶"));
+  const text = label(f.key);
+  summary.appendChild(el("b", null, text));
+  if (f.path !== text) summary.appendChild(el("code", null, f.path));
+  const changed = flatten([f]).filter(x => x !== f && x.changed).length;
+  if (changed) summary.appendChild(el("span", "badge acc", changed + " 项已改"));
+  details.appendChild(summary);
+  const inner = el("div", "inner");
+  f.children.forEach(child => inner.appendChild(field(p, child)));
+  if (!f.children.length) inner.appendChild(el("div", "empty", "空表"));
+  details.appendChild(inner);
+  details.ontoggle = () => store.set("ayjx.open." + p.name + "." + f.path, details.open ? "1" : "0");
+  return details;
+}
+
+function field(p, f){
+  if (f.kind === "table") return tableGroup(p, f);
+  const wide = f.kind === "raw" || f.kind.endsWith("_array");
+  const row = el("div", "field" + (wide ? " wide" : "") + (f.changed ? " dirty" : ""));
+
+  const meta = el("div", "meta");
+  const name = el("div", "name");
+  const text = label(f.key);
+  name.appendChild(el("b", null, text));
+  // 键名重复印两遍只是噪声：没有中文说法时，键名本身就是标题
+  if (f.path !== text) name.appendChild(el("code", null, f.path));
+  meta.appendChild(name);
+
+  const sub = el("div", "sub");
+  if (f.hint) sub.appendChild(el("span", null, f.hint));
+  if (f.sensitive) sub.appendChild(el("span", null, f.filled ? "已设置（不显示）" : "未设置"));
+  else sub.appendChild(el("span", "def", "默认 " + short(f.default)));
+  if (f.changed && !f.sensitive) {
+    const reset = el("button", "reset", "恢复默认");
+    reset.onclick = () => send({ action: "reset", name: p.name, path: f.path }, row);
+    sub.appendChild(reset);
+  }
+  meta.appendChild(sub);
+  row.appendChild(meta);
+
+  const ctrl = el("div", "ctrl");
+  ctrl.appendChild(control(p, f, row));
+  row.appendChild(ctrl);
+  return row;
+}
+
+function short(value){
+  if (value === null || value === undefined) return "—";
+  if (Array.isArray(value)) return value.length ? "[" + value.map(short).join(", ") + "]" : "[]";
+  if (typeof value === "object") return "{…}";
+  if (typeof value === "string") return value === "" ? '""' : (value.length > 26 ? value.slice(0, 26) + "…" : value);
+  return String(value);
+}
+
+function control(p, f, row){
+  const commit = (value, raw) => send({ action: "set", name: p.name, path: f.path, value, raw: !!raw }, row);
+
+  if (f.kind === "bool") {
+    const sw = el("button", "sw");
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", String(!!f.value));
+    sw.setAttribute("aria-label", label(f.key));
+    sw.onclick = () => { sw.setAttribute("aria-checked", String(!f.value)); commit(!f.value); };
+    return sw;
+  }
+
+  if (f.kind === "int" || f.kind === "float") {
+    const input = el("input", "txt num");
+    input.type = "number"; input.inputMode = "decimal";
+    if (f.kind === "float") input.step = "0.1";
+    input.value = f.value == null ? "" : f.value;
+    const save = () => {
+      const text = input.value.trim();
+      if (text === "" || Number(text) === Number(f.value)) { input.value = f.value; return; }
+      const number = Number(text);
+      if (!Number.isFinite(number)) { input.value = f.value; toast("请输入一个数字", true); return; }
+      commit(number);
+    };
+    input.onblur = save;
+    input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { input.value = f.value; input.blur(); } };
+    return input;
+  }
+
+  if (f.kind === "string" && f.options.length && !f.sensitive) {
+    const sel = el("select", "txt");
+    f.options.forEach(choice => {
+      const opt = el("option", null, choice);
+      opt.value = choice;
+      if (choice === f.value) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    // 磁盘上的值不在候选里（手改过配置）也要照实显示，不能悄悄替人改掉
+    if (f.value != null && !f.options.includes(f.value)) {
+      const kept = el("option", null, f.value + "（当前）");
+      kept.value = f.value; kept.selected = true;
+      sel.insertBefore(kept, sel.firstChild);
+    }
+    sel.onchange = () => commit(sel.value);
+    return sel;
+  }
+
+  if (f.kind === "string") {
+    const input = el("input", "txt");
+    input.type = f.sensitive ? "password" : "text";
+    input.autocomplete = "off"; input.spellcheck = false;
+    input.value = f.sensitive ? "" : (f.value == null ? "" : f.value);
+    input.placeholder = f.sensitive ? (f.filled ? "留空则保持不变" : "未设置") : "";
+    const save = () => {
+      const text = input.value;
+      if (f.sensitive) { if (!text) return; commit(text); input.value = ""; return; }
+      if (text === (f.value == null ? "" : f.value)) return;
+      commit(text);
+    };
+    input.onblur = save;
+    input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { input.value = f.sensitive ? "" : f.value; input.blur(); } };
+    return input;
+  }
+
+  if (f.kind.endsWith("_array")) return tagEditor(f, commit);
+
+  /* raw：交给 TOML 文本，写法与 /ctl set 完全一致 */
+  const wrap = el("div");
+  wrap.style.width = "100%";
+  const area = el("textarea", "txt");
+  area.spellcheck = false;
+  area.placeholder = "这一项的键由你自己定，按 TOML 写；留空表示没有内容。";
+  area.value = toToml(f.value);
+  const bar = el("div"); bar.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:8px";
+  const save = el("button", "chip", "保存 TOML");
+  save.onclick = () => commit(area.value, true);
+  bar.appendChild(save);
+  wrap.appendChild(area); wrap.appendChild(bar);
+  return wrap;
+}
+
+function toToml(value){
+  if (value == null) return "";
+  if (Array.isArray(value)) return JSON.stringify(value);
+  if (typeof value === "object") {
+    const lines = [];
+    const walk = (obj, prefix) => Object.entries(obj).forEach(([k, v]) => {
+      if (v && typeof v === "object" && !Array.isArray(v)) { lines.push("[" + (prefix ? prefix + "." : "") + JSON.stringify(k) + "]"); walk(v, (prefix ? prefix + "." : "") + JSON.stringify(k)); }
+      else lines.push(JSON.stringify(k) + " = " + JSON.stringify(v));
+    });
+    walk(value, "");
+    return lines.join("\n");
+  }
+  return JSON.stringify(value);
+}
+
+function tagEditor(f, commit){
+  const numeric = f.kind === "int_array" || f.kind === "float_array";
+  const values = Array.isArray(f.value) ? f.value.slice() : [];
+  const boxEl = el("div", "tagbox");
+  const push = (next) => commit(next);
+
+  values.forEach((value, index) => {
+    const tag = el("span", "tag");
+    tag.appendChild(el("span", null, String(value)));
+    const kill = el("button", null, "✕");
+    kill.title = "移除";
+    kill.onclick = () => { const next = values.slice(); next.splice(index, 1); push(next); };
+    tag.appendChild(kill);
+    boxEl.appendChild(tag);
+  });
+
+  const input = el("input");
+  input.placeholder = values.length ? "添加…" : (numeric ? "输入数字后回车" : "输入内容后回车");
+  if (numeric) input.inputMode = "decimal";
+  input.autocomplete = "off"; input.spellcheck = false;
+  const add = () => {
+    const text = input.value.trim().replace(/[,，\s]+$/, "");
+    if (!text) return;
+    const parts = text.split(/[,，\s]+/).filter(Boolean);
+    const next = values.slice();
+    for (const part of parts) {
+      if (numeric) {
+        const number = Number(part);
+        if (!Number.isFinite(number)) { toast("「" + part + "」不是数字", true); return; }
+        next.push(f.kind === "int_array" ? Math.trunc(number) : number);
+      } else next.push(part);
+    }
+    input.value = "";
+    push(next);
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === "," || e.key === "，") { e.preventDefault(); add(); }
+    else if (e.key === "Backspace" && !input.value && values.length) { push(values.slice(0, -1)); }
+  };
+  input.onblur = add;
+  boxEl.appendChild(input);
+  return boxEl;
+}
+
+function renderCmds(pad, p){
+  const group = el("div", "group");
+  const inner = el("div", "inner");
+  if (!p.commands.length) inner.appendChild(el("div", "empty", "这个插件在后台自动工作，没有需要手动触发的指令。"));
+  p.commands.forEach(c => {
+    const row = el("div", "cmd");
+    const parts = c.cmd.split(" / ");
+    const code = el("code");
+    parts.forEach((part, index) => {
+      if (index) { code.appendChild(el("span", "alias", "  ·  " + (c.prefixed ? STATE.prefix : "") + part)); return; }
+      (c.prefixed ? STATE.prefix + part : part).split(/(<[^>]*>|\[[^\]]*\])/).forEach(piece => {
+        if (!piece) return;
+        code.appendChild(/^[<\[]/.test(piece) ? el("span", "ph", piece) : document.createTextNode(piece));
+      });
+    });
+    row.appendChild(code);
+    row.appendChild(el("div", "note", c.note));
+    inner.appendChild(row);
+  });
+  group.appendChild(inner);
+  pad.appendChild(group);
+}
+
+function renderDiff(pad, p){
+  const group = el("div", "group");
+  const inner = el("div", "inner");
+  if (!p.diff.length) inner.appendChild(el("div", "empty", "配置与默认值完全一致。"));
+  p.diff.forEach(line => inner.appendChild(el("div", "difline", line)));
+  group.appendChild(inner);
+  pad.appendChild(group);
+}
+
+/* ================= 交互绑定 ================= */
+function bind(){
+  const search = $("#q");
+  search.oninput = () => { query = search.value.trim(); renderList(); };
+  $("#qclear").onclick = () => { search.value = ""; query = ""; renderList(); search.focus(); };
+  $("#filters").onclick = (e) => {
+    const chip = e.target.closest(".chip"); if (!chip) return;
+    filter = chip.dataset.f;
+    [...$("#filters").children].forEach(c => c.setAttribute("aria-pressed", String(c === chip)));
+    renderList();
+  };
+  $("#theme").onclick = () => {
+    const dark = document.documentElement.dataset.theme !== "light";
+    document.documentElement.dataset.theme = dark ? "light" : "dark";
+    store.set(THEME_KEY, dark ? "light" : "dark");
+  };
+  $("#refresh").onclick = async () => {
+    const icon = $("#refresh"); icon.style.transition = "transform .5s"; icon.style.transform = "rotate(360deg)";
+    setTimeout(() => { icon.style.transition = ""; icon.style.transform = ""; }, 520);
+    try { apply((await api("/api/state")).state); render(); } catch (e) { toast(e.message, true); }
+  };
+  addEventListener("hashchange", () => {
+    const name = pick(hashPlugin());
+    if (name && name !== CURRENT) { CURRENT = name; TAB = "config"; document.body.dataset.view = "detail"; render(); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
+      e.preventDefault(); document.body.dataset.view = "list"; $("#q").focus(); $("#q").select();
+    } else if (e.key === "Escape") {
+      if (document.activeElement === $("#q")) { $("#q").blur(); }
+      else if (document.body.dataset.view === "detail") document.body.dataset.view = "list";
+    }
+  });
+}
+</script>
+</body>
+</html>
