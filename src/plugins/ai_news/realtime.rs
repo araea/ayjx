@@ -32,6 +32,9 @@
 //!      在正常数据量下等同不限制。静默时段默认关闭，可按目标主动设置。
 //!   6. **持久待发队列**：超过单次条数、撞上频次上限或发送失败的内容先落盘；
 //!      后续即使接口一直返回 304 或进程重启，也会继续按节奏投递，过期内容自动淘汰。
+//!   7. **失败退避**：投递失败的目标按 2/4/8/16 分钟递增跳过，封顶 16 分钟，成功即归零。
+//!      断网时投递必然连续失败，没有退避的话每个节拍都要重渲一张卡片图再白发一轮——
+//!      2026-09-08 上午就这样空转了 47 分钟。条目留在待发队列里，恢复后照常送达。
 //!
 //! 实时与定时各自去重：实时线保证每条有效资讯及时送达，定时线仍可把其中的
 //! 精选内容整理成回顾；同一条内容不会在同一条推送线上重复出现。
@@ -47,6 +50,7 @@ use crate::event::Context;
 use chrono::{NaiveTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 /// 轮询节拍。真正的抓取间隔由配置决定，这里只是最小检查粒度——
@@ -246,6 +250,14 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
             continue;
         }
 
+        if let Some(wait) = delivery_backoff_remaining(target) {
+            debug!(
+                target: LOG_TARGET,
+                "{} 上一轮投递失败，退避中，剩余 {} 秒。", target, wait
+            );
+            continue;
+        }
+
         // 一次只取一批；发送成功才出队，失败则留到下一轮重试。
         let picked = state::realtime_pending(
             target.state_id(),
@@ -289,7 +301,62 @@ async fn poll_once(ctx: Context, writer: LockedWriter, cfg: AiNewsConfig) {
                 "实时推送：{} 收到 {} 条新资讯。", target, picked_items.len()
             );
             state::mark_realtime_sent(target.state_id(), picked_keys).await;
+            note_delivery_success(target);
+        } else {
+            let wait = note_delivery_failure(target);
+            warn!(
+                target: LOG_TARGET,
+                "实时推送：{} 投递失败，{} 分钟内不再重试；{} 条待发资讯留在队列里。",
+                target,
+                wait / 60,
+                picked_items.len()
+            );
         }
+    }
+}
+
+/// 投递失败的退避表：第 n 次连续失败等 2^n 分钟，封顶 16 分钟。
+///
+/// 断网期间投递必然一直失败，而每次重试都要重新截一张卡片图（Chromium）再白发四次
+/// Satori 调用。没有退避时这些代价按节拍重复付出，日志也被刷得看不见别的东西。
+const DELIVERY_BACKOFF_STEPS_SECONDS: [u64; 4] = [120, 240, 480, 960];
+
+struct DeliveryBackoff {
+    consecutive_failures: u32,
+    retry_after: i64,
+}
+
+fn delivery_backoff() -> &'static Mutex<HashMap<i64, DeliveryBackoff>> {
+    static STATE: OnceLock<Mutex<HashMap<i64, DeliveryBackoff>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 还需等待的秒数；不在退避中返回 `None`
+fn delivery_backoff_remaining(target: PushTarget) -> Option<i64> {
+    let guard = delivery_backoff().lock().ok()?;
+    let entry = guard.get(&target.state_id())?;
+    let remaining = entry.retry_after - Utc::now().timestamp();
+    (remaining > 0).then_some(remaining)
+}
+
+/// 记一次投递失败，返回本次要等待的秒数
+fn note_delivery_failure(target: PushTarget) -> u64 {
+    let Ok(mut guard) = delivery_backoff().lock() else {
+        return 0;
+    };
+    let entry = guard
+        .entry(target.state_id())
+        .or_insert(DeliveryBackoff { consecutive_failures: 0, retry_after: 0 });
+    entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+    let idx = (entry.consecutive_failures as usize - 1).min(DELIVERY_BACKOFF_STEPS_SECONDS.len() - 1);
+    let wait = DELIVERY_BACKOFF_STEPS_SECONDS[idx];
+    entry.retry_after = Utc::now().timestamp() + wait as i64;
+    wait
+}
+
+fn note_delivery_success(target: PushTarget) {
+    if let Ok(mut guard) = delivery_backoff().lock() {
+        guard.remove(&target.state_id());
     }
 }
 

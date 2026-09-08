@@ -153,6 +153,15 @@ pub fn build_message(
     forward
 }
 
+/// 能在这一层安全重试的错误。
+///
+/// 判据是「Satori 还没进 QQ sendMsg」——只有这样重试才不会重复发送。
+///
+/// **`rich media transfer failed` 不在此列，且不要再加回来。** 它同样发生在消息投递之前，
+/// 单看安全性可以重试，但那一层重试该由 satori-qq 自己做：它 0.8.9.24 起就会就地重试
+/// （3 次 / 45 秒预算），这里再套一层只是让同一次上传被试到 9 遍，还要为每次重试重新截一张
+/// 卡片图。失败后真正要紧的是尽快退回纯文字——断网时纯文字往往还能顺着已建立的长连接出去，
+/// 那才决定这次推送能不能送达。下一次尝试留给节拍级退避（见 realtime.rs）。
 fn retryable_pre_send_error(error: &str) -> bool {
     // 这些错误都发生在 Satori 进入 QQ sendMsg 之前，重试不会重复发送。
     error.contains("QQ kernel offline or not ready")
@@ -161,9 +170,6 @@ fn retryable_pre_send_error(error: &str) -> bool {
         || error.contains("outbound queue timeout")
         || error.contains("outbound circuit open")
         || error.contains("outbound rate budget exhausted")
-        // 富媒体上传发生在 sendMsg 内部、消息投递之前：上传失败时对端什么都没收到，
-        // 重试同样不会重复发送。锁屏久了射频休眠，深夜定时推送最容易撞上这一条。
-        || error.contains("rich media transfer failed")
 }
 
 async fn send_card_with_recovery(
@@ -189,14 +195,7 @@ async fn send_card_with_recovery(
                 if attempt == 2 || !retryable_pre_send_error(&detail) {
                     return Err(error);
                 }
-                let delay = if detail.contains("session stabilizing") {
-                    32
-                } else if detail.contains("rich media transfer failed") {
-                    // Satori 端已就地重试过一轮；再等久一点，让射频有机会重新拉起来。
-                    30
-                } else {
-                    5
-                };
+                let delay = if detail.contains("session stabilizing") { 32 } else { 5 };
                 warn!(
                     target: LOG_TARGET,
                     "卡片发送遇到可恢复的 Satori 状态（第 {}/3 次）: {}；{} 秒后重试",
