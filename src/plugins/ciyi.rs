@@ -1,4 +1,7 @@
-//! 词意：每日一个两字词，全群一起用「语义排名」把它逼出来。
+//! 词意：每日一个两字词，用「语义排名」把它逼出来。
+//!
+//! 一局的作用域是「会话」而非「群」：群聊各群一局，私聊各人一局，
+//! 两处都能玩，互不干扰（作用域键见 `scope_of`）。
 //!
 //! 呈现方式：盘面、揭晓、排行榜、玩法说明都原生绘制成一张宣纸风的卡片图
 //! （见 `card.rs` 与 `painter.rs`），一局下来翻回去看历次提示不必在聊天
@@ -17,7 +20,7 @@ pub mod view;
 use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::{get_prefixes, match_command};
 use crate::config::build_config;
-use crate::event::Context;
+use crate::event::{Context, MessageEvent};
 use crate::message::Message;
 use crate::plugins::ciyi::config::CiYiConfig;
 use crate::plugins::ciyi::entity::{record as record_entity, state as state_entity};
@@ -88,11 +91,8 @@ pub fn handle(
             None => return Ok(Some(ctx)),
         };
 
-        // 仅在群聊中响应
-        let group_id = match msg_event.group_id() {
-            Some(id) => id,
-            None => return Ok(Some(ctx)),
-        };
+        let group_id = msg_event.group_id();
+        let scope = scope_of(&msg_event);
         let user_id = msg_event.user_id();
         let text = msg_event.text().trim();
 
@@ -102,20 +102,20 @@ pub fn handle(
 
         let config: CiYiConfig = get_config(&ctx, "ciyi").unwrap_or_default();
 
-        // A. 直接猜测模式 (两个字)
-        if text.chars().count() == 2 {
-            let should_direct_guess =
-                engine::get_direct_guess_status(&ctx.db, group_id, config.plugin.direct_guess)
-                    .await;
+        // A. 无前缀猜测。这一段是中间件：每一条消息都会流过，
+        //    所以三道闸门缺一不可——两个字、词在词库里、本会话正有一局没结束。
+        //    先查词库再查库：绝大多数两字消息在第一步就被挡下，省掉一次查询；
+        //    开局只认「词意猜测」指令，随口两个字既不该开局，也不该收到任何回应。
+        if text.chars().count() == 2
+            && data::get_all_words().contains(text)
+            && engine::direct_guess_open(&ctx.db, scope).await
+        {
+            let username = msg_event.sender_name().to_string();
+            let reply =
+                engine::guess_word(&ctx.db, scope, user_id, &username, text, &config).await;
 
-            if should_direct_guess {
-                let username = msg_event.sender_name().to_string();
-                let reply =
-                    engine::guess_word(&ctx.db, group_id, user_id, &username, text, &config).await;
-
-                send_response(&ctx, writer, group_id, user_id, reply, &config).await?;
-                return Ok(None); // 阻止后续处理
-            }
+            send_response(&ctx, writer, group_id, user_id, reply, &config).await?;
+            return Ok(None); // 阻止后续处理
         }
 
         // B. 指令处理
@@ -150,15 +150,17 @@ pub fn handle(
                             } else {
                                 let username = msg_event.sender_name().to_string();
                                 engine::guess_word(
-                                    &ctx.db, group_id, user_id, &username, arg, &config,
+                                    &ctx.db, scope, user_id, &username, arg, &config,
                                 )
                                 .await
                             }
                         }
                         "rank_group" => {
+                            let label = if group_id.is_some() { "本群" } else { "本会话" };
                             engine::get_channel_leaderboard(
                                 &ctx.db,
-                                group_id,
+                                scope,
+                                label,
                                 config.plugin.rank_display,
                             )
                             .await
@@ -170,7 +172,7 @@ pub fn handle(
                         "toggle_mode" => Reply::Notice(
                             engine::toggle_direct_guess_mode(
                                 &ctx.db,
-                                group_id,
+                                scope,
                                 config.plugin.direct_guess,
                             )
                             .await,
@@ -190,14 +192,25 @@ pub fn handle(
     })
 }
 
+/// 一局游戏的作用域键。
+///
+/// 群聊用群号，私聊用**负的**用户号。QQ 的群号与用户号都是正整数，取负不会撞车，
+/// 于是私聊各开各的一局，而群聊的键还是原来那个值——数据库结构与既有存档都不用动。
+fn scope_of(msg: &MessageEvent<'_>) -> i64 {
+    match msg.group_id() {
+        Some(gid) => gid,
+        None => -msg.user_id(),
+    }
+}
+
 /// 构建并发送回复：能出图的出图，出不来就发文本。
 ///
-/// 引用与 @ 的行为对图文一致——群里回的还是「你刚才那条」，
-/// 只是内容从一段文本换成了一张卡片。
+/// 引用与 @ 的行为对图文一致——回的还是「你刚才那条」，
+/// 只是内容从一段文本换成了一张卡片。`group_id` 为 None 即私聊，走私信。
 async fn send_response(
     ctx: &Context,
     writer: LockedWriter,
-    group_id: i64,
+    group_id: Option<i64>,
     user_id: i64,
     reply: Reply,
     config: &CiYiConfig,
@@ -219,7 +232,7 @@ async fn send_response(
         None => msg.text(reply.to_text()),
     };
 
-    send_msg(ctx, writer, Some(group_id), None, msg).await?;
+    send_msg(ctx, writer, group_id, Some(user_id), msg).await?;
     Ok(())
 }
 

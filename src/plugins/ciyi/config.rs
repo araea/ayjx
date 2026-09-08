@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 pub struct PluginConfig {
     #[serde(default)]
     pub at_user: bool,
-    #[serde(default = "default_true")]
+    /// 是否引用触发的那条消息。默认关：一局里盘面要连着发好几张，
+    /// 每张都挂一个引用框反而把聊天记录撑得更难翻。
+    #[serde(default)]
     pub quote_user: bool,
     #[serde(default)]
     pub direct_guess: bool,
@@ -25,7 +27,7 @@ impl Default for PluginConfig {
     fn default() -> Self {
         Self {
             at_user: false,
-            quote_user: true,
+            quote_user: false,
             direct_guess: false,
             history_display: 10,
             rank_display: 10,

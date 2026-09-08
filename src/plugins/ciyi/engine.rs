@@ -83,6 +83,8 @@ impl PartialEq for Hint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CiYiGameState {
+    /// 一局游戏的作用域键，也是主键：群聊存群号，私聊存「负的用户号」。
+    /// 沿用 `group_id` 这个列名是为了不动既有存档。
     pub group_id: i64,
     pub target_word: String,
     pub last_start_time: DateTime<Utc>,
@@ -106,9 +108,9 @@ impl CiYiGameState {
     /// 从数据库加载状态
     pub async fn load(
         db: &DatabaseConnection,
-        group_id: i64,
+        scope: i64,
     ) -> Result<Option<Self>, Box<dyn Error + Send + Sync>> {
-        let model = state::Entity::find_by_id(group_id).one(db).await?;
+        let model = state::Entity::find_by_id(scope).one(db).await?;
         if let Some(m) = model {
             Ok(Some(Self {
                 group_id: m.group_id,
@@ -192,10 +194,10 @@ pub struct FetchedData {
 
 pub async fn prepare_guess(
     db: &DatabaseConnection,
-    group_id: i64,
+    scope: i64,
 ) -> Result<Option<FetchRequest>, Box<dyn Error + Send + Sync>> {
     let question_words = get_question_words();
-    let state_opt = CiYiGameState::load(db, group_id).await?;
+    let state_opt = CiYiGameState::load(db, scope).await?;
 
     let state = match state_opt {
         Some(s) => s,
@@ -241,7 +243,7 @@ pub async fn prepare_guess(
 
 pub async fn commit_guess(
     db: &DatabaseConnection,
-    group_id: i64,
+    scope: i64,
     user_id: i64,
     username: &str,
     guess_word: String,
@@ -255,12 +257,12 @@ pub async fn commit_guess(
         };
 
         // 加载或初始化 State
-        let mut s = match CiYiGameState::load(db, group_id).await? {
+        let mut s = match CiYiGameState::load(db, scope).await? {
             Some(existing) => existing,
             None => {
                 // Should only happen on NewGame
                 CiYiGameState {
-                    group_id,
+                    group_id: scope,
                     target_word: data.request.word_to_fetch.clone(),
                     last_start_time: Utc::now(),
                     global_history: HashSet::new(),
@@ -301,7 +303,7 @@ pub async fn commit_guess(
         s.save(db).await?;
         s
     } else {
-        match CiYiGameState::load(db, group_id).await? {
+        match CiYiGameState::load(db, scope).await? {
             Some(s) => s,
             None => return Ok(Reply::Notice("游戏尚未开始，请重试。".to_string())),
         }
@@ -334,7 +336,7 @@ pub async fn commit_guess(
 
         // 保存赢家记录
         let win_record = record::ActiveModel {
-            group_id: Set(group_id),
+            group_id: Set(scope),
             user_id: Set(user_id),
             username: Set(username.to_string()),
             timestamp: Set(Utc::now().timestamp()),
@@ -413,42 +415,41 @@ fn build_board(
     }
 }
 
-pub async fn get_direct_guess_status(
-    db: &DatabaseConnection,
-    group_id: i64,
-    default: bool,
-) -> bool {
-    if let Ok(Some(state)) = CiYiGameState::load(db, group_id).await {
-        (state.is_new_day_in_china_timezone() || !state.is_finished) && state.direct_guess_enabled
-    } else {
-        default
-    }
+/// 无前缀的两字猜测能不能接。
+///
+/// 三个条件全都要满足：这个会话开过直接猜测模式、库里存着一局、这局还没结束。
+/// 「今天还没开局」和「今天已经猜中」一律返回 false——开局是「词意猜测」指令的事。
+/// 中间件是全量消息都要过一遍的，它默认应当沉默：有人随口说两个字，
+/// 不该因此把当天的题目开掉，更不该收到一句「不在词库中」的抢答。
+pub async fn direct_guess_open(db: &DatabaseConnection, scope: i64) -> bool {
+    matches!(
+        CiYiGameState::load(db, scope).await,
+        Ok(Some(state)) if state.direct_guess_enabled && !state.is_finished
+    )
 }
 
 pub async fn toggle_direct_guess_mode(
     db: &DatabaseConnection,
-    group_id: i64,
+    scope: i64,
     default: bool,
 ) -> String {
-    let mut state = match CiYiGameState::load(db, group_id).await {
+    let mut state = match CiYiGameState::load(db, scope).await {
         Ok(Some(s)) => s,
-        Ok(None) => {
-            // Initialize empty state if not exists
-            let question_words = get_question_words();
-            let idx = rand::rng().random_range(0..question_words.len());
-            let target = &question_words[idx];
-            CiYiGameState {
-                group_id,
-                target_word: target.to_string(),
-                last_start_time: Utc::now(),
-                global_history: HashSet::from([target.to_string()]),
-                current_guesses: HashSet::new(),
-                words_rank_list: Vec::new(),
-                hints: Vec::new(),
-                is_finished: false,
-                direct_guess_enabled: default,
-            }
-        }
+        // 还没玩过：只落一条「休眠」记录用来存这个偏好。
+        // 从前这里会顺手抽一个词、把 is_finished 置为 false，于是切一下模式
+        // 就等于开了今天的局——今天的题该由「词意猜测」开，不该由一次设置开。
+        Ok(None) => CiYiGameState {
+            group_id: scope,
+            target_word: String::new(),
+            // 1970：一定算「新的一天」，下一条「词意猜测」照常发今天的题
+            last_start_time: Utc.timestamp_opt(0, 0).unwrap(),
+            global_history: HashSet::new(),
+            current_guesses: HashSet::new(),
+            words_rank_list: Vec::new(),
+            hints: Vec::new(),
+            is_finished: true,
+            direct_guess_enabled: default,
+        },
         Err(_) => return "数据库错误。".to_string(),
     };
 
@@ -499,12 +500,15 @@ pub async fn get_global_leaderboard(db: &DatabaseConnection, limit: usize) -> Re
         Err(_) => return Reply::Notice("获取排行榜失败。".to_string()),
     };
 
-    rank_board("词意全榜", "全部群聊", results)
+    rank_board("词意全榜", "全部会话", results)
 }
 
+/// 当前会话的排行榜。`scope_label` 是榜单副标题里的自称——
+/// 群里是「本群」，私聊里说「本群」就不知所云了。
 pub async fn get_channel_leaderboard(
     db: &DatabaseConnection,
-    group_id: i64,
+    scope: i64,
+    scope_label: &str,
     limit: usize,
 ) -> Reply {
     let results: Vec<LeaderboardItem> = match record::Entity::find()
@@ -518,7 +522,7 @@ pub async fn get_channel_leaderboard(
             Expr::from(Func::count(Expr::col(record::Column::Id))),
             "score",
         )
-        .filter(record::Column::GroupId.eq(group_id))
+        .filter(record::Column::GroupId.eq(scope))
         .group_by(record::Column::UserId)
         .order_by_desc(Expr::custom_keyword(Alias::new("score")))
         .limit(limit as u64)
@@ -530,7 +534,7 @@ pub async fn get_channel_leaderboard(
         Err(_) => return Reply::Notice("获取排行榜失败。".to_string()),
     };
 
-    rank_board("词意榜", "本群", results)
+    rank_board("词意榜", scope_label, results)
 }
 
 fn rank_board(title: &str, scope: &str, items: Vec<LeaderboardItem>) -> Reply {
@@ -573,13 +577,13 @@ pub async fn fetch_words_rank_list(
 
 pub async fn guess_word(
     db: &DatabaseConnection,
-    group_id: i64,
+    scope: i64,
     user_id: i64,
     username: &str,
     guess_word: &str,
     config: &CiYiConfig,
 ) -> Reply {
-    let fetch_req = match prepare_guess(db, group_id).await {
+    let fetch_req = match prepare_guess(db, scope).await {
         Ok(req) => req,
         Err(e) => return Reply::Notice(format!("系统错误：{}", e)),
     };
@@ -596,7 +600,7 @@ pub async fn guess_word(
 
     match commit_guess(
         db,
-        group_id,
+        scope,
         user_id,
         username,
         guess_word.to_string(),
@@ -613,6 +617,83 @@ pub async fn guess_word(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::{ConnectionTrait, Database, Schema};
+
+    /// 一个只建了两张表的内存库，够跑状态机，不碰网络
+    async fn memory_db() -> DatabaseConnection {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let builder = db.get_database_backend();
+        let schema = Schema::new(builder);
+        let mut state_table = schema.create_table_from_entity(state::Entity);
+        db.execute_raw(builder.build(state_table.if_not_exists()))
+            .await
+            .unwrap();
+        let mut record_table = schema.create_table_from_entity(record::Entity);
+        db.execute_raw(builder.build(record_table.if_not_exists()))
+            .await
+            .unwrap();
+        db
+    }
+
+    fn running_game(scope: i64, direct: bool) -> CiYiGameState {
+        CiYiGameState {
+            group_id: scope,
+            target_word: "东西".into(),
+            last_start_time: Utc::now(),
+            global_history: HashSet::from(["东西".to_string()]),
+            current_guesses: HashSet::new(),
+            words_rank_list: vec!["东西".into()],
+            hints: Vec::new(),
+            is_finished: false,
+            direct_guess_enabled: direct,
+        }
+    }
+
+    /// 中间件默认沉默：没开局、开局但关着直接猜测、以及已经猜中，都不接
+    #[tokio::test]
+    async fn direct_guess_stays_shut_unless_a_game_is_running() {
+        let db = memory_db().await;
+        assert!(!direct_guess_open(&db, 1).await, "没有存档就不该接");
+
+        running_game(1, false).save(&db).await.unwrap();
+        assert!(!direct_guess_open(&db, 1).await, "没开直接猜测模式就不该接");
+
+        running_game(1, true).save(&db).await.unwrap();
+        assert!(direct_guess_open(&db, 1).await, "进行中的一局才接");
+
+        let mut finished = running_game(1, true);
+        finished.is_finished = true;
+        finished.save(&db).await.unwrap();
+        assert!(!direct_guess_open(&db, 1).await, "今天猜中之后不再接");
+    }
+
+    /// 切换模式只存偏好。它曾经会顺手抽一个词开局，于是「今天的题」
+    /// 可以被一次设置开掉——现在开局只剩「词意猜测」一条路。
+    #[tokio::test]
+    async fn toggling_the_mode_does_not_open_todays_game() {
+        let db = memory_db().await;
+        toggle_direct_guess_mode(&db, 7, false).await;
+
+        let state = CiYiGameState::load(&db, 7).await.unwrap().unwrap();
+        assert!(state.direct_guess_enabled, "偏好要存下来");
+        assert!(state.is_finished, "这条记录不占用今天的局");
+        assert!(state.target_word.is_empty() && state.global_history.is_empty());
+        assert!(!direct_guess_open(&db, 7).await, "开了模式也还没开局");
+
+        // 下一条「词意猜测」照常发今天的题
+        let req = prepare_guess(&db, 7).await.unwrap().expect("该开新的一局");
+        assert!(matches!(req.reason, FetchReason::NewDay));
+        assert!(!req.word_to_fetch.is_empty());
+    }
+
+    /// 私聊各人一局、群聊各群一局：两个作用域的存档互不干扰
+    #[tokio::test]
+    async fn scopes_keep_separate_games() {
+        let db = memory_db().await;
+        running_game(123, true).save(&db).await.unwrap();
+        assert!(direct_guess_open(&db, 123).await);
+        assert!(!direct_guess_open(&db, -42).await, "私聊有自己的一局");
+    }
 
     fn hint(text: &str, rank: usize) -> Hint {
         Hint {
