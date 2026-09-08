@@ -38,9 +38,9 @@ enabled = false
 # 开启搭话的群号；空列表等于不开启。
 groups = []
 # 判定模型（便宜、能看图），复用 oai 已配置的接口与密钥。
-gate_model = "gemini-3.5-flash-lite"
+gate_model = "gpt-5.6-luna"
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
-reply_model = "apilio/gemini-3.8-flash"
+reply_model = "apilio/claude-sonnet-5"
 thinking = "low"
 # 发言时开放给 pi 的工具白名单；去掉 bash 即禁止群聊触发命令执行。
 tools = "read,bash,web_search,fetch_content,get_search_content"

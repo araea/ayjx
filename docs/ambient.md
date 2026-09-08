@@ -14,6 +14,8 @@
 没有兴趣、话题结束、别人已经答过时可以旁观；不因很久没说话而强行刷存在感。
 默认不设硬冷却和每小时发言配额，也不随沉默时长降低门槛。
 管理员仍可显式开启这些旧参数，既有配置里的非零值会保留。
+默认人设按接话反馈、是否重复以及自己是否占了太多话头决定收住，不规定聊几轮必须停。
+聊得投机可以继续；没人接、别人转向互聊或明确嫌烦时旁观，不靠追问、表情或戳一戳续场。
 
 人设选择跟进时，可输出内部状态行：
 
@@ -63,6 +65,10 @@
 
 `res/ambient/persona.md` 是仓库默认人设。首次启动写到 `data/oai/ambient/persona.md`，
 **之后不自动覆盖**，判定和发言每轮读取磁盘版本。
+默认人格是个有点懒、有点嘴欠、好奇心重的潜水群友，保留冷幽默、独立与文学趣味，
+偏爱游戏设计、效率工具与哲学话题。日常按上下文自然反应，允许碎句、情绪变化、
+克制的贴吧式接梗和普通闲聊，不要求句句分析或抖包袱；认真讨论时才展开原因和观点。
+人设中的多轮示例只示意接话节奏，实际只生成当前轮回复。
 升级已运行实例时，需要将群聊场景与口吻调整同步到实际数据目录的人设，保留原有人格定制；
 只更新仓库文件不会替换线上人设。想恢复默认版本可删除运行时人设后重启。
 
@@ -72,6 +78,31 @@
 运行中通过本机控制台 `/ctl set oai ambient.字段 值` 修改；手工编辑配置前先停止 bot，
 避免退出时的自动保存覆盖修改。
 
+## 在聊天界面切换模型
+
+由 `ctl.admins` 中的全局管理员向机器人发送以下指令，私聊或已接入的群聊均可，
+本机控制台也支持。发言模型影响所有已启用搭话的群：
+
+```text
+/ctl set oai ambient.reply_model apilio/claude-sonnet-5
+/ctl show oai ambient.reply_model
+```
+
+`apilio` 是本机 Pi 中已配置的 provider 名；换其他模型时填写 Pi 能识别的 `provider/model`。
+前置判定走 oai 的接口与密钥，单独切换，模型名不加 Pi 的 provider 前缀：
+
+```text
+/ctl set oai ambient.gate_model gpt-5.6-luna
+/ctl show oai ambient.gate_model
+```
+
+默认判定用 GPT-5.6 Luna，发言用 Claude Sonnet 5——判定只做打分，便宜快就够；
+发言是要装成群友的，Claude 的中文口语更自然。发言端保留 `thinking = "low"`。
+指令保存到配置并在下一轮读取，无需重启；已经开始的请求仍可能使用旧模型。
+已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。
+这些设置只管理群聊搭话，与普通 oai 智能体及 Pi 房间的默认模型独立。
+`show` 回读能确认配置，但模型可用性还取决于对应接口和 Pi 配置。
+
 ## 配置
 
 `config.toml` 的 `[oai.ambient]`：
@@ -80,8 +111,8 @@
 | --- | --- | --- |
 | `enabled` | `false` | 总开关 |
 | `groups` | `[]` | 允许搭话的群号 |
-| `gate_model` | `gemini-3.5-flash-lite` | 判定模型，复用 oai 接口与密钥 |
-| `reply_model` | `apilio/gemini-3.8-flash` | pi 的发言模型 |
+| `gate_model` | `gpt-5.6-luna` | 判定模型，复用 oai 接口与密钥 |
+| `reply_model` | `apilio/claude-sonnet-5` | pi 的发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,bash,web_search,fetch_content,get_search_content` | 工具白名单 |
 | `score_threshold` | `45` | 普通开口意愿门槛，调高更沉默 |
