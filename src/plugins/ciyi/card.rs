@@ -938,8 +938,13 @@ mod tests {
         eprintln!("WORST alloc={alloc} bottom={bottom}");
         let img = c.crop(bottom);
         eprintln!("WORST final {:?}", img.dimensions());
-        image::DynamicImage::ImageRgba8(img)
-            .save(std::env::var("CIYI_CARD_DUMP").unwrap() + "/repro_worst.png").unwrap();
+        // 落盘只是给人看的，没设 CIYI_CARD_DUMP 就跳过——断言才是这个测试的正事
+        if let Ok(dir) = std::env::var("CIYI_CARD_DUMP") {
+            std::fs::create_dir_all(&dir).unwrap();
+            image::DynamicImage::ImageRgba8(img)
+                .save(format!("{dir}/repro_worst.png"))
+                .unwrap();
+        }
         // 关键断言：内容底界不能超过画布，否则会静默截断
         assert!(bottom <= alloc, "内容 {bottom} 超出画布 {alloc}");
     }

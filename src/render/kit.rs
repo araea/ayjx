@@ -69,11 +69,11 @@ impl Theme {
             border: Ink::rgb(255, 255, 255).with_a(0.075),
             surface: Ink::rgb(255, 255, 255).with_a(0.030),
             ink: Ink::rgb(255, 255, 255),
-            ink2: Ink::rgb(167, 179, 197),
-            ink3: Ink::rgb(108, 119, 139),
+            ink2: Ink::rgb(183, 194, 211),
+            ink3: Ink::rgb(148, 159, 178),
             accent: Ink::rgb(93, 230, 201),
             accent_soft: Ink::rgb(93, 230, 201).with_a(0.12),
-            off: Ink::rgb(152, 163, 181),
+            off: Ink::rgb(176, 187, 204),
             shadow: Ink::rgb(0, 0, 0).with_a(0.55),
             good: Ink::rgb(117, 201, 149),
             bad: Ink::rgb(227, 138, 141),
@@ -92,11 +92,11 @@ impl Theme {
             border: Ink::rgb(255, 255, 255).with_a(0.080),
             surface: Ink::rgb(255, 255, 255).with_a(0.032),
             ink: Ink::rgb(250, 250, 250),
-            ink2: Ink::rgb(176, 176, 182),
-            ink3: Ink::rgb(120, 120, 128),
+            ink2: Ink::rgb(192, 192, 198),
+            ink3: Ink::rgb(156, 156, 164),
             accent: Ink::rgb(240, 178, 92),
             accent_soft: Ink::rgb(240, 178, 92).with_a(0.12),
-            off: Ink::rgb(150, 150, 158),
+            off: Ink::rgb(180, 180, 188),
             shadow: Ink::rgb(0, 0, 0).with_a(0.55),
             good: Ink::rgb(117, 201, 149),
             bad: Ink::rgb(227, 138, 141),
@@ -141,15 +141,67 @@ impl Theme {
 // ================= 版式常量 =================
 
 /// 卡片四周的相纸留白
-const SHOT: f32 = 26.0;
+const SHOT: f32 = 22.0;
 /// 卡内左右留白
-const PADX: f32 = 40.0;
+const PADX: f32 = 34.0;
 /// 卡内上留白
-const PADT: f32 = 38.0;
+const PADT: f32 = 34.0;
 /// 卡内下留白
-const PADB: f32 = 26.0;
+const PADB: f32 = 24.0;
 /// 坐标纸细网格步长
 const GRID: f32 = 26.0;
+
+// ================= 字号表 =================
+//
+// 量尺与绘制共用同一组字号：改一处就够，不会再出现「按 14 算高度、按 16 画字」的错位。
+//
+// 字号按 CSS em 像素解释，正文 19—20px，指令 22px；与卡片宽度一起决定聊天中的
+// 实际大小。行高、留白和自动换行同步调整，不能只提高 image_scale。
+
+/// 卡片大标题
+const FS_TITLE: f32 = 42.0;
+const LH_TITLE: f32 = 50.0;
+/// 大标题下的副标题
+const FS_SUB: f32 = 20.0;
+const LH_SUB: f32 = 28.0;
+/// 标题右侧的状态药丸
+const FS_PILL: f32 = 15.0;
+/// 页眉标签与出图时刻
+const FS_KICKER: f32 = 15.0;
+const FS_STAMP: f32 = 14.0;
+/// 分区标题：中文 / 英文代号 / 计数
+const FS_SEC: f32 = 23.0;
+const FS_SEC_EN: f32 = 12.5;
+const FS_SEC_COUNT: f32 = 13.5;
+/// 双栏条目：名称 / 配置键 / 说明
+const FS_NAME: f32 = 23.0;
+const FS_KEY: f32 = 15.5;
+const FS_DESC: f32 = 20.0;
+/// 指令 chip 与它的说明、别名
+const FS_CMD: f32 = 22.0;
+const FS_NOTE: f32 = 20.0;
+const LH_NOTE: f32 = 29.0;
+const FS_ALIAS: f32 = 16.0;
+/// 状态行：主字段 / 补充 / 尾注
+const FS_ROW: f32 = 21.0;
+const FS_ROW_SUB: f32 = 17.0;
+const FS_TAIL: f32 = 15.0;
+/// 配置与差异的代码块
+const FS_CODE: f32 = 19.0;
+/// 引导框正文，以及不进框的脚注
+const FS_CALL: f32 = 20.0;
+const FS_FOOTNOTE: f32 = 14.0;
+const LH_FOOTNOTE: f32 = 21.0;
+/// 管理说明完整展开，不省略操作条件。
+const CALL_LINES: usize = usize::MAX;
+/// 页脚说明与指令提示
+const FS_FOOT: f32 = 16.0;
+/// 数字格
+const FS_TILE: f32 = 30.0;
+const FS_TILE_LABEL: f32 = 15.5;
+/// 圆点列表
+const FS_BULLET: f32 = 17.5;
+const FS_BULLET_TEXT: f32 = 16.0;
 
 // ================= 数据件 =================
 
@@ -335,13 +387,17 @@ fn midline(cy: f32, px: f32) -> f32 {
 // ================= 度量与绘制 =================
 
 /// 双栏条目的固定内边距与行高
-const IT_PADX: f32 = 16.0;
+const IT_PADX: f32 = 17.0;
 const IT_PADY: f32 = 13.0;
-const IT_DESC_LH: f32 = 21.0;
+/// 名称行（中文名 + 配置键 chip）的高度
+const IT_NAME_H: f32 = 26.0;
+/// 名称行与说明之间的间距
+const IT_NAME_GAP: f32 = 6.0;
+const IT_DESC_LH: f32 = 28.0;
 const IT_GAP_X: f32 = 16.0;
-const IT_GAP_Y: f32 = 10.0;
-/// 说明最多三行——现有最长的一条正好三行，句子不会断在半途
-const IT_DESC_LINES: usize = 3;
+const IT_GAP_Y: f32 = 11.0;
+/// 插件说明完整展开，字号变大时通过增加卡片高度容纳。
+const IT_DESC_LINES: usize = usize::MAX;
 
 /// 条目版式：序号牌、右栏与各段行高
 const EN_RANK_W: f32 = 38.0;
@@ -350,38 +406,66 @@ const EN_GAP_X: f32 = 15.0;
 const EN_SCORE_W: f32 = 104.0;
 const EN_PADT: f32 = 15.0;
 const EN_PADB: f32 = 16.0;
-const EN_TITLE: f32 = 20.0;
-const EN_TITLE_LH: f32 = 28.0;
+const EN_TITLE: f32 = 22.0;
+const EN_TITLE_LH: f32 = 31.0;
 const EN_TITLE_LINES: usize = 2;
-const EN_META_H: f32 = 23.0;
-const EN_BODY: f32 = 14.5;
-const EN_BODY_LH: f32 = 22.0;
+const EN_MARK: f32 = 14.5;
+const EN_META_H: f32 = 25.0;
+const EN_META_CHIP: f32 = 13.5;
+const EN_META_PLAIN: f32 = 14.0;
+const EN_BODY: f32 = 16.5;
+const EN_BODY_LH: f32 = 25.0;
 const EN_BODY_LINES: usize = 4;
-const EN_QUOTE_LH: f32 = 21.0;
+const EN_QUOTE: f32 = 16.0;
+const EN_QUOTE_LABEL: f32 = 15.0;
+const EN_QUOTE_LH: f32 = 24.0;
+const EN_RANK: f32 = 16.5;
+const EN_SCORE: f32 = 34.0;
+const EN_SCORE_NOTE: f32 = 14.0;
+const EN_SCORE_NOTE_LH: f32 = 20.0;
 const EN_METER_H: f32 = 7.0;
 /// 列表项：圆点列表的行高
-const BU_TITLE_LH: f32 = 24.0;
-const BU_TEXT_LH: f32 = 22.0;
+const BU_TITLE_LH: f32 = 27.0;
+const BU_TEXT_LH: f32 = 25.0;
 
-const CMD_CHIP_H: f32 = 34.0;
-const CODE_LH: f32 = 21.0;
-const CALL_LH: f32 = 26.0;
+/// 指令 chip 的高度与左右内边距
+const CMD_CHIP_H: f32 = 40.0;
+const CHIP_PADX: f32 = 15.0;
+/// 别名 chip 的高度
+const ALIAS_H: f32 = 25.0;
+/// 状态行行高
+const ROW_H: f32 = 46.0;
+/// 数字格高度
+const TILE_H: f32 = 82.0;
+/// 圆点列表的正文缩进
+const BU_INDENT: f32 = 24.0;
+const CODE_LH: f32 = 28.0;
+const CALL_LH: f32 = 30.0;
 
 impl Block {
     /// 本段占用的高度（含自身上间距）
     fn measure(&self, c: &Canvas, f: &Fonts, cw: f32) -> f32 {
         match self {
-            Block::Title { title, sub, .. } => {
-                let lines = c.wrap(title, &f.sans_b, 40.0, 0.0, cw - 120.0, 2).len() as f32;
-                let mut h = lines * 48.0;
+            Block::Title { title, sub, pill } => {
+                let lines = c
+                    .wrap(
+                        title,
+                        &f.sans_b,
+                        FS_TITLE,
+                        0.0,
+                        title_width(c, f, cw, pill),
+                        usize::MAX,
+                    )
+                    .len() as f32;
+                let mut h = lines * LH_TITLE;
                 if !sub.is_empty() {
-                    h += 12.0 + c.wrap(sub, &f.sans, 16.5, 0.0, cw, 3).len() as f32 * 25.0;
+                    h += 14.0 + c.wrap(sub, &f.sans, FS_SUB, 0.0, cw, 3).len() as f32 * LH_SUB;
                 }
                 h
             }
             Block::Meter(_) => 20.0 + 8.0,
             Block::Rule => 26.0 + 1.0,
-            Block::Section { .. } => 26.0 + 24.0 + 12.0,
+            Block::Section { .. } => 24.0 + 28.0 + 10.0,
             Block::Items(items) => {
                 let colw = (cw - IT_GAP_X) / 2.0;
                 let mut h = 0.0;
@@ -395,15 +479,18 @@ impl Block {
                 (h - IT_GAP_Y).max(0.0)
             }
             Block::Cmds(cmds) => cmds.iter().map(|x| cmd_h(c, f, x, cw)).sum(),
-            Block::Rows(rows) => rows.len() as f32 * 34.0,
+            Block::Rows(rows) => rows.len() as f32 * ROW_H,
             Block::Code(lines) => {
                 let n: usize = lines
                     .iter()
-                    .map(|l| c.wrap(l, &f.sans, 14.0, 0.0, cw - 36.0, 4).len())
+                    .map(|l| {
+                        c.wrap(l, &f.sans, FS_CODE, 0.0, cw - 44.0, usize::MAX)
+                            .len()
+                    })
                     .sum();
                 16.0 + 14.0 + n as f32 * CODE_LH + 14.0
             }
-            Block::Tiles(_) => 18.0 + 74.0,
+            Block::Tiles(_) => 18.0 + TILE_H,
             Block::Entries(entries) => entries
                 .iter()
                 .enumerate()
@@ -414,15 +501,19 @@ impl Block {
             }
             Block::Callout { text, tone } => {
                 if *tone == Tone::Note {
-                    let n = c.wrap(text, &f.sans, 12.5, 0.0, cw, 4).len() as f32;
-                    return 20.0 + n * 19.0;
+                    let n = c.wrap(text, &f.sans, FS_FOOTNOTE, 0.0, cw, 4).len() as f32;
+                    return 20.0 + n * LH_FOOTNOTE;
                 }
-                let inner = if *tone == Tone::Empty {
-                    cw - 48.0
-                } else {
-                    cw - 44.0
-                };
-                let n = c.wrap(text, &f.sans, 15.5, 0.0, inner, 6).len() as f32;
+                let n = c
+                    .wrap(
+                        text,
+                        &f.sans,
+                        FS_CALL,
+                        0.0,
+                        call_inner(*tone, cw),
+                        CALL_LINES,
+                    )
+                    .len() as f32;
                 22.0 + 18.0 + n * CALL_LH + 18.0
             }
             Block::Gap(h) => *h,
@@ -430,18 +521,40 @@ impl Block {
     }
 }
 
+/// 引导框里文字可用的宽度。占位框居中排，两边各让出一点，比信息框再窄一档。
+fn call_inner(tone: Tone, cw: f32) -> f32 {
+    if tone == Tone::Empty {
+        cw - 52.0
+    } else {
+        cw - 48.0
+    }
+}
+
+fn item_heading(c: &Canvas, f: &Fonts, it: &Item, colw: f32) -> (Vec<String>, Vec<String>) {
+    let width = colw - IT_PADX * 2.0;
+    (
+        c.wrap(&it.name, &f.sans_b, FS_NAME, 0.0, width, usize::MAX),
+        c.wrap(&it.key, &f.sans, FS_KEY, 0.0, width, usize::MAX),
+    )
+}
+
 fn item_h(c: &Canvas, f: &Fonts, it: &Item, colw: f32) -> f32 {
+    let (names, keys) = item_heading(c, f, it, colw);
     let lines = c
         .wrap(
             &it.desc,
             &f.sans,
-            14.0,
+            FS_DESC,
             0.0,
             colw - IT_PADX * 2.0,
             IT_DESC_LINES,
         )
-        .len() as f32;
-    IT_PADY + 23.0 + 6.0 + lines * IT_DESC_LH + IT_PADY
+        .len();
+    IT_PADY * 2.0
+        + names.len() as f32 * 30.0
+        + keys.len() as f32 * 22.0
+        + IT_NAME_GAP
+        + lines as f32 * IT_DESC_LH
 }
 
 /// 条目正文可用的宽度：扣掉左边的序号牌与右边的数字栏
@@ -465,7 +578,7 @@ fn entry_h(c: &Canvas, f: &Fonts, entry: &Entry, cw: f32) -> f32 {
     let mark_w = entry
         .mark
         .as_ref()
-        .map(|(text, _)| c.text_w(text, &f.sans_b, 13.0, 0.0) + 14.0)
+        .map(|(text, _)| c.text_w(text, &f.sans_b, EN_MARK, 0.0) + 14.0)
         .unwrap_or(0.0);
     let mut h = EN_PADT
         + c.wrap(
@@ -497,7 +610,7 @@ fn entry_h(c: &Canvas, f: &Fonts, entry: &Entry, cw: f32) -> f32 {
 
     // 右栏比正文高时以右栏为准，否则大字会顶穿下一条
     if let Some(score) = &entry.score {
-        let right = EN_PADT + 36.0 + score.notes.len() as f32 * 18.0 + EN_PADB;
+        let right = EN_PADT + 38.0 + score.notes.len() as f32 * EN_SCORE_NOTE_LH + EN_PADB;
         return h.max(right);
     }
     h
@@ -509,34 +622,70 @@ fn quote_lines(c: &Canvas, f: &Fonts, label: &str, text: &str, tw: f32) -> Vec<S
     let indent = if label.is_empty() {
         0.0
     } else {
-        c.text_w(label, &f.sans_b, 13.5, 0.0) + 9.0
+        c.text_w(label, &f.sans_b, EN_QUOTE_LABEL, 0.0) + 9.0
     };
-    let mut lines = c.wrap(text, &f.sans, 14.0, 0.0, inner - indent, 1);
+    let mut lines = c.wrap(text, &f.sans, EN_QUOTE, 0.0, inner - indent, 1);
     let first = lines.first().cloned().unwrap_or_default();
     let consumed = first.chars().count();
     let rest: String = text.chars().skip(consumed).collect();
     let rest = rest.trim_start().to_string();
     if !rest.is_empty() {
-        lines.extend(c.wrap(&rest, &f.sans, 14.0, 0.0, inner, 2));
+        lines.extend(c.wrap(&rest, &f.sans, EN_QUOTE, 0.0, inner, 2));
     }
     lines
 }
 
 fn bullet_h(c: &Canvas, f: &Fonts, bullet: &Bullet, cw: f32) -> f32 {
-    let tw = cw - 20.0;
+    let tw = cw - BU_INDENT;
     let mut h = 9.0;
     if !bullet.title.is_empty() {
-        h += c.wrap(&bullet.title, &f.sans_b, 15.5, 0.0, tw, 2).len() as f32 * BU_TITLE_LH;
+        h += c
+            .wrap(&bullet.title, &f.sans_b, FS_BULLET, 0.0, tw, 2)
+            .len() as f32
+            * BU_TITLE_LH;
     }
     if !bullet.text.is_empty() {
-        h += c.wrap(&bullet.text, &f.sans, 14.0, 0.0, tw, 4).len() as f32 * BU_TEXT_LH;
+        h += c
+            .wrap(&bullet.text, &f.sans, FS_BULLET_TEXT, 0.0, tw, 4)
+            .len() as f32
+            * BU_TEXT_LH;
     }
     h
 }
 
 /// 指令 chip 里的文字总宽（前缀 + 本体）
-fn chip_text_w(c: &Canvas, f: &Fonts, cmd: &Cmd) -> f32 {
-    c.text_w(&cmd.prefix, &f.sans_b, 18.0, 0.0) + c.text_w(&cmd.cmd, &f.sans_b, 18.0, 0.0)
+fn chip_text_w(c: &Canvas, f: &Fonts, cmd: &Cmd, fs: f32) -> f32 {
+    c.text_w(&cmd.prefix, &f.sans_b, fs, 0.0) + c.text_w(&cmd.cmd, &f.sans_b, fs, 0.0)
+}
+
+/// 长指令保持字号，按实际宽度换行；不省略参数，不缩字。
+fn chip_lines(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> Vec<String> {
+    c.wrap(
+        &format!("{}{}", cmd.prefix, cmd.cmd),
+        &f.sans_b,
+        FS_CMD,
+        0.0,
+        cw - CHIP_PADX * 2.0,
+        usize::MAX,
+    )
+}
+
+fn chip_h(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> f32 {
+    CMD_CHIP_H + (chip_lines(c, f, cmd, cw).len() - 1) as f32 * 30.0
+}
+
+fn alias_lines(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> Vec<String> {
+    if cmd.aliases.is_empty() {
+        return vec![];
+    }
+    c.wrap(
+        &format!("别名  {}", cmd.aliases.join("  ·  ")),
+        &f.sans,
+        FS_ALIAS,
+        0.0,
+        cw - 8.0,
+        usize::MAX,
+    )
 }
 
 /// 把指令拆成「普通文字 / 占位符」交替的片段。
@@ -568,7 +717,7 @@ fn placeholder_runs(text: &str) -> Vec<(&str, bool)> {
 
 /// chip 宽度（不超过版心）
 fn chip_w(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> f32 {
-    (chip_text_w(c, f, cmd) + 26.0).min(cw)
+    (chip_text_w(c, f, cmd, FS_CMD) + CHIP_PADX * 2.0).min(cw)
 }
 
 /// 说明能否与指令同行。
@@ -577,22 +726,29 @@ fn chip_w(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> f32 {
 /// 放不下才换行——这比一律换行省掉近一半高度。
 fn cmd_inline(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> bool {
     !cmd.note.is_empty()
-        && chip_w(c, f, cmd, cw) + 16.0 + c.text_w(&cmd.note, &f.sans, 15.0, 0.0) <= cw
+        && chip_lines(c, f, cmd, cw).len() == 1
+        && chip_w(c, f, cmd, cw) + 16.0 + c.text_w(&cmd.note, &f.sans, FS_NOTE, 0.0) <= cw
 }
 
 fn cmd_h(c: &Canvas, f: &Fonts, cmd: &Cmd, cw: f32) -> f32 {
-    let mut h = 9.0 + CMD_CHIP_H;
+    let mut h = 9.0 + chip_h(c, f, cmd, cw);
     if !cmd.note.is_empty() && !cmd_inline(c, f, cmd, cw) {
-        h += 7.0 + c.wrap(&cmd.note, &f.sans, 15.0, 0.0, cw - 44.0, 3).len() as f32 * 22.0;
+        h += 7.0
+            + c.wrap(&cmd.note, &f.sans, FS_NOTE, 0.0, cw - 8.0, usize::MAX)
+                .len() as f32
+                * LH_NOTE;
     }
     if !cmd.aliases.is_empty() {
-        h += 8.0 + 22.0;
+        h += 8.0 + alias_lines(c, f, cmd, cw).len() as f32 * ALIAS_H;
     }
     h + 9.0
 }
 
-/// 渲染整张卡片为 PNG base64。字体不可用时返回 None，调用方退回纯文本。
+/// 渲染整张卡片为 PNG base64。字体不可用或超出位图预算时返回 None，调用方退回纯文本。
 pub fn render(doc: &Doc, scale: f64) -> Option<String> {
+    if !doc.width.is_finite() || doc.cw() < 200.0 {
+        return None;
+    }
     let f = Fonts::get()?;
     let s = if scale.is_finite() {
         scale.clamp(1.0, 4.0) as f32
@@ -606,10 +762,15 @@ pub fn render(doc: &Doc, scale: f64) -> Option<String> {
     let body: f32 = doc.blocks.iter().map(|b| b.measure(&probe, f, cw)).sum();
 
     // 页眉（标签行）+ 正文 + 页脚
-    let head_h = 22.0;
-    let foot_h = 30.0 + 18.0 + 20.0;
+    let head_h = 24.0;
+    let foot_h = footer_h(&probe, f, doc, cw);
     let card_h = PADT + head_h + body + foot_h + PADB;
     let total_h = card_h + SHOT * 2.0;
+    // 完整展开长配置后，分配位图前检查总像素；超大内容交给已有的纯文本兜底。
+    let pixels = (doc.width * s).ceil() * (total_h * s).ceil();
+    if !pixels.is_finite() || pixels <= 0.0 || pixels > 64_000_000.0 {
+        return None;
+    }
 
     let mut c = Canvas::new(doc.width, total_h, s);
     c.set_text_gamma(doc.theme.text_gamma);
@@ -671,58 +832,57 @@ fn draw_shell(c: &mut Canvas, f: &Fonts, doc: &Doc, card_h: f32) {
     c.circle_fill(x + 4.5, cy, 4.5, t.accent);
     c.circle_stroke(x + 4.5, cy, 7.0, 1.0, t.accent.with_a(0.28));
     c.text(
-        x + 19.0,
-        midline(cy, 14.0),
+        x + 20.0,
+        midline(cy, FS_KICKER),
         &doc.kicker,
         &f.sans_b,
-        14.0,
+        FS_KICKER,
         t.accent,
-        0.22 * 14.0,
+        0.22 * FS_KICKER,
     );
     c.text_right(
         w - SHOT - PADX,
-        midline(cy, 13.5),
+        midline(cy, FS_STAMP),
         &stamp(),
         &f.sans,
-        13.5,
+        FS_STAMP,
         t.ink3,
-        0.03 * 13.5,
+        0.03 * FS_STAMP,
     );
 }
 
-/// 页脚：一道细线，左说明右指令提示
+fn footer_lines(c: &Canvas, f: &Fonts, doc: &Doc, cw: f32) -> Vec<String> {
+    let mut lines = c.wrap(&doc.foot, &f.sans, FS_FOOT, 0.0, cw, usize::MAX);
+    let (label, code) = &doc.hint;
+    if !code.is_empty() {
+        lines.extend(c.wrap(
+            &format!("{label}  {code}"),
+            &f.sans,
+            FS_FOOT,
+            0.0,
+            cw,
+            usize::MAX,
+        ));
+    }
+    lines
+}
+
+fn footer_h(c: &Canvas, f: &Fonts, doc: &Doc, cw: f32) -> f32 {
+    32.0 + 16.0 + footer_lines(c, f, doc, cw).len() as f32 * 24.0
+}
+
+/// 页脚按行展开，长提示不会覆盖左侧说明。
 fn draw_foot(c: &mut Canvas, f: &Fonts, doc: &Doc, x: f32, y: f32, cw: f32) {
     let t = &doc.theme;
-    let ly = y + 30.0;
-    c.hline(x, x + cw, ly, 1.0, t.border, 0.0, 0.0);
-    let cy = ly + 19.0;
-    c.text(
-        x,
-        midline(cy, 13.0),
-        &doc.foot,
-        &f.sans,
-        13.0,
-        t.ink3,
-        0.02 * 13.0,
-    );
-
-    let (label, code) = &doc.hint;
-    if code.is_empty() {
-        return;
-    }
-    let code_w = c.text_w(code, &f.sans_b, 13.0, 0.0) + 18.0;
-    let cx1 = x + cw;
-    c.rrect_fill(cx1 - code_w, cy - 12.0, code_w, 24.0, 6.0, t.surface);
-    c.rrect_stroke(cx1 - code_w, cy - 12.0, code_w, 24.0, 6.0, 1.0, t.border);
-    c.text_center(cx1 - code_w / 2.0, cy, code, &f.sans_b, 13.0, t.ink2, 0.0);
-    if !label.is_empty() {
-        c.text_right(
-            cx1 - code_w - 10.0,
-            midline(cy, 13.0),
-            label,
+    c.hline(x, x + cw, y + 32.0, 1.0, t.border, 0.0, 0.0);
+    for (i, line) in footer_lines(c, f, doc, cw).iter().enumerate() {
+        c.text(
+            x,
+            y + 48.0 + FS_FOOT + i as f32 * 24.0,
+            line,
             &f.sans,
-            13.0,
-            t.ink3,
+            FS_FOOT,
+            if i == 0 { t.ink3 } else { t.ink2 },
             0.0,
         );
     }
@@ -745,7 +905,7 @@ fn draw_block(c: &mut Canvas, f: &Fonts, t: &Theme, block: &Block, x: f32, y: f3
             );
         }
         Block::Section { title, en, count } => {
-            draw_section(c, f, t, x, y + 26.0, cw, title, en, count)
+            draw_section(c, f, t, x, y + 24.0, cw, title, en, count)
         }
         Block::Items(items) => draw_items(c, f, t, x, y, cw, items),
         Block::Cmds(cmds) => draw_cmds(c, f, t, x, y, cw, cmds),
@@ -759,6 +919,13 @@ fn draw_block(c: &mut Canvas, f: &Fonts, t: &Theme, block: &Block, x: f32, y: f3
     }
 }
 
+fn title_width(c: &Canvas, f: &Fonts, cw: f32, pill: &Option<(String, bool)>) -> f32 {
+    cw - pill
+        .as_ref()
+        .map(|(text, _)| c.text_w(text, &f.sans_b, FS_PILL, 0.0) + 58.0)
+        .unwrap_or(0.0)
+}
+
 fn draw_title(
     c: &mut Canvas,
     f: &Fonts,
@@ -770,11 +937,18 @@ fn draw_title(
     pill: &Option<(String, bool)>,
     sub: &str,
 ) {
-    let lines = c.wrap(title, &f.sans_b, 40.0, 0.0, cw - 120.0, 2);
-    let mut by = y + 38.0;
+    let lines = c.wrap(
+        title,
+        &f.sans_b,
+        FS_TITLE,
+        0.0,
+        title_width(c, f, cw, pill),
+        usize::MAX,
+    );
+    let mut by = y + FS_TITLE * 0.95;
     for line in &lines {
-        c.text(x, by, line, &f.sans_b, 40.0, t.ink, 0.0);
-        by += 48.0;
+        c.text(x, by, line, &f.sans_b, FS_TITLE, t.ink, 0.0);
+        by += LH_TITLE;
     }
     if let Some((text, on)) = pill {
         // 药丸挂在标题首行右侧：状态是标题的一部分，不该滚到副标题里
@@ -783,28 +957,28 @@ fn draw_title(
         } else {
             (t.off, t.surface, t.border)
         };
-        let tw = c.text_w(text, &f.sans_b, 13.5, 0.0);
-        let pw = tw + 38.0;
-        let px = x + c.text_w(&lines[0], &f.sans_b, 40.0, 0.0) + 16.0;
-        let pcy = y + 25.0;
-        c.rrect_fill(px, pcy - 14.0, pw, 28.0, 14.0, bg);
-        c.rrect_stroke(px, pcy - 14.0, pw, 28.0, 14.0, 1.0, bd);
-        c.circle_fill(px + 14.0, pcy, 3.5, fg);
+        let tw = c.text_w(text, &f.sans_b, FS_PILL, 0.0);
+        let pw = tw + 42.0;
+        let px = x + c.text_w(&lines[0], &f.sans_b, FS_TITLE, 0.0) + 16.0;
+        let pcy = y + 26.0;
+        c.rrect_fill(px, pcy - 16.0, pw, 32.0, 16.0, bg);
+        c.rrect_stroke(px, pcy - 16.0, pw, 32.0, 16.0, 1.0, bd);
+        c.circle_fill(px + 15.0, pcy, 3.5, fg);
         c.text(
-            px + 24.0,
-            midline(pcy, 13.5),
+            px + 26.0,
+            midline(pcy, FS_PILL),
             text,
             &f.sans_b,
-            13.5,
+            FS_PILL,
             fg,
             0.0,
         );
     }
     if !sub.is_empty() {
-        let mut sy = by - 48.0 + 12.0 + 18.0;
-        for line in c.wrap(sub, &f.sans, 16.5, 0.0, cw, 3) {
-            c.text(x, sy, &line, &f.sans, 16.5, t.ink2, 0.0);
-            sy += 25.0;
+        let mut sy = y + lines.len() as f32 * LH_TITLE + 14.0 + FS_SUB;
+        for line in c.wrap(sub, &f.sans, FS_SUB, 0.0, cw, 3) {
+            c.text(x, sy, &line, &f.sans, FS_SUB, t.ink2, 0.0);
+            sy += LH_SUB;
         }
     }
 }
@@ -833,34 +1007,34 @@ fn draw_section(
     en: &str,
     count: &str,
 ) {
-    let cy = y + 12.0;
+    let cy = y + 14.0;
     let mut tx = x;
-    c.rect(tx, cy - 8.0, 3.0, 16.0, t.accent);
-    tx += 13.0;
+    c.rect(tx, cy - 9.5, 3.5, 19.0, t.accent);
+    tx += 14.0;
     tx += c.text(
         tx,
-        midline(cy, 20.0),
+        midline(cy, FS_SEC),
         title,
         &f.sans_b,
-        20.0,
+        FS_SEC,
         t.ink,
-        0.01 * 20.0,
+        0.01 * FS_SEC,
     ) + 12.0;
     if !en.is_empty() {
         tx += c.text(
             tx,
-            midline(cy, 11.5),
+            midline(cy, FS_SEC_EN),
             en,
             &f.sans_b,
-            11.5,
+            FS_SEC_EN,
             t.ink3,
-            0.2 * 11.5,
+            0.2 * FS_SEC_EN,
         ) + 14.0;
     }
     let cnt_w = if count.is_empty() {
         0.0
     } else {
-        c.text_w(count, &f.sans_b, 12.5, 0.0) + 14.0
+        c.text_w(count, &f.sans_b, FS_SEC_COUNT, 0.0) + 14.0
     };
     if x + cw - cnt_w > tx {
         c.hline(tx, x + cw - cnt_w, cy, 1.0, t.border, 6.0, 7.0);
@@ -868,10 +1042,10 @@ fn draw_section(
     if !count.is_empty() {
         c.text_right(
             x + cw,
-            midline(cy, 12.5),
+            midline(cy, FS_SEC_COUNT),
             count,
             &f.sans_b,
-            12.5,
+            FS_SEC_COUNT,
             t.ink3,
             0.0,
         );
@@ -891,7 +1065,7 @@ fn draw_items(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, ite
             let (accent, name_ink, desc_ink) = if it.on {
                 (t.accent, t.ink, t.ink2)
             } else {
-                (t.border.with_a(0.30), t.off, t.ink3)
+                (t.border.with_a(0.30), t.off, t.ink2)
             };
             c.rrect_fill(
                 ix,
@@ -914,48 +1088,42 @@ fn draw_items(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, ite
             // 左侧竖条：启用为主色，停用为暗灰
             c.rrect_fill(ix, ry + IT_PADY, 3.0, tall - IT_PADY * 2.0, 1.5, accent);
 
-            let cy = ry + IT_PADY + 11.5;
-            let mut tx = ix + IT_PADX;
-            tx += c.text(
-                tx,
-                midline(cy, 18.5),
-                &it.name,
-                &f.sans_b,
-                18.5,
-                name_ink,
-                0.0,
-            ) + 9.0;
-            // 配置键 chip：它是要被原样敲进输入框的字符串，与中文名在形态上分开
-            let kw = c.text_w(&it.key, &f.sans, 12.5, 0.0) + 14.0;
-            if tx + kw <= ix + colw - IT_PADX {
-                c.rrect_fill(
-                    tx,
-                    cy - 10.0,
-                    kw,
-                    20.0,
-                    6.0,
-                    if it.on { t.accent_soft } else { t.surface },
-                );
-                c.text_center(
-                    tx + kw / 2.0,
-                    cy,
-                    &it.key,
-                    &f.sans,
-                    12.5,
-                    if it.on { t.accent } else { t.ink3 },
+            let (names, keys) = item_heading(c, f, it, colw);
+            let mut dy = ry + IT_PADY;
+            for line in names {
+                c.text(
+                    ix + IT_PADX,
+                    dy + FS_NAME,
+                    &line,
+                    &f.sans_b,
+                    FS_NAME,
+                    name_ink,
                     0.0,
                 );
+                dy += 30.0;
             }
-            let mut dy = ry + IT_PADY + 23.0 + 6.0 + 15.0;
+            for line in keys {
+                c.text(
+                    ix + IT_PADX,
+                    dy + FS_KEY,
+                    &line,
+                    &f.sans,
+                    FS_KEY,
+                    if it.on { t.accent } else { t.off },
+                    0.0,
+                );
+                dy += 22.0;
+            }
+            dy += IT_NAME_GAP + FS_DESC;
             for line in c.wrap(
                 &it.desc,
                 &f.sans,
-                14.0,
+                FS_DESC,
                 0.0,
                 colw - IT_PADX * 2.0,
                 IT_DESC_LINES,
             ) {
-                c.text(ix + IT_PADX, dy, &line, &f.sans, 14.0, desc_ink, 0.0);
+                c.text(ix + IT_PADX, dy, &line, &f.sans, FS_DESC, desc_ink, 0.0);
                 dy += IT_DESC_LH;
             }
         }
@@ -1001,7 +1169,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
                     by + EN_RANK_H / 2.0,
                     &entry.rank,
                     &f.sans_b,
-                    15.0,
+                    EN_RANK,
                     t.card,
                     0.0,
                 );
@@ -1013,7 +1181,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
                     by + EN_RANK_H / 2.0,
                     &entry.rank,
                     &f.sans_b,
-                    15.0,
+                    EN_RANK,
                     t.ink3,
                     0.0,
                 );
@@ -1023,7 +1191,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
         let mark_w = entry
             .mark
             .as_ref()
-            .map(|(text, _)| c.text_w(text, &f.sans_b, 13.0, 0.0) + 14.0)
+            .map(|(text, _)| c.text_w(text, &f.sans_b, EN_MARK, 0.0) + 14.0)
             .unwrap_or(0.0);
         let title_lines = c.wrap(
             &entry.title,
@@ -1035,7 +1203,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
         );
         let mut cy = ry + EN_PADT;
         for (i, line) in title_lines.iter().enumerate() {
-            let baseline = cy + 20.0;
+            let baseline = cy + EN_TITLE * 0.98;
             let advance = c.text(tx, baseline, line, &f.sans_b, EN_TITLE, t.ink, 0.0);
             if i == 0
                 && let Some((text, mark)) = &entry.mark
@@ -1050,7 +1218,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
                     baseline - 2.0,
                     text,
                     &f.sans_b,
-                    13.0,
+                    EN_MARK,
                     ink,
                     0.0,
                 );
@@ -1067,7 +1235,7 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
         if !entry.body.is_empty() {
             cy += 7.0;
             for line in c.wrap(&entry.body, &f.sans, EN_BODY, 0.0, tw, EN_BODY_LINES) {
-                c.text(tx, cy + 14.5, &line, &f.sans, EN_BODY, t.ink2, 0.0);
+                c.text(tx, cy + EN_BODY, &line, &f.sans, EN_BODY, t.ink2, 0.0);
                 cy += EN_BODY_LH;
             }
         }
@@ -1082,9 +1250,17 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
             for (i, line) in lines.iter().enumerate() {
                 let mut lx = tx + 13.0;
                 if i == 0 && !label.is_empty() {
-                    lx += c.text(lx, qy + 14.5, label, &f.sans_b, 13.5, t.accent, 0.0) + 9.0;
+                    lx += c.text(
+                        lx,
+                        qy + EN_QUOTE,
+                        label,
+                        &f.sans_b,
+                        EN_QUOTE_LABEL,
+                        t.accent,
+                        0.0,
+                    ) + 9.0;
                 }
-                c.text(lx, qy + 14.5, line, &f.sans, 14.0, t.ink2, 0.0);
+                c.text(lx, qy + EN_QUOTE, line, &f.sans, EN_QUOTE, t.ink2, 0.0);
                 qy += EN_QUOTE_LH;
             }
             cy += qh;
@@ -1103,11 +1279,19 @@ fn draw_entries(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, e
         if let Some(score) = &entry.score {
             let sx = x + cw;
             let mut sy = ry + EN_PADT;
-            c.text_right(sx, sy + 27.0, &score.value, &f.sans_b, 32.0, t.accent, 0.0);
-            sy += 36.0;
+            c.text_right(
+                sx,
+                sy + 29.0,
+                &score.value,
+                &f.sans_b,
+                EN_SCORE,
+                t.accent,
+                0.0,
+            );
+            sy += 38.0;
             for note in &score.notes {
-                c.text_right(sx, sy + 12.0, note, &f.sans, 12.5, t.ink3, 0.0);
-                sy += 18.0;
+                c.text_right(sx, sy + 13.0, note, &f.sans, EN_SCORE_NOTE, t.ink3, 0.0);
+                sy += EN_SCORE_NOTE_LH;
             }
         }
 
@@ -1123,17 +1307,17 @@ fn draw_meta(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, meta
     for item in meta {
         match item {
             Meta::Chip(text) => {
-                let w = c.text_w(text, &f.sans, 12.0, 0.0) + 16.0;
+                let w = c.text_w(text, &f.sans, EN_META_CHIP, 0.0) + 17.0;
                 if mx + w > x + cw {
                     return;
                 }
-                c.rrect_fill(mx, cy - 9.5, w, 19.0, 5.0, t.accent_soft);
-                c.text_center(mx + w / 2.0, cy, text, &f.sans, 12.0, t.accent, 0.0);
+                c.rrect_fill(mx, cy - 10.5, w, 21.0, 5.5, t.accent_soft);
+                c.text_center(mx + w / 2.0, cy, text, &f.sans, EN_META_CHIP, t.accent, 0.0);
                 mx += w + 7.0;
                 previous_plain = false;
             }
             Meta::Plain(text) => {
-                let w = c.text_w(text, &f.sans, 12.5, 0.0);
+                let w = c.text_w(text, &f.sans, EN_META_PLAIN, 0.0);
                 let dot = if previous_plain { 12.0 } else { 0.0 };
                 if mx + dot + w > x + cw {
                     return;
@@ -1142,7 +1326,15 @@ fn draw_meta(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, meta
                     c.circle_fill(mx + 3.0, cy, 1.5, t.ink3);
                     mx += dot;
                 }
-                c.text(mx, midline(cy, 12.5), text, &f.sans, 12.5, t.ink3, 0.0);
+                c.text(
+                    mx,
+                    midline(cy, EN_META_PLAIN),
+                    text,
+                    &f.sans,
+                    EN_META_PLAIN,
+                    t.ink3,
+                    0.0,
+                );
                 mx += w + 7.0;
                 previous_plain = true;
             }
@@ -1151,20 +1343,36 @@ fn draw_meta(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, meta
 }
 
 fn draw_bullets(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, bullets: &[Bullet]) {
-    let tw = cw - 20.0;
+    let tw = cw - BU_INDENT;
     let mut ry = y;
     for bullet in bullets {
         let mut cy = ry + 9.0;
-        c.circle_fill(x + 4.0, cy + 8.0, 3.0, t.accent.with_a(0.75));
+        c.circle_fill(x + 4.5, cy + 9.5, 3.5, t.accent.with_a(0.75));
         if !bullet.title.is_empty() {
-            for line in c.wrap(&bullet.title, &f.sans_b, 15.5, 0.0, tw, 2) {
-                c.text(x + 20.0, cy + 15.5, &line, &f.sans_b, 15.5, t.ink, 0.0);
+            for line in c.wrap(&bullet.title, &f.sans_b, FS_BULLET, 0.0, tw, 2) {
+                c.text(
+                    x + BU_INDENT,
+                    cy + FS_BULLET,
+                    &line,
+                    &f.sans_b,
+                    FS_BULLET,
+                    t.ink,
+                    0.0,
+                );
                 cy += BU_TITLE_LH;
             }
         }
         if !bullet.text.is_empty() {
-            for line in c.wrap(&bullet.text, &f.sans, 14.0, 0.0, tw, 4) {
-                c.text(x + 20.0, cy + 14.0, &line, &f.sans, 14.0, t.ink2, 0.0);
+            for line in c.wrap(&bullet.text, &f.sans, FS_BULLET_TEXT, 0.0, tw, 4) {
+                c.text(
+                    x + BU_INDENT,
+                    cy + FS_BULLET_TEXT,
+                    &line,
+                    &f.sans,
+                    FS_BULLET_TEXT,
+                    t.ink2,
+                    0.0,
+                );
                 cy += BU_TEXT_LH;
             }
         }
@@ -1180,58 +1388,63 @@ fn draw_cmds(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, cmds
         // 指令 chip：主色浅底 + 描边。指令是要被原样敲进输入框的字符串，
         // 所以单独成块；前缀与 <参数> 另着主色，一眼看出哪里可配、哪里得自己填。
         let cw_chip = chip_w(c, f, cmd, cw);
-        c.rrect_fill(x, cy, cw_chip, CMD_CHIP_H, 9.0, t.accent_soft);
-        c.rrect_stroke(x, cy, cw_chip, CMD_CHIP_H, 9.0, 1.0, t.accent.with_a(0.18));
-        let base = midline(cy + CMD_CHIP_H / 2.0, 18.0);
-        let mut px = x + 13.0;
-        if !cmd.prefix.is_empty() {
-            px += c.text(px, base, &cmd.prefix, &f.sans_b, 18.0, t.accent, 0.0);
-        }
-        for (seg, is_ph) in placeholder_runs(&cmd.cmd) {
-            let ink = if is_ph { t.accent } else { t.ink };
-            px += c.text(px, base, seg, &f.sans_b, 18.0, ink, 0.0);
+        let height = chip_h(c, f, cmd, cw);
+        c.rrect_fill(x, cy, cw_chip, height, 10.0, t.accent_soft);
+        c.rrect_stroke(x, cy, cw_chip, height, 10.0, 1.0, t.accent.with_a(0.18));
+        let colors: Vec<bool> = cmd
+            .prefix
+            .chars()
+            .map(|_| true)
+            .chain(
+                placeholder_runs(&cmd.cmd)
+                    .into_iter()
+                    .flat_map(|(s, ph)| s.chars().map(move |_| ph)),
+            )
+            .collect();
+        let mut offset = 0;
+        for (i, line) in chip_lines(c, f, cmd, cw).iter().enumerate() {
+            let base = midline(cy + CMD_CHIP_H / 2.0 + i as f32 * 30.0, FS_CMD);
+            let mut px = x + CHIP_PADX;
+            for ch in line.chars() {
+                let ink = if colors[offset] { t.accent } else { t.ink };
+                px += c.text(px, base, &ch.to_string(), &f.sans_b, FS_CMD, ink, 0.0);
+                offset += 1;
+            }
         }
         let inline = cmd_inline(c, f, cmd, cw);
         if inline {
             c.text(
                 x + cw_chip + 16.0,
-                midline(cy + CMD_CHIP_H / 2.0, 15.0),
+                midline(cy + CMD_CHIP_H / 2.0, FS_NOTE),
                 &cmd.note,
                 &f.sans,
-                15.0,
+                FS_NOTE,
                 t.ink2,
                 0.0,
             );
         }
-        cy += CMD_CHIP_H;
+        cy += height;
 
         if !cmd.note.is_empty() && !inline {
             cy += 7.0;
-            for line in c.wrap(&cmd.note, &f.sans, 15.0, 0.0, cw - 44.0, 3) {
-                c.text(x + 4.0, cy + 15.0, &line, &f.sans, 15.0, t.ink2, 0.0);
-                cy += 22.0;
+            for line in c.wrap(&cmd.note, &f.sans, FS_NOTE, 0.0, cw - 8.0, usize::MAX) {
+                c.text(x + 4.0, cy + FS_NOTE, &line, &f.sans, FS_NOTE, t.ink2, 0.0);
+                cy += LH_NOTE;
             }
         }
         if !cmd.aliases.is_empty() {
             cy += 8.0;
-            let mut ax = x + 4.0;
-            ax += c.text(
-                ax,
-                midline(cy + 11.0, 13.0),
-                "别名",
-                &f.sans,
-                13.0,
-                t.ink3,
-                0.0,
-            ) + 9.0;
-            for alias in &cmd.aliases {
-                let w = c.text_w(alias, &f.sans, 13.0, 0.0) + 16.0;
-                if ax + w > x + cw {
-                    break;
-                }
-                c.rrect_fill(ax, cy, w, 22.0, 6.0, t.surface);
-                c.text_center(ax + w / 2.0, cy + 11.0, alias, &f.sans, 13.0, t.ink2, 0.0);
-                ax += w + 8.0;
+            for line in alias_lines(c, f, cmd, cw) {
+                c.text(
+                    x + 4.0,
+                    midline(cy + ALIAS_H / 2.0, FS_ALIAS),
+                    &line,
+                    &f.sans,
+                    FS_ALIAS,
+                    t.ink2,
+                    0.0,
+                );
+                cy += ALIAS_H;
             }
         }
         ry += h;
@@ -1251,15 +1464,15 @@ fn draw_cmds(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, cmds
 
 fn draw_rows(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, rows: &[Row]) {
     for (i, row) in rows.iter().enumerate() {
-        let ry = y + i as f32 * 34.0;
-        let cy = ry + 17.0;
+        let ry = y + i as f32 * ROW_H;
+        let cy = ry + ROW_H / 2.0;
         if i % 2 == 1 {
             // 斑马纹：长清单里一行行看下去不串行
             c.rrect_fill(
                 x - 8.0,
                 ry,
                 cw + 16.0,
-                34.0,
+                ROW_H,
                 6.0,
                 t.surface.with_a(t.surface.a * 1.1),
             );
@@ -1269,29 +1482,37 @@ fn draw_rows(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, rows
         } else {
             t.border.with_a(0.45)
         };
-        c.rrect_fill(x, cy - 4.0, 8.0, 8.0, 2.0, dot);
-        let mut tx = x + 18.0;
+        c.rrect_fill(x, cy - 4.5, 9.0, 9.0, 2.5, dot);
+        let mut tx = x + 20.0;
         tx += c.text(
             tx,
-            midline(cy, 16.0),
+            midline(cy, FS_ROW),
             &row.main,
             &f.sans_b,
-            16.0,
+            FS_ROW,
             if row.on { t.ink } else { t.off },
             0.0,
         ) + 9.0;
         if !row.sub.is_empty() {
-            c.text(tx, midline(cy, 13.5), &row.sub, &f.sans, 13.5, t.ink3, 0.0);
+            c.text(
+                tx,
+                midline(cy, FS_ROW_SUB),
+                &row.sub,
+                &f.sans,
+                FS_ROW_SUB,
+                t.ink3,
+                0.0,
+            );
         }
         if !row.tail.is_empty() {
-            let w = c.text_w(&row.tail, &f.sans_b, 12.0, 0.0) + 16.0;
-            c.rrect_fill(x + cw - w, cy - 10.0, w, 20.0, 6.0, t.accent_soft);
+            let w = c.text_w(&row.tail, &f.sans_b, FS_TAIL, 0.0) + 18.0;
+            c.rrect_fill(x + cw - w, cy - 11.5, w, 23.0, 7.0, t.accent_soft);
             c.text_center(
                 x + cw - w / 2.0,
                 cy,
                 &row.tail,
                 &f.sans_b,
-                12.0,
+                FS_TAIL,
                 t.accent,
                 0.0,
             );
@@ -1302,15 +1523,15 @@ fn draw_rows(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, rows
 fn draw_code(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, lines: &[String]) {
     let wrapped: Vec<String> = lines
         .iter()
-        .flat_map(|l| c.wrap(l, &f.sans, 14.0, 0.0, cw - 36.0, 4))
+        .flat_map(|l| c.wrap(l, &f.sans, FS_CODE, 0.0, cw - 44.0, usize::MAX))
         .collect();
     let h = 14.0 + wrapped.len() as f32 * CODE_LH + 14.0;
     c.rrect_fill(x, y, cw, h, 10.0, t.surface.with_a(t.surface.a * 0.8));
     c.rrect_stroke(x, y, cw, h, 10.0, 1.0, t.border);
     c.rrect_fill(x, y + 12.0, 3.0, h - 24.0, 1.5, t.accent.with_a(0.45));
-    let mut ly = y + 14.0 + 14.5;
+    let mut ly = y + 14.0 + FS_CODE;
     for line in &wrapped {
-        draw_code_line(c, f, t, x + 20.0, ly, line);
+        draw_code_line(c, f, t, x + 22.0, ly, line);
         ly += CODE_LH;
     }
 }
@@ -1322,19 +1543,19 @@ fn draw_code(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, line
 fn draw_code_line(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, baseline: f32, line: &str) {
     let body = line.trim_start();
     if body.starts_with('[') {
-        c.text(x, baseline, line, &f.sans_b, 14.0, t.accent, 0.0);
+        c.text(x, baseline, line, &f.sans_b, FS_CODE, t.accent, 0.0);
         return;
     }
     // 只认第一个等号：值里再出现等号也不该被当成分隔
     match line.split_once(" = ") {
         Some((key, value)) => {
             let mut px = x;
-            px += c.text(px, baseline, key, &f.sans, 14.0, t.ink, 0.0);
-            px += c.text(px, baseline, " = ", &f.sans, 14.0, t.ink3, 0.0);
-            c.text(px, baseline, value, &f.sans, 14.0, t.ink2, 0.0);
+            px += c.text(px, baseline, key, &f.sans, FS_CODE, t.ink, 0.0);
+            px += c.text(px, baseline, " = ", &f.sans, FS_CODE, t.ink3, 0.0);
+            c.text(px, baseline, value, &f.sans, FS_CODE, t.ink2, 0.0);
         }
         None => {
-            c.text(x, baseline, line, &f.sans, 14.0, t.ink2, 0.0);
+            c.text(x, baseline, line, &f.sans, FS_CODE, t.ink2, 0.0);
         }
     }
 }
@@ -1348,25 +1569,25 @@ fn draw_tiles(c: &mut Canvas, f: &Fonts, t: &Theme, x: f32, y: f32, cw: f32, til
     let w = (cw - gap * (n - 1.0)) / n;
     for (i, tile) in tiles.iter().enumerate() {
         let tx = x + (w + gap) * i as f32;
-        c.rrect_fill(tx, y, w, 74.0, 12.0, t.surface);
-        c.rrect_stroke(tx, y, w, 74.0, 12.0, 1.0, t.border);
+        c.rrect_fill(tx, y, w, TILE_H, 12.0, t.surface);
+        c.rrect_stroke(tx, y, w, TILE_H, 12.0, 1.0, t.border);
         c.text_center(
             tx + w / 2.0,
-            y + 28.0,
+            y + 32.0,
             &tile.value,
             &f.sans_b,
-            26.0,
+            FS_TILE,
             t.ink,
             0.0,
         );
         c.text_center(
             tx + w / 2.0,
-            y + 55.0,
+            y + 61.0,
             &tile.label,
             &f.sans,
-            12.0,
+            FS_TILE_LABEL,
             t.ink3,
-            0.14 * 12.0,
+            0.14 * FS_TILE_LABEL,
         );
     }
 }
@@ -1384,35 +1605,45 @@ fn draw_callout(
     // 脚注不进框：它是「读不读都行」的一段，画上框就成了要读的一段
     if tone == Tone::Note {
         let mut ly = y - 2.0;
-        for line in c.wrap(text, &f.sans, 12.5, 0.0, cw, 4) {
-            c.text(x, ly + 12.5, &line, &f.sans, 12.5, t.ink3, 0.0);
-            ly += 19.0;
+        for line in c.wrap(text, &f.sans, FS_FOOTNOTE, 0.0, cw, 4) {
+            c.text(
+                x,
+                ly + FS_FOOTNOTE,
+                &line,
+                &f.sans,
+                FS_FOOTNOTE,
+                t.ink3,
+                0.0,
+            );
+            ly += LH_FOOTNOTE;
         }
         return;
     }
-    let inner = if tone == Tone::Empty {
-        cw - 48.0
-    } else {
-        cw - 44.0
-    };
-    let lines = c.wrap(text, &f.sans, 15.5, 0.0, inner, 6);
+    let lines = c.wrap(
+        text,
+        &f.sans,
+        FS_CALL,
+        0.0,
+        call_inner(tone, cw),
+        CALL_LINES,
+    );
     let h = 18.0 + lines.len() as f32 * CALL_LH + 18.0;
     match tone {
         Tone::Info => {
             c.rrect_fill(x, y, cw, h, 12.0, t.surface.with_a(t.surface.a * 0.9));
             c.rrect_stroke(x, y, cw, h, 12.0, 1.0, t.border);
             c.rrect_fill(x, y + 12.0, 3.0, h - 24.0, 1.5, t.accent);
-            let mut ly = y + 18.0 + 16.0;
+            let mut ly = y + 18.0 + FS_CALL;
             for line in &lines {
-                c.text(x + 22.0, ly, line, &f.sans, 15.5, t.ink2, 0.0);
+                c.text(x + 24.0, ly, line, &f.sans, FS_CALL, t.ink2, 0.0);
                 ly += CALL_LH;
             }
         }
         Tone::Empty => {
             c.dashed_rect(x, y, cw, h, 1.0, t.border, 6.0, 5.0);
-            let mut ly = y + 18.0 + 16.0;
+            let mut ly = y + 18.0 + FS_CALL;
             for line in &lines {
-                c.text_center(x + cw / 2.0, ly - 5.0, line, &f.sans, 15.5, t.ink3, 0.0);
+                c.text_center(x + cw / 2.0, ly - 5.0, line, &f.sans, FS_CALL, t.ink3, 0.0);
                 ly += CALL_LH;
             }
         }
@@ -1423,6 +1654,51 @@ fn draw_callout(
 #[cfg(test)]
 mod edge_tests {
     use super::*;
+
+    #[test]
+    fn long_commands_and_aliases_keep_every_parameter_at_readable_size() {
+        let Some(f) = Fonts::get() else {
+            return;
+        };
+        let cmd = Cmd {
+            prefix: "!!".into(),
+            cmd: "ctl set 插件名称 <很长的配置路径> [多个可选参数] ".repeat(5),
+            note: "说明内容".repeat(80),
+            aliases: vec!["/这是一个很长的别名".repeat(12), "/第二个别名".into()],
+        };
+        for scale in [1.0, 3.0] {
+            let c = Canvas::new(1.0, 1.0, scale);
+            let cw = 568.0;
+            let lines = chip_lines(&c, f, &cmd, cw);
+            assert_eq!(lines.concat(), format!("{}{}", cmd.prefix, cmd.cmd));
+            assert!(lines.len() > 2);
+            for line in lines {
+                assert!(c.text_w(&line, &f.sans_b, FS_CMD, 0.0) <= cw - CHIP_PADX * 2.0 + 0.1);
+            }
+            assert_eq!(
+                alias_lines(&c, f, &cmd, cw).concat(),
+                format!("别名  {}", cmd.aliases.join("  ·  "))
+            );
+            let note_h = c
+                .wrap(&cmd.note, &f.sans, FS_NOTE, 0.0, cw - 8.0, usize::MAX)
+                .len() as f32
+                * LH_NOTE;
+            assert!(cmd_h(&c, f, &cmd, cw) > chip_h(&c, f, &cmd, cw) + note_h);
+        }
+    }
+
+    #[test]
+    fn oversized_cards_fall_back_before_allocating_a_bitmap() {
+        let doc = Doc {
+            theme: Theme::graphite(),
+            width: 680.0,
+            kicker: String::new(),
+            blocks: vec![Block::Gap(1_000_000.0)],
+            foot: String::new(),
+            hint: (String::new(), String::new()),
+        };
+        assert!(render(&doc, 4.0).is_none());
+    }
 
     /// 出图不该在边上留下没画过的地方。
     ///

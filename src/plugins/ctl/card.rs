@@ -12,8 +12,9 @@
 use crate::plugins::help::needs_prefix;
 use crate::render::kit::{self, Block, Doc, Row, Theme, Tile, Tone};
 
-/// 控制面板版心：状态清单一行一个插件，不需要帮助总览那么宽
-const WIDTH: f32 = 800.0;
+/// 控制面板版心：状态清单一行一个插件，不需要帮助总览那么宽。
+/// 收窄到 680 是为了读得清——同一个字号，版心越窄，在手机上看到的字就越大。
+const WIDTH: f32 = 680.0;
 
 /// 一张待渲染的控制卡
 pub struct Card(Doc);
@@ -276,6 +277,10 @@ mod tests {
                 .expect("应是合法 base64");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{name} 应是 PNG");
             std::fs::write(format!("{dir}/{name}.png"), &bytes).unwrap();
+            // 同时查看手机宽度的预览，避免只看高分辨率原图误判字号。
+            let img = image::load_from_memory(&bytes).unwrap();
+            img.resize(420, u32::MAX, image::imageops::FilterType::Lanczos3)
+                .save(format!("{dir}/{name}_phone.png")).unwrap();
             println!("{name} 出图 {} 字节", bytes.len());
         }
     }

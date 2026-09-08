@@ -18,7 +18,8 @@ assert(plugins.includes('ctl') && plugins.includes('help'));
 const configPath = path.join(temporary, 'config.toml');
 fs.writeFileSync(configPath,
   'command_prefix = ["/"]\n[[bots]]\nenabled = false\nprotocol = "console"\n' +
-  plugins.map(name => `[${name}]\nenabled = ${['ctl', 'help'].includes(name)}\n`).join(''));
+  plugins.map(name => `[${name}]\nenabled = ${['ctl', 'help'].includes(name)}\n` +
+    (name === 'ctl' ? 'image_enabled = false\n' : '')).join(''));
 const child = spawn(launcher, ['start'], {
   cwd: temporary, stdio: ['pipe', 'pipe', 'pipe'],
   env: { ...process.env, AYJX_WAKE_LOCK: '0' },
@@ -30,14 +31,16 @@ const exited = new Promise((resolve, reject) => {
   child.once('error', reject);
   child.once('exit', (code, signal) => resolve({ code, signal }));
 });
+// 出错时只显示诊断文字，避免把整张图片的 base64 倾倒进日志。
+const readableOutput = () => output.replace(/base64[^"<>\s]+/g, '[image data omitted]');
 async function until(predicate, description, milliseconds = 12000) {
   const end = Date.now() + milliseconds;
   while (Date.now() < end) {
     if (predicate()) return;
-    if (child.exitCode !== null) throw new Error(`Premature exit while waiting for ${description}\n${output}`);
+    if (child.exitCode !== null) throw new Error(`Premature exit while waiting for ${description}\n${readableOutput()}`);
     await new Promise(resolve => setTimeout(resolve, 40));
   }
-  throw new Error(`Timeout: ${description}\n${output}`);
+  throw new Error(`Timeout: ${description}\n${readableOutput()}`);
 }
 async function main() {
   await until(() => output.includes('前台控制台已就绪'), 'console ready');
@@ -63,6 +66,13 @@ async function main() {
   const previousReplies = (output.match(/\[Bot Reply\]/g) || []).length;
   child.stdin.write('/help ctl\n');
   await until(() => (output.match(/\[Bot Reply\]/g) || []).length > previousReplies, 'image help or text fallback', 25000);
+  // 列表的文本测试显式关闭图片；这里再验证真实 ctl 原生出图。
+  child.stdin.write('/ctl set ctl image_enabled 开\n');
+  await until(() => output.includes('已保存 ctl.image_enabled'), 'enable control images');
+  const imageStart = output.length;
+  child.stdin.write('/ctl list\n');
+  await until(() => /base64(?:,|:\/\/)iVBOR/.test(output.slice(imageStart)), 'native control PNG', 25000);
+  assert(!output.slice(imageStart).includes('插件状态（全局配置）'), 'control should render a PNG');
   const stopping = Date.now();
   // Leave stdin open to catch blocking-stdin shutdown regressions.
   const stop = spawnSync(launcher, ['stop'], { encoding: 'utf8', timeout: 8000 });

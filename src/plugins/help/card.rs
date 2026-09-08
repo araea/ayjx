@@ -11,17 +11,19 @@
 //! 翻译成 [`Block`] 序列。新增一个插件不必碰这个文件；新增一种版式也只需在
 //! kit 里加一种 Block，帮助与控制台同时受益。
 //!
-//! 版心按「群聊里先看缩略图、再点开看」定：总览 880px（双栏），
-//! 详情 760px（单栏，指令行不折行）；配合 `image_scale`（默认 3 倍）出图。
+//! 版心按「群聊里先看缩略图、再点开看」定：总览 720px（双栏），
+//! 详情 680px（单栏，长指令自动换行）；配合 `image_scale`（默认 3 倍）出图。
+//! 两个宽度都比字号那一版收了一档——图进了聊天窗会被缩到屏宽的六七成，
+//! 版心窄一点，等于同一个字号在屏幕上大一点，这比单纯调大字号更划算。
 
 use super::{Entry, Group, needs_prefix};
 use crate::plugins::Cmd;
 use crate::render::kit::{self, Block, Doc, Item, Theme, Tone};
 
 /// 总览版心宽度（双栏）
-const OVERVIEW_WIDTH: f32 = 880.0;
-/// 详情版心宽度（单栏，指令行要能一行放下）
-const DETAIL_WIDTH: f32 = 760.0;
+const OVERVIEW_WIDTH: f32 = 720.0;
+/// 详情版心宽度（单栏，长指令自动换行）
+const DETAIL_WIDTH: f32 = 680.0;
 
 /// `"收 / 偷 / 存表情"` → 主指令 + 别名。清单里的别名用 ` / ` 分隔，
 /// 图里把第一个抬成主指令，其余降级成小字，避免一行挤三个同义词。
@@ -215,6 +217,8 @@ mod tests {
 
         let ai = get_plugins().iter().find(|p| p.name == "ai_news").unwrap();
         let bg = get_plugins().iter().find(|p| p.name == "repeater").unwrap();
+        // oai 有全表最长的一条指令，样张顺带盯住「指令 chip 会不会顶出版心」
+        let wide = get_plugins().iter().find(|p| p.name == "oai").unwrap();
         let entry = |p: &'static crate::plugins::Plugin, on| Entry {
             display: p.display_name,
             name: p.name,
@@ -226,6 +230,7 @@ mod tests {
             ("overview", overview(&groups, "/")),
             ("detail_ai_news", detail(&entry(ai, true), ai.commands, "/")),
             ("detail_background", detail(&entry(bg, false), bg.commands, "/")),
+            ("detail_widest", detail(&entry(wide, true), wide.commands, "/")),
         ];
         for (name, card) in cases {
             let b64 = card.render(3.0).expect("字体可用时应当出图");
@@ -233,6 +238,10 @@ mod tests {
                 .expect("应是合法 base64");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{name} 应是 PNG");
             std::fs::write(format!("{dir}/{name}.png"), &bytes).unwrap();
+            // 同时查看手机宽度的预览，避免只看高分辨率原图误判字号。
+            let img = image::load_from_memory(&bytes).unwrap();
+            img.resize(420, u32::MAX, image::imageops::FilterType::Lanczos3)
+                .save(format!("{dir}/{name}_phone.png")).unwrap();
             println!("{name} 出图 {} 字节", bytes.len());
         }
     }

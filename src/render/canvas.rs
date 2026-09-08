@@ -13,7 +13,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::font::Face;
-use ab_glyph::{Font, PxScale, ScaleFont, point};
+use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use image::{Rgba, RgbaImage};
 
 /// 带透明度的颜色。最终都往不透明底上 over 混合。
@@ -434,15 +434,25 @@ impl Canvas {
 
     // ================= 文字 =================
 
+    /// 字号按 em 像素解释，与 CSS font-size 一致。ab_glyph 的 PxScale 是
+    /// ascent - descent，直接传字号会把 CJK 字面缩小。逐字体换算也让回退字形等大。
+    fn font_scale(&self, font: &FontVec, px: f32) -> PxScale {
+        let em = font
+            .units_per_em()
+            .unwrap_or_else(|| font.height_unscaled());
+        PxScale::from(px * self.s * font.height_unscaled() / em)
+    }
+
     /// 单个字符的步进宽度（逻辑像素）。缺字时按首选字体的 `.notdef` 步进，
     /// 保证「画不出来」与「量出来的宽度」一致，版式不会错位。
     fn advance(&self, face: &Face, ch: char, px: f32) -> f32 {
-        let scale = PxScale::from(px * self.s);
         match face.glyph(ch) {
-            Some((font, gid)) => font.as_scaled(scale).h_advance(gid) / self.s,
+            Some((font, gid)) => font.as_scaled(self.font_scale(font, px)).h_advance(gid) / self.s,
             None => {
                 let font = face.primary();
-                font.as_scaled(scale).h_advance(font.glyph_id(ch)) / self.s
+                font.as_scaled(self.font_scale(font, px))
+                    .h_advance(font.glyph_id(ch))
+                    / self.s
             }
         }
     }
@@ -462,7 +472,9 @@ impl Canvas {
 
     /// 文字行高（逻辑像素）
     pub fn text_h(&self, face: &Face, px: f32) -> f32 {
-        let sc = face.primary().as_scaled(PxScale::from(px * self.s));
+        let sc = face
+            .primary()
+            .as_scaled(self.font_scale(face.primary(), px));
         (sc.ascent() - sc.descent()) / self.s
     }
 
@@ -478,13 +490,13 @@ impl Canvas {
         spacing: f32,
     ) -> f32 {
         let s = self.s;
-        let scale = PxScale::from(px * s);
         let gamma = self.text_gamma;
         let mut pen = x * s;
         for ch in text.chars() {
             // 缺字则整字跳过（不画豆腐块），但仍按度量步进
             if let Some((font, gid)) = face.glyph(ch) {
-                let glyph = gid.with_scale_and_position(scale, point(pen, baseline * s));
+                let glyph = gid
+                    .with_scale_and_position(self.font_scale(font, px), point(pen, baseline * s));
                 if let Some(og) = font.outline_glyph(glyph) {
                     let b = og.px_bounds();
                     let (bx, by) = (b.min.x as i32, b.min.y as i32);
@@ -511,7 +523,9 @@ impl Canvas {
         spacing: f32,
     ) {
         let w = self.text_w(text, face, px, spacing);
-        let sc = face.primary().as_scaled(PxScale::from(px * self.s));
+        let sc = face
+            .primary()
+            .as_scaled(self.font_scale(face.primary(), px));
         // top = cy - 行高/2；baseline = top + ascent（均换算回逻辑像素）
         let baseline = cy - (sc.ascent() - sc.descent()) / 2.0 / self.s + sc.ascent() / self.s;
         self.text(cx - w / 2.0, baseline, text, face, px, ink, spacing);
@@ -559,13 +573,13 @@ impl Canvas {
         spacing: f32,
     ) -> Option<(f32, f32, f32, f32)> {
         let s = self.s;
-        let scale = PxScale::from(px * s);
         let mut pen = 0.0f32;
         let mut acc: Option<(f32, f32, f32, f32)> = None;
         for ch in text.chars() {
             if let Some((font, gid)) = face.glyph(ch)
-                && let Some(og) =
-                    font.outline_glyph(gid.with_scale_and_position(scale, point(pen, 0.0)))
+                && let Some(og) = font.outline_glyph(
+                    gid.with_scale_and_position(self.font_scale(font, px), point(pen, 0.0)),
+                )
             {
                 let b = og.px_bounds();
                 acc = Some(match acc {
@@ -692,6 +706,17 @@ impl Canvas {
         let n = cur.len();
         // 避头点：下一行不能以这些标点开头，把行末字符一起带下去
         if NO_LINE_START.contains(&next) && n > 1 {
+            // 拉丁单词连同标点一起移到下一行，不能把 API、 配成 AP / I、。
+            if cur[n - 1].is_ascii_alphanumeric() {
+                let start = cur
+                    .iter()
+                    .rposition(|ch| !ch.is_ascii_alphanumeric())
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                if start > 0 && start < n {
+                    return start;
+                }
+            }
             return n - 1;
         }
         // 避尾点：本行不能以开括号/开引号结尾
@@ -791,5 +816,40 @@ impl Canvas {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .ok()?;
         Some(STANDARD.encode(png))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::Fonts;
+
+    #[test]
+    fn punctuation_does_not_split_the_last_letter_off_a_latin_word() {
+        let Some(f) = Fonts::get() else {
+            return;
+        };
+        let c = Canvas::new(1.0, 1.0, 1.0);
+        let width = c.text_w("中文 API", &f.sans, 20.0, 0.0) + 1.0;
+        let lines = c.wrap("中文 API、说明", &f.sans, 20.0, 0.0, width, usize::MAX);
+        assert_eq!(lines.concat(), "中文 API、说明");
+        assert!(lines.iter().any(|line| line.contains("API、")), "{lines:?}");
+    }
+
+    #[test]
+    fn cjk_font_size_is_em_pixels_at_every_output_scale() {
+        let Some(f) = Fonts::get() else {
+            return;
+        };
+        for scale in [1.0, 1.5, 3.0, 4.0] {
+            let c = Canvas::new(1.0, 1.0, scale);
+            let width = c.text_w("中文阅读", &f.sans, 24.0, 0.0);
+            assert!(
+                (width - 96.0).abs() < 1.0,
+                "24px CJK should occupy four em: {width}"
+            );
+            let lines = c.wrap("中文阅读体验", &f.sans, 24.0, 0.0, 97.0, usize::MAX);
+            assert_eq!(lines, ["中文阅读", "体验"]);
+        }
     }
 }
