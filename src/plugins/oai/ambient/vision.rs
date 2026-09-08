@@ -32,11 +32,7 @@ pub(crate) async fn usable_images(turns: &[Turn], limit: usize) -> Vec<String> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    for url in turns
-        .iter()
-        .rev()
-        .flat_map(|turn| turn.images.iter().rev())
-    {
+    for url in turns.iter().rev().flat_map(|turn| turn.images.iter().rev()) {
         let data_url = super::super::logic::to_data_url(url).await;
         if let Some(usable) = normalize(&data_url) {
             out.push(usable);

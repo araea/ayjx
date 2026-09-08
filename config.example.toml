@@ -44,13 +44,18 @@ reply_model = "apilio/gemini-3.8-flash"
 thinking = "low"
 # 发言时开放给 pi 的工具白名单；去掉 bash 即禁止群聊触发命令执行。
 tools = "read,bash,web_search,fetch_content,get_search_content"
-# 开口意愿分门槛，调高更沉默；门槛随沉默时长下移，见 docs/ambient.md。
+# 开口意愿分门槛，调高更沉默；关注中的自然续聊另行判断，见 docs/ambient.md。
 score_threshold = 45
-silence_relief_per_10min = 5
-silence_relief_cap = 20
-# 两次发言的最短间隔与每小时上限。
-cooldown_seconds = 90
-hourly_limit = 12
+# 默认不因沉默而强行降低门槛。
+silence_relief_per_10min = 0
+silence_relief_cap = 0
+# 节奏交给人格；旧的硬冷却/每小时上限仍可显式开启，0 关闭。
+cooldown_seconds = 0
+hourly_limit = 0
+# 人格可选择短期跟进某位群友或话题，并在互动中续期。
+focus_max_seconds = 300
+debounce_seconds = 3
+max_wait_seconds = 12
 # 打字速度（字/分钟），调低更像在慢慢敲。
 typing_cpm = 150
 

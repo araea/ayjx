@@ -58,8 +58,8 @@ pub(crate) fn parse(raw: &str, max_messages: usize) -> Speech {
         }
         if let Some(caps) = action().captures(line) {
             if let Some(seconds) = caps.get(3) {
-                pending_wait =
-                    (pending_wait + seconds.as_str().parse::<f32>().unwrap_or(0.0)).min(MAX_WAIT_SECONDS);
+                pending_wait = (pending_wait + seconds.as_str().parse::<f32>().unwrap_or(0.0))
+                    .min(MAX_WAIT_SECONDS);
                 continue;
             }
             if out.len() >= max_messages {
@@ -231,7 +231,10 @@ mod tests {
     fn each_line_becomes_a_message_and_extra_lines_are_dropped() {
         let items = say("你确定？\n- 那你重读第二段\n第三条\n第四条");
         assert_eq!(items.len(), 3);
-        assert_eq!(items[1].message.0[0].data.get("text").unwrap(), "那你重读第二段");
+        assert_eq!(
+            items[1].message.0[0].data.get("text").unwrap(),
+            "那你重读第二段"
+        );
         assert!(items.iter().all(|item| !item.reply));
     }
 

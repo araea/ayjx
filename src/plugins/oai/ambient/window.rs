@@ -8,6 +8,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use super::attention::Focus;
+
 /// 每个群保留的消息条数上限。取值比 `context_turns` 宽一些，
 /// 好让配置调大时不必等窗口重新攒满。
 const WINDOW_CAPACITY: usize = 80;
@@ -36,9 +38,10 @@ pub(crate) struct GroupState {
     /// 收到消息就自增，防抖任务据此判断「还在刷屏」。
     pub seq: u64,
     /// 已经有一个防抖任务在等这个群。
-    pub pending: bool,
-    /// 正在判定或正在发言。
-    pub speaking: bool,
+    pub running: bool,
+    /// 只消费本批次的点名；人格选择沉默后不反复拿旧 @ 强制唤醒。
+    unread_mention: bool,
+    pub focus: Option<Focus>,
     /// 最近一次发言时刻。
     pub last_spoke: Option<Instant>,
     /// 近期发言时刻，用于每小时上限。
@@ -63,19 +66,83 @@ impl GroupState {
     }
 
     /// 窗口里最后一条消息是不是自己说的——自言自语要及时打住。
-    pub(crate) fn last_is_mine(&self) -> bool {
+    #[cfg(test)]
+    fn last_is_mine(&self) -> bool {
         self.turns.back().is_some_and(|turn| turn.from_me)
     }
 
-    /// 自己上次说话之后，有没有人 @ 过自己。
-    ///
-    /// 只看最后一次自己发言之后的消息：三小时前那句「@你」早就不需要回了。
-    pub(crate) fn mentioned_since_my_last(&self) -> bool {
-        self.turns
-            .iter()
-            .rev()
-            .take_while(|turn| !turn.from_me)
-            .any(|turn| turn.mentions_me)
+    /// 收消息与占用 worker 必须在同一把锁下完成，避免交接时漏消息。
+    pub(crate) fn receive(&mut self, turn: Turn) -> bool {
+        if turn.message_id != 0
+            && self
+                .turns
+                .iter()
+                .any(|old| old.message_id == turn.message_id)
+        {
+            return false;
+        }
+        let incoming = !turn.from_me;
+        if incoming {
+            self.seq += 1;
+            self.unread_mention |= turn.mentions_me;
+        }
+        self.push(turn);
+        if !incoming || self.running {
+            return false;
+        }
+        self.running = true;
+        true
+    }
+
+    pub(crate) fn take_mention(&mut self) -> bool {
+        std::mem::take(&mut self.unread_mention)
+    }
+
+    /// 新消息即使出现在模型执行或发送期间，也由同一 worker 接着处理。
+    pub(crate) fn finish_batch(&mut self, processed: u64) -> bool {
+        if self.seq != processed {
+            true
+        } else {
+            self.running = false;
+            false
+        }
+    }
+
+    pub(crate) fn active_focus(&self) -> Option<&Focus> {
+        self.focus
+            .as_ref()
+            .filter(|focus| focus.until > Instant::now())
+    }
+
+    pub(crate) fn rhythm(&mut self) -> String {
+        let count = self.spoken_last_hour();
+        let since = self.last_spoke.map_or("尚未发言".to_string(), |at| {
+            format!("{} 秒前发过言", at.elapsed().as_secs())
+        });
+        let focus = self
+            .active_focus()
+            .map_or("无，按兴趣旁观".to_string(), |focus| {
+                format!(
+                    "群友 {:?}；话题 {}；还关注 {} 秒",
+                    focus.users,
+                    focus.topic,
+                    focus
+                        .until
+                        .saturating_duration_since(Instant::now())
+                        .as_secs()
+                )
+            });
+        format!(
+            "你{since}，近一小时发言 {count} 轮。当前关注：{focus}。关注不等于必须回复；只接有新意且还在继续的对话。"
+        )
+    }
+
+    pub(crate) fn is_own_message(&self, id: i64) -> bool {
+        id != 0
+            && self
+                .turns
+                .iter()
+                .any(|turn| turn.from_me && turn.message_id == id)
     }
 
     /// 记一次发言，同时淘汰一小时之前的记录。
@@ -149,6 +216,7 @@ pub(crate) fn with_group<T>(group_id: i64, action: impl FnOnce(&mut GroupState) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn turn(text: &str, from_me: bool) -> Turn {
         Turn {
@@ -179,18 +247,42 @@ mod tests {
     }
 
     #[test]
-    fn mentions_only_count_after_my_last_words() {
+    fn worker_drains_messages_arriving_during_a_reply_and_consumes_mentions_once() {
         let mut state = GroupState::default();
-        let mut old_mention = turn("在吗", false);
-        old_mention.mentions_me = true;
-        state.push(old_mention);
-        assert!(state.mentioned_since_my_last());
-        state.push(turn("嗯", true));
-        assert!(!state.mentioned_since_my_last());
-        let mut fresh = turn("再问一次", false);
-        fresh.mentions_me = true;
-        state.push(fresh);
-        assert!(state.mentioned_since_my_last());
+        let mut first = turn("在吗", false);
+        first.mentions_me = true;
+        assert!(state.receive(first));
+        assert!(state.take_mention());
+        let snapshot = state.seq;
+        let mut second = turn("接着聊", false);
+        second.message_id = 2;
+        assert!(!state.receive(second.clone()));
+        assert!(!state.receive(second)); // 重复事件不唤醒
+        assert_eq!(state.seq, snapshot + 1);
+        state.push(turn("刚生成的回复", true));
+        assert!(state.last_is_mine());
+        assert!(state.finish_batch(snapshot)); // 即使自己的回填在最后，也不能漏掉新消息
+        assert!(!state.take_mention());
+        assert!(!state.finish_batch(state.seq));
+        assert!(!state.running);
+        let mut third = turn("新一轮", false);
+        third.message_id = 3;
+        assert!(state.receive(third));
+    }
+
+    #[test]
+    fn focus_expires_and_never_wakes_itself() {
+        let mut state = GroupState::default();
+        state.focus = Some(Focus {
+            users: vec![1],
+            topic: "游戏".into(),
+            until: Instant::now() + Duration::from_secs(30),
+        });
+        assert!(state.active_focus().is_some());
+        assert!(!state.running);
+        state.focus.as_mut().unwrap().until = Instant::now() - Duration::from_secs(1);
+        assert!(state.active_focus().is_none());
+        assert!(state.rhythm().contains("无，按兴趣旁观"));
     }
 
     #[test]

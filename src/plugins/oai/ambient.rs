@@ -12,7 +12,7 @@
 //! 判定与措辞分开，是因为它们的成本和失败方式都不一样：判定要便宜、要多、
 //! 要能看图；措辞要慢、要少、要有工具。合成一次调用就只能两头将就。
 
-use crate::adapters::satori::{LockedWriter, send_msg};
+use crate::adapters::satori::{LockedWriter, send_msg_id};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod attention;
 mod gate;
+#[cfg(test)]
+#[path = "ambient/tests.rs"]
+mod integration_tests;
 mod pace;
 mod speak;
 mod vision;
@@ -67,9 +71,11 @@ pub(crate) struct AmbientConfig {
     pub debounce_seconds: u64,
     /// 从第一条消息算起最多等多久就必须判定一次。
     pub max_wait_seconds: u64,
-    /// 两次发言之间的最短间隔；被 @ 时不受此限。
+    /// 可选硬冷却；0 关闭，被点名或正在继续感兴趣的对话时不受限。
     pub cooldown_seconds: u64,
-    /// 每个群每小时的发言上限。
+    /// 人格一次最多关注多少秒；0 关闭，最多 600 秒，可随互动续期。
+    pub focus_max_seconds: u64,
+    /// 每群每小时的可选发言上限；0 关闭。
     pub hourly_limit: usize,
     /// 被 @ 或被引用时跳过判定直接开口。
     pub reply_on_mention: bool,
@@ -97,14 +103,15 @@ impl Default for AmbientConfig {
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
             score_threshold: 45,
-            silence_relief_per_10min: 5,
-            silence_relief_cap: 20,
+            silence_relief_per_10min: 0,
+            silence_relief_cap: 0,
             context_turns: 20,
             context_images: 2,
-            debounce_seconds: 5,
-            max_wait_seconds: 30,
-            cooldown_seconds: 90,
-            hourly_limit: 12,
+            debounce_seconds: 3,
+            max_wait_seconds: 12,
+            cooldown_seconds: 0,
+            focus_max_seconds: 300,
+            hourly_limit: 0,
             reply_on_mention: true,
             max_messages: 3,
             typing_cpm: 150,
@@ -122,7 +129,7 @@ impl AmbientConfig {
     }
 
     fn max_wait(&self) -> Duration {
-        Duration::from_secs(self.max_wait_seconds.clamp(self.debounce_seconds.max(1), 600))
+        Duration::from_secs(self.max_wait_seconds.clamp(self.debounce().as_secs(), 600))
     }
 
     fn cooldown(&self) -> Duration {
@@ -137,12 +144,11 @@ impl AmbientConfig {
         Duration::from_secs(self.reply_timeout_seconds.clamp(30, 1_800))
     }
 
-    /// 沉默越久，门槛越低。
-    ///
-    /// 固定门槛下的人格只有两种结局：要么天天说话，要么再也不说话——因为群聊的
-    /// 话题分布是稳定的，而门槛不动。让门槛随沉默时间缓慢下移，「大多数时候不说话，
-    /// 偶尔接一句」才成为一种可以自己维持的节奏，而不是一句写在提示词里的愿望。
+    /// 可选的旧版沉默补偿；默认关闭，不为刷存在感降低人格的兴趣门槛。
     fn effective_threshold(&self, silent_for: Option<Duration>) -> u8 {
+        if self.silence_relief_per_10min == 0 {
+            return self.score_threshold;
+        }
         let minutes = silent_for.map_or(f64::INFINITY, |elapsed| elapsed.as_secs_f64() / 60.0);
         let relief = (minutes / 10.0 * f64::from(self.silence_relief_per_10min))
             .min(f64::from(self.silence_relief_cap));
@@ -205,22 +211,30 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     };
 
     let me = ctx.bot.login_user.id.parse::<i64>().unwrap_or_default();
-    let turn = build_turn(&event, me);
+    let mut turn = build_turn(&event, me);
+    turn.mentions_me |= window::with_group(group, |state| {
+        event.0.get_array("message").is_some_and(|segments| {
+            segments.iter().any(|segment| {
+                segment.get_str("type") == Some("reply")
+                    && segment
+                        .get("data")
+                        .and_then(|data| {
+                            data.get_str("id")
+                                .and_then(|id| id.parse::<i64>().ok())
+                                .or_else(|| data.get_i64("id"))
+                        })
+                        .is_some_and(|id| state.is_own_message(id))
+            })
+        })
+    });
     // 指令是说给机器人听的，不是群聊内容；记下来只会让人格模型学着复述指令。
     let is_command = crate::command::get_prefixes(ctx)
         .iter()
         .any(|prefix| !prefix.is_empty() && turn.text.starts_with(prefix.as_str()));
-    let worth_waking = !turn.from_me && !is_command && !(turn.text.is_empty() && turn.images.is_empty());
-
-    let start = window::with_group(group, |state| {
-        state.push(turn);
-        state.seq += 1;
-        if !worth_waking || state.pending || state.speaking {
-            return false;
-        }
-        state.pending = true;
-        true
-    });
+    if is_command || (turn.text.is_empty() && turn.images.is_empty()) {
+        return;
+    }
+    let start = window::with_group(group, |state| state.receive(turn));
     if !start {
         return;
     }
@@ -229,7 +243,7 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     let writer = writer.clone();
     let mgr = mgr.clone();
     tokio::spawn(async move {
-        if let Err(error) = consider(&ctx, &writer, &mgr, group, config).await {
+        if let Err(error) = consider(&ctx, &writer, &mgr, group).await {
             warn!(target: LOG_TARGET, "群 {group} 搭话失败：{error:#}");
         }
     });
@@ -291,67 +305,110 @@ fn build_turn(event: &MessageEvent<'_>, me: i64) -> Turn {
         message_id: event.message_id(),
         mentions_me,
         from_me: event.user_id() == me && me != 0,
-        at: event.0.get_i64("time").unwrap_or_else(|| chrono::Local::now().timestamp()),
+        at: event
+            .0
+            .get_i64("time")
+            .unwrap_or_else(|| chrono::Local::now().timestamp()),
     }
 }
 
-/// 正在判定/发言的标记；无论中途怎么退出都要还原，否则这个群从此闭嘴。
-struct Speaking(i64);
-impl Drop for Speaking {
+/// 取消/异常时释放 worker；正常交接已在锁内完成，不能再清掉新 worker 的标记。
+struct Worker {
+    group: i64,
+    armed: bool,
+}
+impl Drop for Worker {
     fn drop(&mut self) {
-        window::with_group(self.0, |state| state.speaking = false);
+        if self.armed {
+            window::with_group(self.group, |state| state.running = false);
+        }
     }
 }
 
-/// 等群安静下来，判定，然后决定说不说话。
 async fn consider(
     ctx: &Context,
     writer: &LockedWriter,
     mgr: &Arc<super::data::Manager>,
     group: i64,
-    config: AmbientConfig,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + config.max_wait();
+    let mut worker = Worker { group, armed: true };
     loop {
-        let before = window::with_group(group, |state| state.seq);
-        tokio::time::sleep(config.debounce()).await;
-        let after = window::with_group(group, |state| state.seq);
-        if before == after || Instant::now() >= deadline {
-            break;
+        let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+        let config = oai.ambient;
+        if config.focus_max_seconds == 0 {
+            window::with_group(group, |state| state.focus = None);
+        }
+        if !oai.enabled || !config.enabled || !config.groups.contains(&group) {
+            return Ok(());
+        }
+        let deadline = Instant::now() + config.max_wait();
+        loop {
+            let before = window::with_group(group, |state| state.seq);
+            let delay = window::with_group(group, |state| {
+                if state.active_focus().is_some() {
+                    config.debounce().min(Duration::from_secs(1))
+                } else {
+                    config.debounce()
+                }
+            });
+            tokio::time::sleep(delay.min(deadline.saturating_duration_since(Instant::now()))).await;
+            let after = window::with_group(group, |state| state.seq);
+            if before == after || Instant::now() >= deadline {
+                break;
+            }
+        }
+        let (mut seq, turns, mentioned, silent_for, rhythm, focused, capped) =
+            window::with_group(group, |state| {
+                let mentioned = state.take_mention() && config.reply_on_mention;
+                let capped =
+                    config.hourly_limit > 0 && state.spoken_last_hour() >= config.hourly_limit;
+                (
+                    state.seq,
+                    state.recent(config.context_turns.clamp(1, 80)),
+                    mentioned,
+                    state.last_spoke.map(|last| last.elapsed()),
+                    state.rhythm(),
+                    state.active_focus().is_some(),
+                    capped,
+                )
+            });
+        if !capped
+            && let Err(error) = consider_batch(
+                ctx, writer, mgr, group, &config, &mut seq, &turns, mentioned, silent_for, &rhythm,
+                focused,
+            )
+            .await
+        {
+            warn!(target: LOG_TARGET, "群 {group} 搭话失败：{error:#}");
+        }
+        if !window::with_group(group, |state| state.finish_batch(seq)) {
+            worker.armed = false;
+            return Ok(());
         }
     }
+}
 
-    let Some((turns, mentioned, silent_for)) = window::with_group(group, |state| {
-        state.pending = false;
-        if state.speaking {
-            return None;
-        }
-        // 自己是最后一个说话的人：没人接话就不该再自说自话。
-        if state.last_is_mine() {
-            return None;
-        }
-        let mentioned = config.reply_on_mention && state.mentioned_since_my_last();
-        if state.spoken_last_hour() >= config.hourly_limit {
-            return None;
-        }
-        if !mentioned
-            && state
-                .last_spoke
-                .is_some_and(|last| last.elapsed() < config.cooldown())
-        {
-            return None;
-        }
-        state.speaking = true;
-        let silent_for = state.last_spoke.map(|last| last.elapsed());
-        Some((state.recent(config.context_turns), mentioned, silent_for))
-    }) else {
-        return Ok(());
-    };
-    let _speaking = Speaking(group);
-
+#[allow(clippy::too_many_arguments)]
+async fn consider_batch(
+    ctx: &Context,
+    writer: &LockedWriter,
+    mgr: &Arc<super::data::Manager>,
+    group: i64,
+    config: &AmbientConfig,
+    seq: &mut u64,
+    turns: &[Turn],
+    mentioned: bool,
+    silent_for: Option<Duration>,
+    rhythm: &str,
+    focused: bool,
+) -> anyhow::Result<()> {
     if turns.is_empty() {
         return Ok(());
     }
+    let data_dir = mgr.path.parent().unwrap_or(&mgr.path);
+    let persona = tokio::fs::read_to_string(persona_path(data_dir))
+        .await
+        .unwrap_or_else(|_| PERSONA.to_string());
     if !mentioned {
         let (api_base, api_key) = {
             let config = mgr.config.read().await;
@@ -361,25 +418,42 @@ async fn consider(
             anyhow::bail!("判定模型需要 API 配置，请先设置 oai 的接口地址与密钥");
         }
         let threshold = config.effective_threshold(silent_for);
-        let verdict = gate::judge(&api_base, &api_key, &config, &turns).await?;
-        if verdict.score < threshold {
-            debug!(
-                target: LOG_TARGET,
-                "群 {group} 保持沉默（{}/{}，{}）",
-                verdict.score, threshold, verdict.reason
-            );
+        let verdict =
+            gate::judge(&api_base, &api_key, config, turns, &persona, rhythm, None).await?;
+        if !verdict.wants_composition(threshold, focused, silent_for, config.cooldown()) {
+            debug!(target: LOG_TARGET, "群 {group} 保持沉默（{}/{}，{}）", verdict.score, threshold, verdict.reason);
             return Ok(());
         }
-        info!(
-            target: LOG_TARGET,
-            "群 {group} 决定开口（{}/{}，{}）",
-            verdict.score, threshold, verdict.reason
-        );
+        info!(target: LOG_TARGET, "群 {group} 交给人格决定（{}/{}，续聊={}，{}）",
+            verdict.score, threshold, verdict.continuation, verdict.reason);
     } else {
-        info!(target: LOG_TARGET, "群 {group} 被点名，直接开口");
+        info!(target: LOG_TARGET, "群 {group} 被点名，由人格决定是否回应");
     }
+    // 判定之后重新取最新窗口，群友连续发几条消息不必从头再筛一遍。
+    let (latest, mentioned, rhythm) = window::with_group(group, |state| {
+        *seq = state.seq;
+        (
+            state.recent(config.context_turns.clamp(1, 80)),
+            (state.take_mention() && config.reply_on_mention) || mentioned,
+            state.rhythm(),
+        )
+    });
+    if !current(ctx, group, *seq) {
+        return Ok(());
+    }
+    speak_up(
+        ctx, writer, mgr, group, config, &latest, mentioned, &persona, &rhythm, seq,
+    )
+    .await
+}
 
-    speak_up(ctx, writer, mgr, group, &config, &turns, mentioned).await
+/// 停用配置或群聊推进后，放弃尚未发送的内容，交回 worker 读取新上下文。
+fn current(ctx: &Context, group: i64, seq: u64) -> bool {
+    let config = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+    config.enabled
+        && config.ambient.enabled
+        && config.ambient.groups.contains(&group)
+        && window::with_group(group, |state| state.seq == seq)
 }
 
 /// 让人格模型写，然后按人的节奏发出去。
@@ -392,13 +466,13 @@ async fn speak_up(
     config: &AmbientConfig,
     turns: &[Turn],
     mentioned: bool,
+    persona: &str,
+    rhythm: &str,
+    seq: &mut u64,
 ) -> anyhow::Result<()> {
     let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
     let data_dir = mgr.path.parent().unwrap_or(&mgr.path).to_path_buf();
     let base = base_dir(&data_dir);
-    let persona = tokio::fs::read_to_string(persona_path(&data_dir))
-        .await
-        .unwrap_or_else(|_| PERSONA.to_string());
     // 与判定看到的是同一批图：已转码成模型收得下的格式，GIF 表情包也不例外。
     let images = vision::usable_images(turns, config.context_images).await;
 
@@ -407,15 +481,62 @@ async fn speak_up(
         &oai.pi_command,
         &base,
         &skill_dir(&data_dir),
-        &persona,
+        persona,
         config,
         oai.pi_stall(),
         turns,
         &images,
         mentioned,
+        rhythm,
     )
     .await?;
 
+    let (raw, focus) = attention::extract(&raw, turns, config.focus_max_seconds);
+    // 沉默不需要检查草稿；新消息留给下一批。关注仍可在本轮更新。
+    let silent = matches!(
+        pace::parse(&raw, config.max_messages.clamp(1, 5)),
+        pace::Speech::Silent
+    );
+    if !silent && !current(ctx, group, *seq) {
+        let (latest_seq, latest, rhythm) = window::with_group(group, |state| {
+            (
+                state.seq,
+                state.recent(config.context_turns.clamp(1, 80)),
+                state.rhythm(),
+            )
+        });
+        if !current(ctx, group, latest_seq) {
+            return Ok(());
+        }
+        let (api_base, api_key) = {
+            let config = mgr.config.read().await;
+            (config.api_base.clone(), config.api_key.clone())
+        };
+        let verdict = gate::judge(
+            &api_base,
+            &api_key,
+            config,
+            &latest,
+            persona,
+            &rhythm,
+            Some(&raw),
+        )
+        .await?;
+        if verdict.score < 50 || !current(ctx, group, latest_seq) {
+            debug!(target: LOG_TARGET, "群 {group} 收起过时草稿：{}", verdict.reason);
+            return Ok(());
+        }
+        // 检查通过的这批也已处理；不能发完再把同一批当作新消息回应。
+        window::with_group(group, |state| {
+            if state.seq == latest_seq {
+                state.take_mention();
+            }
+        });
+        *seq = latest_seq;
+    }
+    if let Some(focus) = focus {
+        window::with_group(group, |state| state.focus = focus);
+    }
     let utterances = match pace::parse(&raw, config.max_messages.clamp(1, 5)) {
         pace::Speech::Silent => {
             info!(target: LOG_TARGET, "群 {group} 想了想，还是没说话");
@@ -424,11 +545,16 @@ async fn speak_up(
         pace::Speech::Say(items) => items,
     };
 
-    let reply_to = turns.iter().rev().find(|turn| !turn.from_me).map(|turn| turn.message_id);
+    let reply_to = turns
+        .iter()
+        .rev()
+        .find(|turn| !turn.from_me)
+        .map(|turn| turn.message_id);
     let pace = config.pace();
     tokio::time::sleep(pace.think_delay(started.elapsed())).await;
 
     let me = ctx.bot.login_user.id.parse::<i64>().unwrap_or_default();
+    let mut sent = false;
     for (index, utterance) in utterances.into_iter().enumerate() {
         if index > 0 {
             tokio::time::sleep(pace.gap()).await;
@@ -436,35 +562,54 @@ async fn speak_up(
         if utterance.wait > 0.0 {
             tokio::time::sleep(Duration::from_secs_f32(utterance.wait)).await;
         }
-        tokio::time::sleep(pace.typing_delay(utterance.chars)).await;
+        let typing = pace.typing_delay(utterance.chars);
+        // 模型耗时已经是等待；首条不再额外假装打字十几秒。
+        tokio::time::sleep(if index == 0 {
+            typing.saturating_sub(started.elapsed())
+        } else {
+            typing
+        })
+        .await;
+        if !current(ctx, group, *seq) {
+            break;
+        }
 
         let mut message = Message::new();
-        if utterance.reply && let Some(id) = reply_to {
+        if utterance.reply
+            && let Some(id) = reply_to
+        {
             message = message.reply(id);
         }
         message.0.extend(utterance.message.0.iter().cloned());
         let spoken = plain_text(&utterance.message);
-        if let Err(error) = send_msg(ctx, writer.clone(), Some(group), None, message).await {
-            warn!(target: LOG_TARGET, "群 {group} 发言发送失败：{error}");
-            break;
-        }
+        let id = match send_msg_id(ctx, writer.clone(), Some(group), None, message).await {
+            Ok(id) => id.and_then(|id| id.parse::<i64>().ok()).unwrap_or_default(),
+            Err(error) => {
+                warn!(target: LOG_TARGET, "群 {group} 发言发送失败：{error}");
+                break;
+            }
+        };
         // 出站日志里所有插件的消息长得一样，复读机复读一句群友原话与搭话开口无从分辨。
         // 记下自己说了什么，这一行既是回放，也是唯一能确认「它真的开口了」的凭据。
         info!(target: LOG_TARGET, "群 {group} 说：{spoken}");
         window::with_group(group, |state| {
-            state.push(Turn {
+            if !sent {
+                state.mark_spoke();
+            }
+            // 服务端自发事件可能先到；按回执 ID 去重。
+            state.receive(Turn {
                 user_id: me,
                 name: "我".to_string(),
                 text: spoken,
                 images: Vec::new(),
-                message_id: 0,
+                message_id: id,
                 mentions_me: false,
                 from_me: true,
                 at: chrono::Local::now().timestamp(),
             });
         });
+        sent = true;
     }
-    window::with_group(group, |state| state.mark_spoke());
     Ok(())
 }
 
@@ -473,10 +618,20 @@ fn plain_text(message: &Message) -> String {
     let mut out = String::new();
     for segment in &message.0 {
         match segment.type_.as_str() {
-            "text" => out.push_str(segment.data.get("text").and_then(|v| v.as_str()).unwrap_or("")),
+            "text" => out.push_str(
+                segment
+                    .data
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+            ),
             "at" => out.push_str(&format!(
                 "@{} ",
-                segment.data.get("qq").and_then(|v| v.as_str()).unwrap_or("")
+                segment
+                    .data
+                    .get("qq")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
             )),
             "face" => out.push_str("[表情]"),
             "poke" => out.push_str("[戳一戳]"),
@@ -504,11 +659,26 @@ mod tests {
         assert!(!config.enabled);
         assert!(config.groups.is_empty());
         assert!(config.max_wait() >= config.debounce());
+        assert_eq!(config.cooldown(), Duration::ZERO);
+        assert_eq!(config.hourly_limit, 0);
+        assert_eq!(config.effective_threshold(None), config.score_threshold);
+        let extreme = AmbientConfig {
+            debounce_seconds: u64::MAX,
+            max_wait_seconds: 0,
+            silence_relief_cap: 20,
+            ..config
+        };
+        assert!(extreme.max_wait() >= extreme.debounce());
+        assert_eq!(extreme.effective_threshold(None), extreme.score_threshold);
     }
 
     #[test]
     fn the_longer_it_stays_quiet_the_lower_the_bar() {
-        let config = AmbientConfig::default();
+        let config = AmbientConfig {
+            silence_relief_per_10min: 5,
+            silence_relief_cap: 20,
+            ..AmbientConfig::default()
+        };
         assert_eq!(
             config.effective_threshold(Some(Duration::ZERO)),
             config.score_threshold
