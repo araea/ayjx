@@ -1096,6 +1096,79 @@ mod tests {
         assert_eq!(request["content"], "哈哈");
         assert_eq!(request["satori_qq"]["if_latest_message_id"], "2");
         assert_eq!(request["satori_qq"]["expires_at"], now + 60_000);
+        // 自身回显、其他插件的回复以及继续接力均不能使旧内容重发。
+        for (user, text, id) in [
+            (10000, "哈哈", "4"),
+            (4, "哈哈", "5"),
+            (10000, "机器人回复", "6"),
+            (5, "哈哈", "7"),
+            (6, "哈哈", "8"),
+        ] {
+            receive(&ctx, &writer, incoming(&ctx, text, user, id, now))
+                .await
+                .unwrap();
+        }
+        assert!(sent.try_recv().is_err());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_repeat_stays_suppressed_across_chain_changes() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        for (index, text) in [
+            "哈哈",
+            "哈哈",
+            "插话",
+            "哈哈",
+            "哈哈",
+            "/help",
+            "哈哈",
+            "哈哈",
+            "新内容",
+            "新内容",
+            "哈哈",
+            "哈哈",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            receive(
+                &ctx,
+                &writer,
+                incoming(&ctx, text, index as i64 + 1, &index.to_string(), now),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(sent.try_recv().unwrap()["content"], "哈哈");
+        assert_eq!(sent.try_recv().unwrap()["content"], "新内容");
+        assert!(
+            sent.try_recv().is_err(),
+            "confirmed content must only send once"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelled_repeat_can_trigger_in_a_new_chain() {
+        let (ctx, writer, mut sent, server) = repeat_fixture().await;
+        let now = timestamp_ms();
+        receive(&ctx, &writer, incoming(&ctx, "哈哈", 1, "1", now))
+            .await
+            .unwrap();
+        let pending = receive(&ctx, &writer, incoming(&ctx, "哈哈", 2, "2", now));
+        receive(&ctx, &writer, incoming(&ctx, "插话", 3, "3", now))
+            .await
+            .unwrap();
+        pending.await.unwrap();
+        assert!(sent.try_recv().is_err());
+        for (user, id) in [(4, "4"), (5, "5")] {
+            receive(&ctx, &writer, incoming(&ctx, "哈哈", user, id, now))
+                .await
+                .unwrap();
+        }
+        assert_eq!(sent.try_recv().unwrap()["content"], "哈哈");
         assert!(sent.try_recv().is_err());
         server.abort();
     }
@@ -1199,6 +1272,15 @@ mod tests {
         assert!(
             sent.try_recv().is_err(),
             "bot must not repeat its own interruption"
+        );
+        for (user, id) in [(5, "5"), (6, "6")] {
+            receive(&ctx, &writer, incoming(&ctx, "哈哈", user, id, now))
+                .await
+                .unwrap();
+        }
+        assert!(
+            sent.try_recv().is_err(),
+            "continuing the original chain must not trigger another interruption"
         );
         server.abort();
     }

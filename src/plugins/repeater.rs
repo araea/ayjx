@@ -12,6 +12,8 @@
 //!
 //! Bot 自己说的话（`BeforeSend` 拦截到的发送包，以及实现端回显的自身消息）
 //! 只更新状态、不参与计数，避免自己接自己的话形成连锁。
+//! 每个频道另存最近 128 条已确认跟读（含打断）的内容指纹，跨接力去重；
+//! 未实际发送的候选不入记录。记录随进程重启或频道状态淘汰清除。
 //!
 //! 触发点上依次过三道闸：冷却 → 概率 → 打断。命中打断则改发一句打断语，
 //! 概率未命中不置位 `repeated`，同一句话的下一条仍有机会触发。
@@ -28,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use simd_json::OwnedValue;
 use simd_json::base::{ValueAsArray, ValueAsMutObject};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -124,6 +126,8 @@ struct ChannelState {
     times: usize,
     /// 本轮是否已经跟读过
     repeated: bool,
+    /// 已确认发送的原接力指纹，独立于当前接力，按发送顺序淘汰
+    recent_repeats: VecDeque<String>,
     /// 上一条消息的来源
     last_sender: Option<Sender>,
     /// 上次实际复读的时间戳（跨轮保留，用于冷却）
@@ -133,15 +137,28 @@ struct ChannelState {
 }
 
 impl ChannelState {
-    /// 换了一句话：重置接力，但保留冷却与活跃时间
+    /// 换了一句话：重置接力，但保留已复读记录、冷却与活跃时间
     fn restart(&mut self, sig: String, content: OwnedValue, sender: Sender) {
         self.generation = next_generation();
+        // Bot 自己刚说的话和近期已跟读的内容都不再跟读。
+        self.repeated = sender == Sender::Bot || self.recent_repeats.contains(&sig);
         self.sig = sig;
         self.content = content;
         self.times = if sender == Sender::Bot { 0 } else { 1 };
-        // Bot 自己刚说的话不该被自己跟读
-        self.repeated = sender == Sender::Bot;
         self.last_sender = Some(sender);
+    }
+
+    fn remember_repeat(&mut self, sig: &str) {
+        if self.sig == sig {
+            self.repeated = true;
+        }
+        if self.recent_repeats.iter().any(|known| known == sig) {
+            return;
+        }
+        if self.recent_repeats.len() >= MAX_RECENT_REPEATS {
+            self.recent_repeats.pop_front();
+        }
+        self.recent_repeats.push_back(sig.to_owned());
     }
 
     /// 打断接力：下一条消息一律从头开始数
@@ -167,6 +184,7 @@ fn states() -> MutexGuard<'static, HashMap<String, ChannelState>> {
 // 长期运行的 Bot 中频道数量可能膨胀。超过上限时先清理空闲频道，
 // 仍超限则按最后活跃时间淘汰最旧的，保证表长有界。
 const MAX_CHANNELS: usize = 4096;
+const MAX_RECENT_REPEATS: usize = 128;
 const IDLE_TIMEOUT_SECS: u64 = 60 * 60; // 1 小时
 
 fn now_secs() -> u64 {
@@ -416,6 +434,8 @@ fn now_ms() -> u64 {
 #[derive(Debug, Clone)]
 pub struct RepeatGuard {
     key: String,
+    /// 触发接力的指纹；发送打断语时也应记住原内容
+    sig: String,
     generation: u64,
     pub expires_at: u64,
     pub message_id: String,
@@ -424,9 +444,10 @@ pub struct RepeatGuard {
 impl RepeatGuard {
     pub fn is_current(&self) -> bool {
         now_ms() < self.expires_at
-            && states()
-                .get(&self.key)
-                .is_some_and(|state| state.generation == self.generation)
+            && states().get(&self.key).is_some_and(|state| {
+                state.generation == self.generation
+                    && !state.recent_repeats.contains(&self.sig)
+            })
     }
 }
 
@@ -480,6 +501,8 @@ pub fn confirm_send(ctx: &Context, packet: &SendPacket) {
     let Some(state) = map.get_mut(&guard.key) else {
         return;
     };
+    // 回执可能晚于下一条入站消息；仍记录已发送的内容，但不覆盖新接力。
+    state.remember_repeat(&guard.sig);
     if state.generation != guard.generation {
         return;
     }
@@ -571,6 +594,7 @@ pub fn prepare(ctx: &mut Context, writer: &LockedWriter) -> Option<PreparedRepea
     Some(PreparedRepeat {
         guard: RepeatGuard {
             key,
+            sig: state.sig.clone(),
             generation: state.generation,
             expires_at,
             message_id: event
@@ -728,6 +752,7 @@ mod tests {
         );
         let mut guard = RepeatGuard {
             key: key.clone(),
+            sig: "test".into(),
             generation,
             expires_at: now_ms() + 60_000,
             message_id: "2".into(),
@@ -736,6 +761,9 @@ mod tests {
         guard.expires_at = 0;
         assert!(!guard.is_current());
         guard.expires_at = now_ms() + 60_000;
+        // 旧发送的成功回执晚到时，新一轮同内容的待发送任务也必须取消。
+        states().get_mut(&key).unwrap().remember_repeat(&guard.sig);
+        assert!(!guard.is_current());
         states().remove(&key);
         assert!(!guard.is_current());
     }
@@ -825,6 +853,30 @@ mod tests {
         assert_eq!(feed_text(&mut state, "阿夜", 2, &config), Action::Repeat);
         // 跟读过一次就不再重复
         assert_eq!(feed_text(&mut state, "阿夜", 3, &config), Action::Silent);
+    }
+
+    #[test]
+    fn confirmed_history_survives_interruptions_and_is_bounded() {
+        let config = cfg();
+        let mut state = ChannelState::default();
+        let original = signature(&text_chain("阿夜"), &config).unwrap();
+        state.remember_repeat(&original);
+        state.interrupt_chain();
+        assert_eq!(feed_text(&mut state, "阿夜", 1, &config), Action::Silent);
+        assert_eq!(feed_text(&mut state, "阿夜", 2, &config), Action::Silent);
+        for index in 0..MAX_RECENT_REPEATS - 1 {
+            state.remember_repeat(&format!("other-{index}"));
+        }
+        // 重复回执不应占据更多名额或挤掉其他记录。
+        state.remember_repeat(&original);
+        assert_eq!(state.recent_repeats.len(), MAX_RECENT_REPEATS);
+        assert!(state.recent_repeats.contains(&original));
+        state.remember_repeat("newest");
+        assert_eq!(state.recent_repeats.len(), MAX_RECENT_REPEATS);
+        assert!(!state.recent_repeats.contains(&original));
+        state.interrupt_chain();
+        assert_eq!(feed_text(&mut state, "阿夜", 1, &config), Action::Silent);
+        assert_eq!(feed_text(&mut state, "阿夜", 2, &config), Action::Repeat);
     }
 
     #[test]
