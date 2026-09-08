@@ -218,7 +218,8 @@ impl Session {
                 let turn = actions::message(&turns, id)?;
                 if request["forward"].as_bool().unwrap_or(false) {
                     let source = forward::source_of(&turn.elements, Some(turn.message_id))
-                        .ok_or_else(|| anyhow::anyhow!("该消息不是合并转发"))?;
+                        .ok_or_else(|| anyhow::anyhow!("该消息不是合并转发"))?
+                        .in_channel(self.group.to_string());
                     let view = forward::expand(&self.ctx, &self.writer, source).await;
                     ensure!(
                         !view.is_empty(),
@@ -717,14 +718,28 @@ mod tests {
         )
         .await;
         assert_eq!(plain["ok"], false, "{plain}");
-        let ids: Vec<String> = calls
+        let reads: Vec<(String, String)> = calls
             .lock()
             .unwrap()
             .iter()
             .filter(|(method, _)| method == "internal/get_forward")
-            .map(|(_, body)| body["id"].as_str().unwrap_or("").to_string())
+            .map(|(_, body)| {
+                (
+                    body["id"].as_str().unwrap_or("").to_string(),
+                    body["channel_id"].as_str().unwrap_or("").to_string(),
+                )
+            })
             .collect();
-        assert_eq!(ids, ["native:124", "native:9002", "res-inner"]);
+        // 会话跟着整条展开链走，父消息不在模块缓存里时内核路径才还能定位。
+        let channel = group.to_string();
+        assert_eq!(
+            reads,
+            [
+                ("native:124".to_string(), channel.clone()),
+                ("native:9002".to_string(), channel.clone()),
+                ("res-inner".to_string(), channel),
+            ]
+        );
         drop(lease);
         server.abort();
     }

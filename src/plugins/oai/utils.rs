@@ -152,6 +152,10 @@ async fn append_forward(
     quote_text: &mut String,
     imgs: &mut Vec<String>,
 ) {
+    let source = match api::channel_id(ctx) {
+        Ok(channel) => source.in_channel(channel),
+        Err(_) => source,
+    };
     let view = forward::expand(ctx, writer, source).await;
     let body = view.transcript();
     if body.trim().is_empty() {

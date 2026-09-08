@@ -32,6 +32,8 @@ pub struct Source {
     pub resource_id: Option<String>,
     /// 携带这条合并转发的那条消息的 ID，用于走内核缓存。
     pub message_id: Option<i64>,
+    /// 这条消息所在的会话。satori-qq 的父消息缓存被淘汰后靠它重新定位内核记录。
+    pub channel: Option<String>,
 }
 
 impl Source {
@@ -39,7 +41,15 @@ impl Source {
         Self {
             resource_id: resource_id.filter(|value| !value.is_empty()),
             message_id: message_id.filter(|value| *value != 0),
+            channel: None,
         }
+    }
+
+    /// 会话跟着整条展开链走：嵌套转发和父消息在同一个群里。
+    pub fn in_channel(mut self, channel: impl Into<String>) -> Self {
+        let channel = channel.into();
+        self.channel = (!channel.is_empty()).then_some(channel);
+        self
     }
 
     fn is_empty(&self) -> bool {
@@ -196,7 +206,7 @@ fn walk<'a>(
                 return;
             }
             node.depth = depth;
-            let nested = nested_sources(&node);
+            let nested = nested_sources(&node, source.channel.as_deref());
             let inline = inline_nodes(&node, depth + 1);
             view.nodes.push(node);
             for child in inline {
@@ -222,7 +232,14 @@ async fn resolve(
 ) -> Option<Vec<Node>> {
     let mut failures = Vec::new();
     if let Some(message_id) = source.message_id {
-        match fetch(ctx, writer, &format!("native:{message_id}")).await {
+        match fetch(
+            ctx,
+            writer,
+            &format!("native:{message_id}"),
+            source.channel.as_deref(),
+        )
+        .await
+        {
             Ok(nodes) if !nodes.is_empty() => return Some(nodes),
             Ok(_) => failures.push("内核缓存返回空".to_string()),
             Err(error) => failures.push(format!("内核缓存不可用：{error}")),
@@ -234,7 +251,7 @@ async fn resolve(
         }
         return None;
     };
-    match fetch(ctx, writer, &resource).await {
+    match fetch(ctx, writer, &resource, source.channel.as_deref()).await {
         Ok(nodes) if !nodes.is_empty() => {
             if !failures.is_empty() {
                 view.note(
@@ -261,10 +278,13 @@ async fn fetch(
     ctx: &Context,
     writer: &LockedWriter,
     id: &str,
+    channel: Option<&str>,
 ) -> Result<Vec<Node>, super::BotError> {
-    let value: Value = writer
-        .call(ctx, "internal/get_forward", json!({"id": id}))
-        .await?;
+    let mut params = json!({"id": id});
+    if let Some(channel) = channel {
+        params["channel_id"] = json!(channel);
+    }
+    let value: Value = writer.call(ctx, "internal/get_forward", params).await?;
     Ok(parse(&value, &writer.resources()))
 }
 
@@ -305,7 +325,7 @@ fn parse(value: &Value, resources: &message::ResourceProxy) -> Vec<Node> {
 }
 
 /// 节点正文里还嵌着的合并转发；父消息 ID 用节点自己的，好继续走内核路径。
-fn nested_sources(node: &Node) -> Vec<Source> {
+fn nested_sources(node: &Node, channel: Option<&str>) -> Vec<Source> {
     node.message
         .0
         .iter()
@@ -319,6 +339,7 @@ fn nested_sources(node: &Node) -> Vec<Source> {
                     .map(str::to_string),
                 node.message_id,
             )
+            .in_channel(channel.unwrap_or_default())
         })
         .filter(|source| !source.is_empty())
         .collect()
@@ -484,10 +505,11 @@ mod tests {
         let value = json!({"data":[{"id":"99","user":{"id":"7","name":"套娃"},
             "content":"<message forward id=\"res-inner\"/>"}]});
         let nodes = parse(&value, &proxy());
-        let nested = nested_sources(&nodes[0]);
+        let nested = nested_sources(&nodes[0], Some("282381753"));
         assert_eq!(nested.len(), 1);
         assert_eq!(nested[0].resource_id.as_deref(), Some("res-inner"));
         assert_eq!(nested[0].message_id, Some(99));
+        assert_eq!(nested[0].channel.as_deref(), Some("282381753"));
         assert!(describe(&nodes[0].message).contains("嵌套合并转发"));
     }
 
@@ -567,7 +589,9 @@ mod tests {
         let message_id = hit["id"].as_str().and_then(|id| id.parse::<i64>().ok());
         let message =
             message::from_content_with(hit["content"].as_str().unwrap_or(""), &writer.resources());
-        let source = source_of(&message, message_id).expect("forward source");
+        let source = source_of(&message, message_id)
+            .expect("forward source")
+            .in_channel(channel.clone());
         let view = expand(&ctx, &writer, source).await;
         println!("{}", view.transcript());
         println!("images: {:?}", view.images());
@@ -584,6 +608,11 @@ mod tests {
         let source = source_of(&message, Some(12)).expect("forward source");
         assert_eq!(source.resource_id.as_deref(), Some("abc"));
         assert_eq!(source.message_id, Some(12));
+        assert_eq!(source.clone().in_channel("").channel, None);
+        assert_eq!(
+            source.in_channel("46360522").channel.as_deref(),
+            Some("46360522")
+        );
         assert!(source_of(&Message::new().text("hi"), Some(12)).is_none());
     }
 }

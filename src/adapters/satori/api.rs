@@ -407,7 +407,7 @@ pub async fn set_msg_emoji_like(
     Ok(())
 }
 
-fn channel_id(ctx: &Context) -> Result<String, ApiError> {
+pub(crate) fn channel_id(ctx: &Context) -> Result<String, ApiError> {
     let event = match &ctx.event {
         EventType::Satori(event) => Some(event),
         EventType::BeforeSend(packet) => packet.original_event.as_ref(),

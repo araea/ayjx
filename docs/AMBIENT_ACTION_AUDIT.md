@@ -97,9 +97,16 @@ flowchart LR
 受 60 节点 / 3 层双预算约束。`satori_read` 返回 transcript、nodes、images、truncated、notes；
 `get_full_content` 把展开结果作为引用块并入提示词，转发内图片最多取 4 张作为视觉输入。
 
-本次没有改 satori-qq：内核路径已经能覆盖仍在缓存里的转发，而修补 resId 路径的
-CommonElem 解析需要重装 Xposed 模块（本机签名密钥已丢失，只能卸载重装）。
-若要连缓存过期的旧转发也拿到图片，下一步就是给 `LongMsg.parseElem` 补上 CommonElem。
+satori-qq 侧补了一处：`native:` 原来要求父消息还在模块自己的 `MsgStore`（内存 LRU，
+模块重启即清空），否则直接 404。但 `getMultiMsg` 只需要 contact + 父消息 ID，而调用方
+本来就知道消息在哪个会话，所以 `internal/get_forward` 现在接受 `channel_id`，缓存没命中
+时用它组出 contact 继续走内核。ayjx 让 `channel_id` 跟着整条展开链传下去（嵌套转发和
+父消息同群）。
+
+真机 A/B（0.8.9.28，QQ 刚重启、模块缓存为空）：四条历史转发不带 `channel_id` 全部
+404 `native forward is not cached`，带上之后全部读回完整节点，其中两条各拿回 7 张和
+6 张图片。这条路径覆盖后，resId 旧协议只剩「内核也查不到」的兜底，暂不再为它补
+CommonElem 解析——那需要照着抓包猜 NT 富媒体的内层结构，收益已经很小。
 
 ## 实际边界和后续方向
 
