@@ -70,6 +70,18 @@ case "${1:-open}" in
         # Keep local Satori HTTP requests out of environment HTTP proxies.
         export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
         export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
+        # Termux app shells export termux-exec's $LD_PRELOAD; sessions started from
+        # elsewhere (widgets, cron, a tmux server inherited from another tool) do not.
+        # Without it the bot cannot spawn `#!/usr/bin/env` scripts — notably the pi CLI
+        # behind the pi rooms, which fails with a bare "No such file or directory".
+        if [[ -z "${LD_PRELOAD:-}" ]]; then
+            for lib in "$PREFIX/lib/libtermux-exec-ld-preload.so" "$PREFIX/lib/libtermux-exec.so"; do
+                if [[ -f "$lib" ]]; then
+                    export LD_PRELOAD="$lib"
+                    break
+                fi
+            done
+        fi
         if [[ "${AYJX_WAKE_LOCK:-1}" == 1 ]] && command -v termux-wake-lock >/dev/null; then
             termux-wake-lock || printf '未能取得 Termux 唤醒锁，请检查通知中的 Acquire wakelock。\n' >&2
         fi

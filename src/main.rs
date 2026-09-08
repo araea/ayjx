@@ -28,12 +28,28 @@ use tokio::sync::Mutex as AsyncMutex;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut console = false;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--console" => console = true,
+            // 控制通道的客户端：连上正在运行的实例执行一条 ctl 命令后退出，
+            // 不碰数据库、配置与浏览器。凭据只从环境变量取，不上命令行。
+            "--ctl" => {
+                let command = args.next().unwrap_or_default();
+                return match plugins::ctl::bridge::client(&command) {
+                    Ok(text) => {
+                        println!("{text}");
+                        Ok(())
+                    }
+                    Err(text) => {
+                        println!("{text}");
+                        std::process::exit(1);
+                    }
+                };
+            }
             "--help" | "-h" => {
                 println!(
-                    "ayjx [--console]\n--console 临时启用前台控制台，不修改 config.toml；输入 /ctl 查看用法，Ctrl+C 停止。"
+                    "ayjx [--console] [--ctl <命令>]\n--console 临时启用前台控制台，不修改 config.toml；输入 /ctl 查看用法，Ctrl+C 停止。\n--ctl 向正在运行的实例发送一条 ctl 命令并打印回执，需要本轮 pi 房间对话签发的凭据。"
                 );
                 return Ok(());
             }

@@ -14,14 +14,13 @@
 //! assistant 消息必须带 `usage`（pi 加载会话时会统计 token，缺字段直接崩溃），
 //! 其余 api/provider/model 字段可省。
 
-use super::types::ChatMessage;
+use super::types::{ChatMessage, TraceStep};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc::UnboundedSender;
 
 /// 房间名是否由本机 pi agent 接管：`pi` 或 `pi-` 前缀（忽略大小写）。
 pub(crate) fn is_pi_room(room: &str) -> bool {
@@ -30,10 +29,15 @@ pub(crate) fn is_pi_room(room: &str) -> bool {
 }
 
 /// 每次调用独占目录，避免中文房间名、私有用户及临时请求之间共享文件。
-struct SessionDir(PathBuf);
-impl SessionDir {
+pub(crate) struct ScratchDir(PathBuf);
+impl ScratchDir {
     fn new(base: &Path) -> anyhow::Result<Self> {
-        let root = base.join("pi-sessions");
+        Self::under(base, "pi-sessions")
+    }
+
+    /// 在 `base/<folder>/` 下开一个只有本进程可读写的临时目录。
+    pub(crate) fn under(base: &Path, folder: &str) -> anyhow::Result<Self> {
+        let root = base.join(folder);
         std::fs::create_dir_all(&root)?;
         let path = root.join(format!("{:032x}", rand::random::<u128>()));
         let mut builder = std::fs::DirBuilder::new();
@@ -45,35 +49,60 @@ impl SessionDir {
         builder.create(&path)?;
         Ok(Self(path))
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
+    }
 }
-impl Drop for SessionDir {
+impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// 房间模型名是否表示「交给 pi 自己决定」。
+///
+/// pi 房间原本完全不看 ayjx 这边的模型设置，改房间模型毫无效果——这既反直觉，
+/// 又让「同一个房间换个模型试试」这种最常见的调试动作没有出口。现在房间模型就是
+/// pi 的 `--model`（支持 `provider/id` 与 `id:thinking` 写法）；留空或写 `pi`
+/// 表示沿用 pi 自身配置。
+pub(crate) fn follows_pi_config(model: &str) -> bool {
+    let model = model.trim();
+    model.is_empty() || model.eq_ignore_ascii_case("pi")
 }
 
 pub(crate) async fn conversation(
     command: &str,
     base: &Path,
     persona: &str,
+    model: &str,
+    stall: Option<std::time::Duration>,
     hist: &[ChatMessage],
-    progress: Option<UnboundedSender<String>>,
+    control: Option<&crate::plugins::ctl::bridge::Lease>,
 ) -> anyhow::Result<PiReply> {
     let (current, previous) = hist
         .split_last()
         .filter(|(message, _)| message.role == "user")
         .ok_or_else(|| anyhow::anyhow!("没有可重新生成的用户消息，请先发送内容"))?;
-    let dir = SessionDir::new(base)?;
+    let dir = ScratchDir::new(base)?;
     let session = dir.0.join("session.jsonl");
     sync_session(&session, previous).await?;
-    run(
-        command,
-        &session,
-        persona,
-        &current.content,
-        &current.images,
-        progress,
-    )
+    // 控制凭据只在本轮存在：随环境变量交给 pi，并挂上说明用法的 skill。
+    let env = control.map(|lease| lease.env()).unwrap_or_default();
+    let skills: Vec<PathBuf> = control
+        .map(|lease| vec![lease.skill().to_path_buf()])
+        .unwrap_or_default();
+    run(PiRun {
+        session: Some(&session),
+        append_system_prompt: persona,
+        model: (!follows_pi_config(model)).then_some(model),
+        prompt: &current.content,
+        images: &current.images,
+        skills: &skills,
+        env: &env,
+        stall,
+        ..PiRun::new(command, &dir.0)
+    })
     .await
 }
 
@@ -83,8 +112,10 @@ pub(crate) struct PiReply {
     pub text: String,
     /// 实际应答的模型（`provider/model`），用于回复卡片页脚。
     pub model: Option<String>,
-    /// 人类可读的工具调用轨迹。
-    pub trace: Vec<String>,
+    /// 工具调用轨迹。
+    pub trace: Vec<TraceStep>,
+    /// 超出保留上限、未进入 `trace` 的调用次数。
+    pub trace_overflow: usize,
 }
 
 /// 按房间历史重建 pi 会话文件；历史为空时删除文件让 pi 全新开始。
@@ -197,43 +228,165 @@ async fn image_part(url: &str) -> Option<Value> {
     Some(json!({"type": "image", "mimeType": mime, "data": data}))
 }
 
-/// 运行一轮 pi 对话并整理事件流。
-pub(crate) async fn run(
-    command: &str,
-    session: &Path,
-    persona: &str,
-    prompt: &str,
-    images: &[String],
-    progress: Option<UnboundedSender<String>>,
-) -> anyhow::Result<PiReply> {
-    let temp = write_images(session, images).await?;
+/// 一次 pi 调用的全部参数。
+///
+/// 房间对话与群聊搭话共用同一个执行层：进程组终止、stdin 传正文、事件流整理
+/// 这些都只该有一份实现，两个调用方的差别收敛成这里的字段。
+pub(crate) struct PiRun<'a> {
+    /// pi 可执行文件或命令。
+    pub command: &'a str,
+    /// 临时文件（图片）所在目录。
+    pub dir: &'a Path,
+    /// 会话文件；`None` 表示一次性调用（`--no-session`）。
+    pub session: Option<&'a Path>,
+    /// 子进程工作目录；`None` 沿用 bot 自身的工作目录。
+    pub cwd: Option<&'a Path>,
+    /// 追加在 pi 系统提示词之后的人设。
+    pub append_system_prompt: &'a str,
+    /// 整体替换 pi 的系统提示词；群聊人格不需要编码助手那一套。
+    pub system_prompt: Option<&'a str>,
+    /// `provider/model`；`None` 用 pi 自己的默认模型。
+    pub model: Option<&'a str>,
+    /// 思考强度（off/minimal/low/…）。
+    pub thinking: Option<&'a str>,
+    /// 额外载入的 skill 文件或目录。
+    pub skills: &'a [PathBuf],
+    /// 工具白名单（逗号分隔）；`None` 用 pi 默认工具集。
+    pub tools: Option<&'a str>,
+    /// 是否加载工作目录里的 AGENTS.md / CLAUDE.md。
+    pub context_files: bool,
+    /// 追加给子进程的环境变量，例如本轮对话的控制凭据。
+    pub env: &'a [(String, String)],
+    /// 事件流静默多久算卡死；`None` 表示不看。
+    pub stall: Option<std::time::Duration>,
+    /// 用户正文。
+    pub prompt: &'a str,
+    /// 随正文送入的图片地址。
+    pub images: &'a [String],
+}
 
-    let mut args: Vec<String> = vec![
-        "-p".into(),
-        "--mode".into(),
-        "json".into(),
-        "--session".into(),
-        session.to_string_lossy().into(),
-    ];
-    if !persona.trim().is_empty() {
+impl<'a> PiRun<'a> {
+    pub(crate) fn new(command: &'a str, dir: &'a Path) -> Self {
+        Self {
+            command,
+            dir,
+            session: None,
+            cwd: None,
+            append_system_prompt: "",
+            system_prompt: None,
+            model: None,
+            thinking: None,
+            skills: &[],
+            tools: None,
+            context_files: true,
+            env: &[],
+            stall: None,
+            prompt: "",
+            images: &[],
+        }
+    }
+}
+
+/// pi 一句话都没说就不动了。
+///
+/// pi 自身对模型请求不设超时，中转站抽风时它会安静地卡在 epoll 上直到整轮预算耗尽
+/// （实测 5 分钟墙钟只烧 2 秒 CPU）。事件流是活着的证据：正常情况下几秒内必有事件，
+/// 长时间一个字节都没有只可能是卡死。
+#[derive(Debug)]
+struct Stalled {
+    seconds: u64,
+    /// 卡住之前已经产出过正文——重试会让用户等两遍，不如把已有的交出去。
+    partial: bool,
+}
+
+impl std::fmt::Display for Stalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pi 静默超过 {} 秒无任何输出", self.seconds)
+    }
+}
+impl std::error::Error for Stalled {}
+
+/// 运行一轮 pi 对话并整理事件流；卡死且尚未产出正文时自动重来一次。
+pub(crate) async fn run(run: PiRun<'_>) -> anyhow::Result<PiReply> {
+    let temp = write_images(run.dir, run.images).await?;
+    let args = build_args(&run, &temp);
+    // 用户正文走 stdin，防止 --model 或 @file 被当作 CLI 参数/文件引用。
+    let prompt = if run.prompt.trim().is_empty() {
+        "请看图片。"
+    } else {
+        run.prompt
+    };
+
+    let first = attempt(&run, &args, prompt).await;
+    match first {
+        Err(error) => match error.downcast_ref::<Stalled>() {
+            Some(stalled) if !stalled.partial => {
+                warn!(target: "Plugin/OAI", "{error}，重试一次");
+                attempt(&run, &args, prompt).await
+            }
+            _ => Err(error),
+        },
+        ok => ok,
+    }
+}
+
+fn build_args(run: &PiRun<'_>, temp: &TempFiles) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-p".into(), "--mode".into(), "json".into()];
+    match run.session {
+        Some(session) => {
+            args.push("--session".into());
+            args.push(session.to_string_lossy().into());
+        }
+        None => args.push("--no-session".into()),
+    }
+    if let Some(prompt) = run.system_prompt {
+        args.push("--system-prompt".into());
+        args.push(prompt.to_string());
+    }
+    if !run.append_system_prompt.trim().is_empty() {
         args.push("--append-system-prompt".into());
-        args.push(format!("房间补充提示：\n{persona}"));
+        args.push(format!("房间补充提示：\n{}", run.append_system_prompt));
+    }
+    if let Some(model) = run.model.filter(|value| !value.trim().is_empty()) {
+        args.push("--model".into());
+        args.push(model.to_string());
+    }
+    if let Some(thinking) = run.thinking.filter(|value| !value.trim().is_empty()) {
+        args.push("--thinking".into());
+        args.push(thinking.to_string());
+    }
+    for skill in run.skills {
+        args.push("--skill".into());
+        args.push(skill.to_string_lossy().into());
+    }
+    if let Some(tools) = run.tools.filter(|value| !value.trim().is_empty()) {
+        args.push("--tools".into());
+        args.push(tools.to_string());
+    }
+    if !run.context_files {
+        args.push("--no-context-files".into());
     }
     for path in &temp.0 {
         args.push(format!("@{}", path.display()));
     }
-    // 用户正文走 stdin，防止 --model 或 @file 被当作 CLI 参数/文件引用。
-    let prompt = if prompt.trim().is_empty() {
-        "请看图片。"
-    } else {
-        prompt
-    };
+    args
+}
+
+/// 起一次 pi 进程，把事件流整理成回复。
+async fn attempt(run: &PiRun<'_>, args: &[String], prompt: &str) -> anyhow::Result<PiReply> {
+    let command = run.command;
 
     let mut process = Command::new(command);
     #[cfg(unix)]
     process.process_group(0);
+    if let Some(cwd) = run.cwd {
+        process.current_dir(cwd);
+    }
+    for (key, value) in run.env {
+        process.env(key, value);
+    }
     let mut child = process
-        .args(&args)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -268,9 +421,22 @@ pub(crate) async fn run(
     let output = async {
         let mut events = Events::default();
         let mut reader = BufReader::new(stdout).lines();
-        while let Some(line) = reader.next_line().await? {
+        loop {
+            let next = match run.stall {
+                Some(limit) => match tokio::time::timeout(limit, reader.next_line()).await {
+                    Ok(line) => line?,
+                    Err(_) => {
+                        return Err(anyhow::Error::new(Stalled {
+                            seconds: limit.as_secs(),
+                            partial: !events.text.trim().is_empty(),
+                        }));
+                    }
+                },
+                None => reader.next_line().await?,
+            };
+            let Some(line) = next else { break };
             if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                events.accept(&event, progress.as_ref());
+                events.accept(&event);
             }
         }
         Ok::<_, anyhow::Error>(events)
@@ -351,25 +517,34 @@ fn kill_descendants(pid: i32) {
     }
 }
 
+/// 页脚保留的工具调用条数上限；再多只记次数。
+const TRACE_LIMIT: usize = 12;
+
 #[derive(Default)]
 struct Events {
     text: String,
     model: Option<String>,
-    trace: Vec<String>,
+    trace: Vec<TraceStep>,
+    trace_overflow: usize,
     error: Option<String>,
 }
 impl Events {
-    fn accept(&mut self, event: &Value, progress: Option<&UnboundedSender<String>>) {
+    fn accept(&mut self, event: &Value) {
         match event["type"].as_str() {
             Some("tool_execution_start") => {
                 let name = event["toolName"].as_str().unwrap_or("tool");
-                let label = tool_label(event.get("args"));
-                let summary = format!("{name} {label}").trim().to_string();
-                if self.trace.len() < 20 {
-                    self.trace.push(summary.clone());
-                }
-                if let Some(tx) = progress {
-                    let _ = tx.send(summary);
+                let detail = tool_label(event.get("args"));
+                // 同一个工具连着用同样的参数（重试、分页）在页脚里排成一列毫无信息量，
+                // 合并成一条带次数的记录。
+                if let Some(last) = self.trace.last_mut()
+                    && last.name == name
+                    && last.detail == detail
+                {
+                    last.repeats += 1;
+                } else if self.trace.len() < TRACE_LIMIT {
+                    self.trace.push(TraceStep::new(name, detail));
+                } else {
+                    self.trace_overflow += 1;
                 }
             }
             Some("message_end") if event["message"]["role"] == "assistant" => {
@@ -420,9 +595,16 @@ impl Events {
             text: self.text,
             model: self.model,
             trace: self.trace,
+            trace_overflow: self.trace_overflow,
         })
     }
 }
+
+/// 工具参数摘要在页脚里的字符上限。
+///
+/// 页脚按结构渲染、可以换行，所以这里给得比一行文本宽得多；真的超长时也从中间
+/// 省略——shell 命令与 URL 的尾巴往往才是分辨「它到底做了什么」的那一段。
+const LABEL_LIMIT: usize = 180;
 
 /// 工具参数 → 人类可读的摘要标签（如 `uname -s`、搜索词、URL）。
 fn tool_label(args: Option<&Value>) -> String {
@@ -432,24 +614,21 @@ fn tool_label(args: Option<&Value>) -> String {
     // serde_json 默认不保序，优先挑常见的关键字段。
     for key in ["command", "query", "url", "pattern", "path", "file"] {
         if let Some(value) = args.get(key).and_then(Value::as_str) {
-            return super::utils::truncate_str(value.trim(), 60);
+            return super::utils::truncate_middle(value.trim(), LABEL_LIMIT);
         }
     }
     args.values()
         .find_map(Value::as_str)
-        .map(|value| super::utils::truncate_str(value.trim(), 60))
+        .map(|value| super::utils::truncate_middle(value.trim(), LABEL_LIMIT))
         .unwrap_or_default()
 }
 
 /// 下载图片写入临时文件，供 pi 以 `@file` 方式接收；返回 RAII 清理句柄。
-async fn write_images(session: &Path, images: &[String]) -> anyhow::Result<TempFiles> {
+async fn write_images(dir: &Path, images: &[String]) -> anyhow::Result<TempFiles> {
     let mut temp = TempFiles::default();
     if images.is_empty() {
         return Ok(temp);
     }
-    let dir = session
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("图片目录不可用"))?;
     std::fs::create_dir_all(dir)?;
     use base64::Engine as _;
     for (index, url) in images.iter().enumerate() {
@@ -530,10 +709,40 @@ mod tests {
     }
 
     #[test]
+    fn repeated_tool_calls_merge_and_overflow_is_counted() {
+        let mut events = Events::default();
+        let call = |name: &str, query: &str| {
+            json!({"type": "tool_execution_start", "toolName": name, "args": {"query": query}})
+        };
+        events.accept(&call("web_search", "auto-summary"));
+        events.accept(&call("web_search", "auto-summary"));
+        events.accept(&call("bash", "uname -a"));
+        assert_eq!(events.trace.len(), 2);
+        assert_eq!(events.trace[0].repeats, 2);
+        assert_eq!(events.trace[1].name, "bash");
+        assert_eq!(events.trace[1].detail, "uname -a");
+
+        for index in 0..TRACE_LIMIT + 3 {
+            events.accept(&call("web_search", &format!("query-{index}")));
+        }
+        assert_eq!(events.trace.len(), TRACE_LIMIT);
+        assert_eq!(events.trace_overflow, 5);
+    }
+
+    #[test]
+    fn long_tool_arguments_survive_with_a_middle_ellipsis() {
+        let command = format!("bash -lc '{}; echo done'", "a".repeat(400));
+        let label = tool_label(Some(&json!({"command": command})));
+        assert_eq!(label.chars().count(), LABEL_LIMIT);
+        assert!(label.starts_with("bash -lc"), "{label}");
+        assert!(label.ends_with("echo done'"), "{label}");
+    }
+
+    #[test]
     fn request_directories_are_unique_and_cleaned() {
         let base = std::env::temp_dir();
-        let a = SessionDir::new(&base).unwrap();
-        let b = SessionDir::new(&base).unwrap();
+        let a = ScratchDir::new(&base).unwrap();
+        let b = ScratchDir::new(&base).unwrap();
         assert_ne!(a.0, b.0);
         let path = a.0.clone();
         drop(a);
@@ -604,27 +813,25 @@ mod tests {
     fn tool_labels_prefer_common_keys() {
         let args = json!({"command": "uname -s", "timeout": 10});
         assert_eq!(tool_label(Some(&args)), "uname -s");
-        let long = json!({"command": format!("echo {}", "x".repeat(200))});
-        assert!(tool_label(Some(&long)).chars().count() <= 63);
+        let long = json!({"command": format!("echo {}", "x".repeat(400))});
+        assert_eq!(tool_label(Some(&long)).chars().count(), LABEL_LIMIT);
         assert_eq!(tool_label(None), "");
     }
 
     #[test]
     fn events_only_return_final_text_and_report_errors_after_tool_use() {
         let mut events = Events::default();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        events.accept(&json!({"type":"tool_execution_start", "toolName":"bash", "args":{"command":"uname -s"}}), Some(&tx));
-        assert_eq!(rx.try_recv().unwrap(), "bash uname -s");
-        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"toolUse", "content":[{"type":"text", "text":"我来检查"}]}}), None);
+        events.accept(&json!({"type":"tool_execution_start", "toolName":"bash", "args":{"command":"uname -s"}}));
+        assert_eq!(events.trace, vec![TraceStep::new("bash", "uname -s")]);
+        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"toolUse", "content":[{"type":"text", "text":"我来检查"}]}}));
         events.accept(
             &json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"error"}}),
-            None,
         );
         assert!(events.finish().unwrap_err().to_string().contains("未完成"));
 
         let mut events = Events::default();
-        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"error", "errorMessage":"retry"}}), None);
-        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"stop", "provider":"local", "model":"test", "content":[{"type":"thinking", "thinking":"secret"},{"type":"text", "text":"最终结果"}]}}), None);
+        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"error", "errorMessage":"retry"}}));
+        events.accept(&json!({"type":"message_end", "message":{"role":"assistant", "stopReason":"stop", "provider":"local", "model":"test", "content":[{"type":"thinking", "thinking":"secret"},{"type":"text", "text":"最终结果"}]}}));
         let reply = events.finish().unwrap();
         assert_eq!(reply.text, "最终结果");
         assert_eq!(reply.model.as_deref(), Some("local/test"));
@@ -652,10 +859,41 @@ mod tests {
         path
     }
 
+    /// 卡死在第一个字节之前：看门狗要掐掉它、重来一次，两次都卡才放弃。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_silent_pi_is_killed_retried_once_and_then_reported() {
+        let dir = ScratchDir::new(&std::env::temp_dir()).unwrap();
+        let counter = dir.path().join("attempts");
+        let command = fake_pi(
+            dir.path(),
+            &format!(
+                "const fs = require('fs');\n\
+                 fs.appendFileSync({counter:?}, 'x');\n\
+                 setTimeout(() => {{}}, 60000);\n"
+            ),
+        );
+
+        let error = run(PiRun {
+            prompt: "在吗",
+            stall: Some(std::time::Duration::from_millis(400)),
+            ..PiRun::new(command.to_str().unwrap(), dir.path())
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("静默超过"), "{error:#}");
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().len(),
+            2,
+            "卡死且没出正文时应当恰好重试一次"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn cli_transports_history_images_and_literal_prompt_and_drains_stderr() {
-        let dir = SessionDir::new(&std::env::temp_dir()).unwrap();
+        let dir = ScratchDir::new(&std::env::temp_dir()).unwrap();
         let command = fake_pi(
             &dir.0,
             r#"
@@ -684,7 +922,7 @@ process.stdin.on('end', () => {
         ];
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            conversation(command.to_str().unwrap(), &dir.0, "", &history, None),
+            conversation(command.to_str().unwrap(), &dir.0, "", "", None, &history, None),
         )
         .await
         .unwrap()
@@ -701,7 +939,7 @@ process.stdin.on('end', () => {
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellation_kills_pi_and_its_tool_processes_and_cleans_session() {
-        let dir = SessionDir::new(&std::env::temp_dir()).unwrap();
+        let dir = ScratchDir::new(&std::env::temp_dir()).unwrap();
         let marker = dir.0.join("pids.json");
         let command = fake_pi(
             &dir.0,
@@ -759,13 +997,13 @@ setInterval(()=>{{}},1000);
         base: PathBuf,
         history: Vec<ChatMessage>,
     ) -> anyhow::Result<PiReply> {
-        conversation(command.to_str().unwrap(), &base, "", &history, None).await
+        conversation(command.to_str().unwrap(), &base, "", "", None, &history, None).await
     }
 
     #[tokio::test]
     #[ignore = "调用本机 Pi 和已配置模型，需要网络"]
     async fn live_pi_reads_history_image_and_runs_a_tool() {
-        let dir = SessionDir::new(&std::env::temp_dir()).unwrap();
+        let dir = ScratchDir::new(&std::env::temp_dir()).unwrap();
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([255, 0, 0])))
             .write_to(&mut png, image::ImageFormat::Png)
@@ -786,7 +1024,7 @@ setInterval(()=>{{}},1000);
         ];
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            conversation("pi", &dir.0, "请用中文简短回复。", &history, None),
+            conversation("pi", &dir.0, "请用中文简短回复。", "", None, &history, None),
         )
         .await
         .unwrap()

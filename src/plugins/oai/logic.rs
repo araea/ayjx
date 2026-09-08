@@ -57,7 +57,7 @@ async fn reply_card(
     text_mode: bool,
     header: &str,
     sources: &[super::types::Source],
-    footer: Option<String>,
+    footer: Option<super::render::Footer>,
 ) {
     let msg = Message::new().reply(event.message_id());
 
@@ -236,7 +236,7 @@ fn build_chat_request(
         .build()?)
 }
 
-async fn complete(
+pub(crate) async fn complete(
     client: &Client<OpenAIConfig>,
     model: &str,
     messages: Vec<ChatCompletionRequestMessage>,
@@ -383,11 +383,20 @@ async fn chat(
     }
 
     let started = std::time::Instant::now();
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    // 发起人本身是全局管理员时，这一轮 pi 房间对话可以用自然语言驱动 ctl；
+    // 凭据随 `control` 一起活到本轮结束。其余情况下拿到 None，行为与从前一致。
+    let control = if use_pi {
+        crate::plugins::ctl::bridge::lease(ctx).await
+    } else {
+        None
+    };
 
-    // 三件事在同一个任务里赛跑：出结果、到总预算、到进度提示时刻。用 select 而不是
-    // 另起任务，是因为发消息要用借来的 ctx/event，搬进 spawn 就得整套克隆一遍。
-    // 把工作 Future 放进独立作用域，超时/停止后立即 drop 并终止 Pi 子进程。
+    // 出结果与到总预算在同一个任务里赛跑。用 select 而不是另起任务，是因为发消息
+    // 要用借来的 ctx/event，搬进 spawn 就得整套克隆一遍。把工作 Future 放进独立
+    // 作用域，超时/停止后立即 drop 并终止 Pi 子进程。
+    //
+    // 中途不发任何「还在处理」提示：等待本身是隐式的，一条进度播报换不来更快的
+    // 回复，只会在群里插进一段与上下文无关的噪音。
     let mut outcome = {
         let work = respond(
             &client,
@@ -395,18 +404,10 @@ async fn chat(
             &hist,
             &oai,
             mgr.path.parent().unwrap_or(&mgr.path),
-            progress_tx,
+            control.as_ref(),
         );
         let mut work = std::pin::pin!(work);
         let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
-        let notice_delay = use_pi.then(|| oai.progress_notice()).flatten();
-        let mut notice = std::pin::pin!(async move {
-            match notice_delay {
-                Some(delay) => tokio::time::sleep(delay).await,
-                None => std::future::pending::<()>().await,
-            }
-        });
-        let mut noticed = false;
 
         let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {
@@ -419,25 +420,6 @@ async fn chat(
                         || !mgr.generating.read().await.is_current(name, is_priv_ctx, &uid, gen_id) {
                         break Some(Ok(None));
                     }
-                }
-                _ = &mut notice, if !noticed => {
-                    noticed = true;
-                    let mut done = Vec::new();
-                    while let Ok(progress) = progress_rx.try_recv() {
-                        done.push(progress);
-                    }
-                    let detail = if done.is_empty() {
-                        "正在思考".to_string()
-                    } else {
-                        format!("正在处理 {}", done.join("、"))
-                    };
-                    reply_text(
-                        ctx,
-                        writer,
-                        &event,
-                        format!("⏳ 还在处理（{detail}），稍等一下…"),
-                    )
-                    .await;
                 }
             }
         }
@@ -546,17 +528,14 @@ async fn chat(
                 || (image_urls.is_empty()
                     && reply_data.sources.is_empty()
                     && is_plain_enough(&content, oai.plain_text_max_chars()));
-            let footer = (oai.show_trace_footer() && !plain).then(|| {
-                let mut footer = format!(
+            let footer = (oai.show_trace_footer() && !plain).then(|| super::render::Footer {
+                meta: format!(
                     "{} · {}",
                     reply_data.model.as_deref().unwrap_or(&agent.model),
                     super::utils::format_elapsed(started)
-                );
-                if !reply_data.trace.is_empty() {
-                    footer.push_str(" · ");
-                    footer.push_str(&reply_data.trace.join(" | "));
-                }
-                footer
+                ),
+                trace: reply_data.trace.clone(),
+                trace_overflow: reply_data.trace_overflow,
             });
 
             reply_card(
@@ -614,7 +593,7 @@ async fn chat(
 }
 
 fn room_model_label(agent: &Agent) -> &str {
-    if super::pi_agent::is_pi_room(&agent.name) {
+    if super::pi_agent::is_pi_room(&agent.name) && super::pi_agent::follows_pi_config(&agent.model) {
         "Pi 本机配置"
     } else {
         &agent.model
@@ -625,7 +604,9 @@ fn room_model_label(agent: &Agent) -> &str {
 struct Reply {
     text: String,
     sources: Vec<super::types::Source>,
-    trace: Vec<String>,
+    trace: Vec<super::types::TraceStep>,
+    /// 超出页脚保留上限、只计数的调用次数。
+    trace_overflow: usize,
     model: Option<String>,
 }
 
@@ -636,21 +617,24 @@ async fn respond(
     hist: &[ChatMessage],
     oai: &super::OaiConfig,
     data_dir: &std::path::Path,
-    progress: tokio::sync::mpsc::UnboundedSender<String>,
+    control: Option<&crate::plugins::ctl::bridge::Lease>,
 ) -> anyhow::Result<Reply> {
     if super::pi_agent::is_pi_room(&agent.name) {
         let result = super::pi_agent::conversation(
             &oai.pi_command,
             data_dir,
             &agent.system_prompt,
+            &agent.model,
+            oai.pi_stall(),
             hist,
-            Some(progress),
+            control,
         )
         .await?;
         return Ok(Reply {
             text: result.text,
             sources: Vec::new(),
             trace: result.trace,
+            trace_overflow: result.trace_overflow,
             model: result.model,
         });
     }
@@ -659,6 +643,7 @@ async fn respond(
         text: complete(client, &agent.model, msgs).await?,
         sources: Vec::new(),
         trace: Vec::new(),
+        trace_overflow: 0,
         model: Some(agent.model.clone()),
     })
 }
@@ -1852,8 +1837,7 @@ mod tests {
         for name in ["pi", "PI-test"] {
             let agent = Agent::new(name, "mj", "", "");
             let history = vec![ChatMessage::new("user", "test", vec![])];
-            let (tx, _) = tokio::sync::mpsc::unbounded_channel();
-            let result = respond(&client, &agent, &history, &config, &dir, tx).await;
+            let result = respond(&client, &agent, &history, &config, &dir, None).await;
             assert!(result.err().unwrap().to_string().contains("无法启动 pi"));
         }
         std::fs::remove_dir_all(dir).unwrap();

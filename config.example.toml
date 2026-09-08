@@ -24,17 +24,42 @@ enabled = true
 pi_command = "pi"
 # 单次回复的总时间预算（秒）。
 request_timeout_seconds = 300
-# 超过这个秒数还没出结果就先发一条进度提示；置 0 关闭。
-progress_notice_seconds = 30
+# pi 事件流静默这么多秒算卡死，掐掉重来一次（pi 自身不给模型请求设超时）；0 关闭。
+pi_stall_seconds = 90
 # 不含标题/列表/代码块的短回复直接发文本，不渲染图片；置 0 表示始终渲染图片。
 plain_text_max_chars = 120
 # 在回复卡片页脚显示模型、耗时与工具调用轨迹。
 show_trace_footer = true
 
+# 群聊搭话：让同一个 Pi Agent 以固定人格在指定群里旁听，绝大多数时候沉默。
+# 完整字段与取舍见 docs/ambient.md；人设在 data/oai/ambient/persona.md。
+[oai.ambient]
+enabled = false
+# 开启搭话的群号；空列表等于不开启。
+groups = []
+# 判定模型（便宜、能看图），复用 oai 已配置的接口与密钥。
+gate_model = "gemini-3.5-flash-lite"
+# 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
+reply_model = "apilio/gemini-3.8-flash"
+thinking = "low"
+# 发言时开放给 pi 的工具白名单；去掉 bash 即禁止群聊触发命令执行。
+tools = "read,bash,web_search,fetch_content,get_search_content"
+# 开口意愿分门槛，调高更沉默；门槛随沉默时长下移，见 docs/ambient.md。
+score_threshold = 45
+silence_relief_per_10min = 5
+silence_relief_cap = 20
+# 两次发言的最短间隔与每小时上限。
+cooldown_seconds = 90
+hourly_limit = 12
+# 打字速度（字/分钟），调低更像在慢慢敲。
+typing_cpm = 150
+
 # 全局插件控制：空列表仅允许本机控制台管理。
 [ctl]
 enabled = true
 admins = [] # 填写维护者 QQ 号，例如 [123456789]
+# 允许管理员在 pi 房间里用自然语言驱动 ctl（凭据仅本轮有效，见 docs/CONTROL.md）。
+pi_control = true
 
 [repeater]
 enabled = true

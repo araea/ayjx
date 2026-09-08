@@ -40,13 +40,15 @@ config.toml 不提交到 Git。首次启动会补齐默认字段，不覆盖解�
 ~~~
 
 Termux 下 ./bot start 会取得唤醒锁；需要使用 tmux 时执行 ./bot session 和 ./bot attach。
-名称为 pi 或以 pi- 开头的房间可调用本机 Pi CLI。
+名称为 pi 或以 pi- 开头的房间可调用本机 Pi CLI；[oai.ambient] 可让同一个 agent
+以固定人格在指定群里旁听、偶尔搭话。
 
 ## 文档与测试
 
 - [插件控制](docs/CONTROL.md)
 - [Satori 接入](docs/SATORI.md)
 - [Pi 房间](docs/pi-agent.md)
+- [群聊搭话](docs/ambient.md)
 - [插件兼容性审计](docs/SATORI_PLUGIN_AUDIT.md)
 - [架构说明](docs/ARCHITECTURE.md)
 

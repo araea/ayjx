@@ -230,3 +230,27 @@ pub(crate) struct Source {
     pub title: String,
     pub url: String,
 }
+
+/// 工具调用轨迹里的一步。
+///
+/// 页脚按结构渲染而不是拼成一行长文本：一行文本迟早要被字数截断，
+/// 而工具参数（命令、搜索词、URL）恰恰是尾巴最有信息量。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TraceStep {
+    /// 工具名，例如 `web_search`。
+    pub name: String,
+    /// 参数摘要；可能为空。
+    pub detail: String,
+    /// 连续同名同参调用的合并次数，至少为 1。
+    pub repeats: u32,
+}
+
+impl TraceStep {
+    pub(crate) fn new(name: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            detail: detail.into(),
+            repeats: 1,
+        }
+    }
+}

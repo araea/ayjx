@@ -39,8 +39,21 @@ pub(crate) struct Card<'a> {
     pub markdown: &'a str,
     /// 参考来源，渲染成正文后的编号列表。
     pub sources: &'a [super::types::Source],
-    /// 页脚小字，例如模型、耗时与工具轨迹。
-    pub footer: Option<String>,
+    /// 页脚：模型、耗时与工具轨迹。
+    pub footer: Option<Footer>,
+}
+
+/// 卡片页脚。
+///
+/// 轨迹保持结构化而不是先拼成一行：拼成一行就只能靠截断收尾，而工具参数
+/// 被砍掉的那一半往往正是要看的内容。分行渲染后长参数自然折行，不再丢字。
+pub(crate) struct Footer {
+    /// 模型与耗时。
+    pub meta: String,
+    /// 工具调用轨迹，每步一行。
+    pub trace: Vec<super::types::TraceStep>,
+    /// 未列出的调用次数。
+    pub trace_overflow: usize,
 }
 
 /// 渲染成 base64 JPEG。
@@ -134,12 +147,7 @@ fn build_html(card: &Card<'_>) -> String {
     let body = label_code_blocks(&body);
 
     let sources = render_sources(card.sources);
-    let footer = card
-        .footer
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| format!(r#"<div class="foot">{}</div>"#, escape_html(value)))
-        .unwrap_or_default();
+    let footer = card.footer.as_ref().map(render_footer).unwrap_or_default();
 
     format!(
         r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
@@ -158,6 +166,51 @@ fn label_code_blocks(html: &str) -> String {
             format!(r#"<pre data-lang="{}"><code>"#, escape_html(&caps[1]))
         })
         .into_owned()
+}
+
+fn render_footer(footer: &Footer) -> String {
+    let meta = footer.meta.trim();
+    if meta.is_empty() && footer.trace.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(r#"<div class="foot">"#);
+    if !meta.is_empty() {
+        out.push_str(&format!(
+            r#"<div class="foot-meta">{}</div>"#,
+            escape_html(meta)
+        ));
+    }
+    if !footer.trace.is_empty() {
+        out.push_str(r#"<div class="trace">"#);
+        for step in &footer.trace {
+            out.push_str(&format!(
+                r#"<div class="trace-row"><span class="trace-name">{}</span>"#,
+                escape_html(&step.name)
+            ));
+            if !step.detail.is_empty() {
+                out.push_str(&format!(
+                    r#"<span class="trace-arg">{}</span>"#,
+                    escape_html(&step.detail)
+                ));
+            }
+            if step.repeats > 1 {
+                out.push_str(&format!(
+                    r#"<span class="trace-rep">×{}</span>"#,
+                    step.repeats
+                ));
+            }
+            out.push_str("</div>");
+        }
+        if footer.trace_overflow > 0 {
+            out.push_str(&format!(
+                r#"<div class="trace-more">另有 {} 次调用</div>"#,
+                footer.trace_overflow
+            ));
+        }
+        out.push_str("</div>");
+    }
+    out.push_str("</div>");
+    out
 }
 
 fn render_sources(sources: &[super::types::Source]) -> String {
@@ -251,7 +304,14 @@ img{max-width:100%;height:auto;margin:8px 0;border-radius:8px}
 .src-idx{flex:none;min-width:17px;height:17px;border-radius:5px;background:#e0e7ff;color:#4338ca;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
 .src-title{color:#334155;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .src-host{flex:none;margin-left:auto;color:#94a3b8;font-size:11.5px}
-.foot{padding:9px 18px;background:#f8fafc;border-top:1px solid #eef1f5;font-size:11px;color:#94a3b8;line-height:1.6;word-break:break-word}
+.foot{padding:9px 18px;background:#f8fafc;border-top:1px solid #eef1f5;font-size:11px;color:#94a3b8;line-height:1.6;overflow-wrap:anywhere}
+.foot-meta{font-weight:600;letter-spacing:.01em}
+.trace{margin-top:5px;display:flex;flex-direction:column;gap:3px}
+.trace-row{display:flex;align-items:baseline;gap:6px}
+.trace-name{flex:none;padding:0 5px;border-radius:4px;background:#eef2ff;color:#6366f1;font-family:"SF Mono",Consolas,Menlo,monospace;font-size:10px;font-weight:650}
+.trace-arg{flex:1;min-width:0;color:#94a3b8;font-family:"SF Mono",Consolas,Menlo,monospace;font-size:10.5px;line-height:1.5;overflow-wrap:anywhere;word-break:break-word}
+.trace-rep{flex:none;color:#cbd5e1;font-size:10px}
+.trace-more{margin-top:2px;color:#cbd5e1;font-size:10.5px}
 /* 智能体与模型清单用的紧凑卡片；这些片段以裸 HTML 形式嵌在 Markdown 里。 */
 .agent-card{margin:10px 0;padding:12px;background:#f8fafc;border:1px solid #eef1f5;border-radius:9px}
 .agent-name{margin-bottom:7px;font-size:15px;font-weight:650;color:#0f172a}
@@ -280,7 +340,7 @@ img{max-width:100%;height:auto;margin:8px 0;border-radius:8px}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugins::oai::types::Source;
+    use crate::plugins::oai::types::{Source, TraceStep};
 
     #[test]
     fn code_blocks_carry_their_language_label() {
@@ -302,13 +362,25 @@ mod tests {
             title: "pi #3回复",
             markdown: "## 结论\n\n- 要点\n\n```rust\nfn main() {}\n```\n",
             sources: &sources,
-            footer: Some("gpt-5.6-luna · 8.2秒".into()),
+            footer: Some(Footer {
+                meta: "gpt-5.6-luna · 8.2秒".into(),
+                trace: vec![TraceStep::new(
+                    "web_search",
+                    "pi agent satori 协议 自动摘要 与工具轨迹 渲染",
+                )],
+                trace_overflow: 0,
+            }),
         });
         assert!(html.contains("<h2>结论</h2>"), "{html}");
         assert!(html.contains(r#"<pre data-lang="rust">"#), "{html}");
         assert!(html.contains("openai.com"), "{html}");
         assert!(!html.contains("utm=1"), "来源只展示域名");
         assert!(html.contains("gpt-5.6-luna · 8.2秒"), "{html}");
+        assert!(html.contains("web_search"), "{html}");
+        assert!(
+            html.contains("pi agent satori 协议 自动摘要 与工具轨迹 渲染"),
+            "工具参数完整出现在页脚：{html}"
+        );
     }
 
     #[test]
@@ -317,7 +389,11 @@ mod tests {
             title: "<script>x</script>",
             markdown: "hi",
             sources: &[],
-            footer: Some("a & b".into()),
+            footer: Some(Footer {
+                meta: "a & b".into(),
+                trace: Vec::new(),
+                trace_overflow: 0,
+            }),
         });
         assert!(!html.contains("<script>x</script>"));
         assert!(html.contains("&lt;script&gt;"));
@@ -339,7 +415,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
-    use crate::plugins::oai::types::Source;
+    use crate::plugins::oai::types::{Source, TraceStep};
 
     /// 真跑一次浏览器截图，确认卡片被完整量到（宽度按 2 倍像素密度出图，
     /// 高度不该退化成占位视口高度）。
@@ -357,7 +433,11 @@ mod live_tests {
             title: "pi #1回复",
             markdown,
             sources: &sources,
-            footer: Some("gpt-5.6-luna · 3.4秒 · web_search 测试".into()),
+            footer: Some(Footer {
+                meta: "gpt-5.6-luna · 3.4秒".into(),
+                trace: vec![TraceStep::new("web_search", "测试")],
+                trace_overflow: 0,
+            }),
         })
         .await
         .unwrap();

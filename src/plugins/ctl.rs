@@ -9,18 +9,23 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use toml::Value;
 
+pub mod bridge;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct Config {
     enabled: bool,
     /// Global operators, not group administrators. Empty means console only.
     admins: Vec<i64>,
+    /// 允许管理员在 pi 房间里用自然语言驱动 ctl（见 bridge）。关闭后 pi 房间拿不到凭据。
+    pi_control: bool,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: true,
             admins: vec![],
+            pi_control: true,
         }
     }
 }
@@ -30,7 +35,7 @@ pub fn default_config() -> Value {
 pub fn validate_config(value: &Value) -> Result<(), String> {
     Config::deserialize(value.clone())
         .map(|_| ())
-        .map_err(|_| "admins 必须是 QQ 号整数数组".into())
+        .map_err(|_| "admins 必须是 QQ 号整数数组，pi_control 必须是布尔值".into())
 }
 pub fn is_manager(ctx: &Context) -> bool {
     if ctx.bot.adapter == "console" && ctx.bot.platform == "console" {
@@ -346,7 +351,7 @@ fn word(text: &str) -> (&str, &str) {
         .map(|i| (&text[..i], text[i..].trim_start()))
         .unwrap_or((text, ""))
 }
-async fn execute(ctx: &Context, input: &str) -> Result<String, String> {
+pub(crate) async fn execute(ctx: &Context, input: &str) -> Result<String, String> {
     let (action, rest) = word(input);
     let prefix = get_prefixes(ctx).first().cloned().unwrap_or_default();
     if ["", "help", "帮助"].contains(&action) {

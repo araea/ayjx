@@ -9,6 +9,7 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjec
 use std::sync::Arc;
 use toml::Value;
 
+pub(crate) mod ambient;
 pub mod data;
 pub mod logic;
 pub mod mj;
@@ -28,13 +29,16 @@ pub(crate) struct OaiConfig {
     pi_command: String,
     /// 单次回复的总时间预算。
     request_timeout_seconds: u64,
-    /// 超过这个秒数还没出结果就先发一条进度提示；置 0 关闭。
-    progress_notice_seconds: u64,
+    /// pi 的事件流静默多少秒算卡死（卡住且尚未出正文时自动重来一次）；置 0 关闭。
+    /// pi 自身不给模型请求设超时，中转站抽风时它会一直等到总预算耗尽。
+    pi_stall_seconds: u64,
     /// 短回复直接以文本发送而不渲染图片的字符上限；置 0 表示始终渲染图片。
     /// 一句话的答复走文本既快又便于复制。
     plain_text_max_chars: usize,
     /// 在回复卡片页脚展示模型、耗时与工具调用轨迹。
     show_trace_footer: bool,
+    /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
+    ambient: ambient::AmbientConfig,
 }
 
 impl Default for OaiConfig {
@@ -43,9 +47,10 @@ impl Default for OaiConfig {
             enabled: true,
             pi_command: "pi".to_string(),
             request_timeout_seconds: 300,
-            progress_notice_seconds: 30,
+            pi_stall_seconds: 90,
             plain_text_max_chars: 120,
             show_trace_footer: true,
+            ambient: ambient::AmbientConfig::default(),
         }
     }
 }
@@ -55,10 +60,10 @@ impl OaiConfig {
         std::time::Duration::from_secs(self.request_timeout_seconds.clamp(30, 1_800))
     }
 
-    /// 进度提示的触发时刻；`None` 表示不提示。
-    pub(crate) fn progress_notice(&self) -> Option<std::time::Duration> {
-        (self.progress_notice_seconds > 0)
-            .then(|| std::time::Duration::from_secs(self.progress_notice_seconds.max(5)))
+    /// pi 静默多久算卡死；`None` 表示不看。
+    pub(crate) fn pi_stall(&self) -> Option<std::time::Duration> {
+        (self.pi_stall_seconds > 0)
+            .then(|| std::time::Duration::from_secs(self.pi_stall_seconds.max(20)))
     }
 
     pub(crate) fn plain_text_max_chars(&self) -> usize {
@@ -77,6 +82,9 @@ pub fn default_config() -> Value {
 pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     Box::pin(async move {
         let dir = get_data_dir("oai").await?;
+        if let Err(error) = ambient::init(&dir).await {
+            warn!(target: "Plugin/OAI", "群聊搭话资源初始化失败: {}", error);
+        }
         let mgr = Arc::new(data::Manager::new(dir));
 
         // 尝试预加载模型列表
@@ -167,10 +175,14 @@ pub fn handle(
             return Ok(None);
         }
 
-        // 获取纯文本内容
+        // 获取纯文本内容。没有文字的消息（纯图片、纯表情）不可能是指令，
+        // 但仍是群聊上下文的一部分，要让搭话观察者看到。
         let raw_text = match extract_clean_text(&ctx) {
             Some(t) => t,
-            None => return Ok(Some(ctx)),
+            None => {
+                ambient::observe(&ctx, &writer, mgr).await;
+                return Ok(Some(ctx));
+            }
         };
 
         // 1. 全局指令解析
@@ -210,6 +222,9 @@ pub fn handle(
             logic::execute(cmd, prompt, imgs, &ctx, &writer, mgr).await;
             return Ok(None);
         }
+
+        // 不属于任何指令的普通群聊：交给搭话观察者，事件继续向后传递。
+        ambient::observe(&ctx, &writer, mgr).await;
 
         Ok(Some(ctx))
     })

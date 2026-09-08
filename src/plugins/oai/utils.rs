@@ -411,9 +411,60 @@ pub fn format_export_txt(
     content
 }
 
+
+pub(crate) fn format_elapsed(started: std::time::Instant) -> String {
+    let seconds = started.elapsed().as_secs_f32();
+    if seconds >= 60.0 {
+        format!("{}分{:.0}秒", (seconds / 60.0) as u32, seconds % 60.0)
+    } else {
+        format!("{seconds:.1}秒")
+    }
+}
+
+/// 超长文本的中间省略：两端各留一半，省略号落在中间。
+///
+/// 尾部截断会把 shell 命令的参数、URL 的路径这类关键信息整段吃掉，而它们恰恰
+/// 是判断「这次工具调用做了什么」的依据。
+pub(crate) fn truncate_middle(value: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= max_chars || max_chars < 8 {
+        return value.to_string();
+    }
+    let keep = max_chars - 1;
+    let head = keep.div_ceil(2);
+    let tail = keep - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(chars[chars.len() - tail..].iter());
+    out
+}
+
+pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::openai_api_base;
+
+    #[test]
+    fn middle_truncation_keeps_both_ends() {
+        assert_eq!(super::truncate_middle("短", 8), "短");
+        let long = "bash -lc 'echo 中间省略 && ls -la /data/data/com.termux/files/home'";
+        let cut = super::truncate_middle(long, 20);
+        assert_eq!(cut.chars().count(), 20);
+        assert!(cut.starts_with("bash -lc"), "{cut}");
+        assert!(cut.ends_with("home'"), "{cut}");
+        assert!(cut.contains('…'), "{cut}");
+    }
 
     #[test]
     fn adds_v1_only_to_bare_openai_hosts() {
@@ -430,25 +481,4 @@ mod tests {
             "https://example.com/openai"
         );
     }
-}
-
-pub(crate) fn format_elapsed(started: std::time::Instant) -> String {
-    let seconds = started.elapsed().as_secs_f32();
-    if seconds >= 60.0 {
-        format!("{}分{:.0}秒", (seconds / 60.0) as u32, seconds % 60.0)
-    } else {
-        format!("{seconds:.1}秒")
-    }
-}
-
-pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (index, ch) in value.chars().enumerate() {
-        if index >= max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
-    }
-    out
 }
