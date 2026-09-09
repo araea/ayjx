@@ -337,7 +337,7 @@ mod tests {
         let keywords = vec!["gpt-image-2.5".to_string()];
         assert!(is_images_model("gpt-image-2.5-flare", &keywords));
         assert!(is_images_model("GPT-IMAGE-2.5-SUNBURST", &keywords));
-        assert!(!is_images_model("gpt-image-2", &keywords));
+        assert!(!is_images_model("gemini-3-pro-image", &keywords));
         assert!(!is_images_model("gpt-5.6-luna", &keywords));
         assert!(!is_images_model("gpt-image-2.5-flare", &[]));
     }

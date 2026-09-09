@@ -42,7 +42,7 @@ image_models = ["gpt-image-2.5"]
 #   /ctl set oai model_filter.keep ["gpt-5.6", "claude-opus-5"]
 [oai.model_filter]
 keep = [
-    "gpt-5.6", "gpt-5.5", "gpt-image-2",
+    "gpt-5.6", "gpt-5.5", "gpt-image-2.5",
     "claude-opus-5", "claude-fable-5", "claude-sonnet-5", "claude-opus-4-8",
     "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro-preview",
     "gemini-3-pro-image", "gemini-3.1-flash-image",

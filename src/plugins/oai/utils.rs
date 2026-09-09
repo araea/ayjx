@@ -16,7 +16,7 @@ pub const DEFAULT_MODEL_KEEP: &[&str] = &[
     // OpenAI
     "gpt-5.6",
     "gpt-5.5",
-    "gpt-image-2",
+    "gpt-image-2.5",
     // Anthropic
     "claude-opus-5",
     "claude-fable-5",
@@ -654,11 +654,15 @@ mod tests {
             "deepseek-v4-pro",
             "glm-5.3",
             "MiniMax-M2.7",
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
         ] {
             assert!(filter.accepts(keep), "{keep} 应当保留");
         }
         for drop in [
             "gpt-4o",
+            "gpt-image-2",
+            "gpt-image-2-all",
             "claude-3-5-sonnet-20241022",
             "gpt-5.5-2026-04-23",
             "gemini-3.1-flash-lite-preview",
@@ -698,7 +702,7 @@ mod tests {
 
     #[test]
     fn vendor_grouping_covers_the_default_keeps() {
-        assert_eq!(model_vendor("gpt-image-2"), "OpenAI");
+        assert_eq!(model_vendor("gpt-image-2.5-flare"), "OpenAI");
         assert_eq!(model_vendor("claude-fable-5-1"), "Anthropic");
         assert_eq!(model_vendor("gemini-3-pro-image"), "Google");
         assert_eq!(model_vendor("MiniMax-M2.7"), "MiniMax");
