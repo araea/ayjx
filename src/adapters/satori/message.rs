@@ -7,6 +7,10 @@ use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsScalar};
 use simd_json::owned::Object;
 use std::sync::{Arc, OnceLock};
 
+/// QQ 把骰子和猜拳实现为两个「魔法表情」，没有独立的消息元素。
+pub const DICE_FACE_ID: u32 = 358;
+pub const RPS_FACE_ID: u32 = 359;
+
 #[derive(Default)]
 struct Element {
     name: String,
@@ -466,7 +470,10 @@ fn segment_to_content(segment: &OwnedValue) -> String {
             )],
         ),
         "mface" | "poke" => tag_from_data(kind, data),
-        "dice" | "rps" => format!("<{kind}/>"),
+        // 骰子和猜拳在 QQ 里就是两个特殊表情；`<dice/>`/`<rps/>` 不在 Satori 元素表里，
+        // 发出去只会被适配器整段丢掉（没有报错，消息直接变空）。
+        "dice" => tag("emoji", &[("id", DICE_FACE_ID.to_string())]),
+        "rps" => tag("emoji", &[("id", RPS_FACE_ID.to_string())]),
         "markdown" => escape_text(data.get_str("content").unwrap_or("")),
         "node" => {
             if let Some(id) = data.get_str("id") {
@@ -632,6 +639,22 @@ mod tests {
             to_content(&value),
             "a &lt; b<at id=\"42\"/><quote id=\"7000000000000000000\"/><img src=\"https://x/y?a=1&amp;b=2\"/>"
         );
+    }
+
+    /// `<dice/>` / `<rps/>` 不是 Satori 元素，实现端会把不认识的空元素整段丢掉：
+    /// 消息不报错，只是变成空的，发送方却以为发出去了。走魔法表情才真的发得出去。
+    #[test]
+    fn dice_and_rps_serialize_as_the_magic_faces_qq_actually_understands() {
+        for (message, expected) in [
+            (Message::new().dice(), "<emoji id=\"358\"/>"),
+            (Message::new().rps(), "<emoji id=\"359\"/>"),
+        ] {
+            let value = simd_json::serde::to_owned_value(message).unwrap();
+            assert_eq!(to_content(&value), expected);
+        }
+        let mixed = Message::new().text("看运气").dice();
+        let value = simd_json::serde::to_owned_value(mixed).unwrap();
+        assert_eq!(to_content(&value), "看运气<emoji id=\"358\"/>");
     }
 
     #[test]
