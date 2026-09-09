@@ -54,6 +54,11 @@ const NOTE_C: Ink = Ink::rgb(109, 74, 64); // #6D4A40 提示条
 
 // ================= 通用小件 =================
 
+/// 印章类小图统一的超采样倍数：先按 2 倍画好，旋转贴合时再缩下来，
+/// 只转几度也不会把笔画的锐边磨圆。
+const SEAL_SS: f32 = 2.0;
+
+
 /// 出图时刻（北京时间），压在页眉右上角
 pub(super) fn stamp() -> String {
     let tz = FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区偏移");
@@ -113,26 +118,28 @@ fn mix(a: Ink, b: Ink, t: f32) -> Ink {
     }
 }
 
-/// 虚线描一个矩形框（圆角近似为直角，框小看不出来）
-fn dashed_rect(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, ink: Ink) {
-    c.hline(x, x + w, y, 1.0, ink, 4.0, 4.0);
-    c.hline(x, x + w, y + h, 1.0, ink, 4.0, 4.0);
-    c.vdash(x, y, y + h, 1.0, ink, 4.0, 4.0);
-    c.vdash(x + w, y, y + h, 1.0, ink, 4.0, 4.0);
+/// 虚线描一个圆角框。四条边加四个圆角是同一条路径，
+/// 拐角处不会像四条直线硬拼那样叠出一块深色。
+fn dashed_rect(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, r: f32, ink: Ink) {
+    c.rrect_dashed(x, y, w, h, r, 1.0, ink, 4.0, 4.0);
 }
 
-/// 点状分隔线（行与行之间）
+/// 点状分隔线（行与行之间）。圆头笔触点出来的才是「点」，
+/// 方头短横在这个浓度下看着像一条断续的脏线。
 fn dotted_sep(c: &mut Canvas, y: f32) {
-    c.hline(CX0 + 12.0, CX1 - 12.0, y, 1.0, SEPIA.with_a(0.20), 1.0, 3.0);
+    c.dashed_line(CX0 + 12.0, y, CX1 - 12.0, y, 1.3, SEPIA.with_a(0.34), 1.3, 3.4);
 }
 
-/// 渐变进度条：左端混白提亮，右端落到本色
+/// 渐变进度条：左端是本色的淡调，右端落到本色。
+///
+/// 左端曾经是「白色 45% 透明」，于是名次靠后、条很短的那几行几乎是白的——
+/// 明明画了却看不见。淡调不透明，再短的一截也读得出来。
 fn gradient_bar(c: &mut Canvas, x: f32, y: f32, w: f32, h: f32, color: Ink) {
+    let pale = mix(color, Ink::rgb(255, 255, 255), 0.52);
     let cols = w.ceil() as i32;
     for i in 0..cols {
         let t = i as f32 / w.max(1.0);
-        let ink = mix(Ink::rgb(255, 255, 255).with_a(0.45), color, t);
-        c.rect(x + i as f32, y, 1.0, h, ink);
+        c.rect(x + i as f32, y, 1.0, h, mix(pale, color, t));
     }
 }
 
@@ -155,24 +162,19 @@ fn draw_cells(c: &mut Canvas, f: &Fonts, x: f32, y: f32, word: &str, large: bool
         // 底：半透明白
         c.rrect_fill(cx, y, cell, cell, 4.0, Ink::rgb(255, 255, 255).with_a(0.5));
         // 边框
+        let radius = if large { 6.0 } else { 4.0 };
         match ch {
-            Some(_) => c.rrect_stroke(cx, y, cell, cell, 4.0, 2.0, RED.with_a(border_a)),
-            None => {
-                let ink = RED.with_a(border_a);
-                let dash = 5.0;
-                let g = 4.0;
-                c.hline(cx, cx + cell, y, 2.0, ink, dash, g);
-                c.hline(cx, cx + cell, y + cell - 2.0, 2.0, ink, dash, g);
-                c.vdash(cx, y, y + cell, 2.0, ink, dash, g);
-                c.vdash(cx + cell - 2.0, y, y + cell, 2.0, ink, dash, g);
-            }
+            Some(_) => c.rrect_stroke(cx, y, cell, cell, radius, 2.0, RED.with_a(border_a)),
+            None => c.rrect_dashed(cx, y, cell, cell, radius, 2.0, RED.with_a(border_a), 5.0, 4.0),
         }
-        // 田字虚线十字
+        // 田字虚线十字：格线是辅助，压到框线的一半浓度，
+        // 否则一格里三种红线抢戏，字反而站不住
         let inner = cell * 0.09;
         let cy = y + cell / 2.0;
         let xc = cx + cell / 2.0;
-        c.hline(cx + inner, cx + cell - inner, cy, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
-        c.vdash(xc, y + inner, y + cell - inner, 1.0, RED.with_a(border_a * 0.87), 4.0, 4.0);
+        let grid = RED.with_a(border_a * 0.62);
+        c.dashed_line(cx + inner, cy, cx + cell - inner, cy, 1.0, grid, 3.5, 4.5);
+        c.dashed_line(xc, y + inner, xc, y + cell - inner, 1.0, grid, 3.5, 4.5);
         // 字
         match ch {
             Some(&ch) => {
@@ -205,8 +207,8 @@ fn draw_nb(c: &mut Canvas, f: &Fonts, x: f32, cy: f32, text: &str, leading: bool
     let spacing = 0.1 * px;
     let w = c.text_w(text, &f.serif_b, px, spacing) + 20.0 + 2.0;
     let h = 33.0;
-    c.rrect_fill(x, cy - h / 2.0, w, h, 6.0, SEPIA.with_a(0.055));
-    dashed_rect(c, x, cy - h / 2.0, w, h, SEPIA.with_a(0.24));
+    c.rrect_fill(x, cy - h / 2.0, w, h, 7.0, SEPIA.with_a(0.06));
+    dashed_rect(c, x, cy - h / 2.0, w, h, 7.0, SEPIA.with_a(0.34));
     let baseline = mid_baseline(cy, px);
     let chars: Vec<char> = text.chars().collect();
     let mut tx = x + 11.0;
@@ -234,13 +236,15 @@ fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, 
     // 名次 + 距离档（右对齐）
     let rk_right = CX0 + 84.0;
     let num = row.rank.to_string();
+    // 名次列宽是定的，五位数得收一号字才不会顶到列边上去
+    let num_px = if row.rank >= 10_000 { 21.0 } else { 25.0 };
     let hash_w = c.text_w("#", &f.sans_b, 16.0, 0.0);
-    let num_w = c.text_w(&num, &f.sans_b, 25.0, 0.0);
+    let num_w = c.text_w(&num, &f.sans_b, num_px, 0.0);
     let base1 = y + 14.0 + 19.5;
     let sx = rk_right - hash_w - 1.0 - num_w;
     c.text(sx, base1, "#", &f.sans_b, 16.0, ink.with_a(0.5), 0.0);
-    c.text(sx + hash_w + 1.0, base1, &num, &f.sans_b, 25.0, ink, 0.0);
-    c.text_right(rk_right, base1 + 7.0 + 9.5, label, &f.serif_b, 12.5, ink.with_a(0.8), 2.5);
+    c.text(sx + hash_w + 1.0, base1, &num, &f.sans_b, num_px, ink, 0.0);
+    c.text_right(rk_right, base1 + 7.0 + 10.0, label, &f.serif_b, 13.5, ink.with_a(0.85), 1.6);
 
     // 中列：邻词牌 + 词 + 邻词牌，垂直居中在 TRI_H 里
     let mx = CX0 + 100.0;
@@ -250,8 +254,8 @@ fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, 
     let mut tx = mx;
     tx += draw_nb(c, f, tx, cy, &format!("？{}", row.prev), true) + 18.0;
     let wd_base = mid_baseline(cy, 31.0);
-    c.text(tx, wd_base, &row.word, &f.serif_b, 31.0, INK, 0.12 * 31.0);
-    tx += c.text_w(&row.word, &f.serif_b, 31.0, 0.12 * 31.0) + 18.0;
+    c.text(tx, wd_base, &row.word, &f.serif_b, 31.0, INK, 0.05 * 31.0);
+    tx += c.text_w(&row.word, &f.serif_b, 31.0, 0.05 * 31.0) + 18.0;
     draw_nb(c, f, tx, cy, &format!("{}？", row.next), false);
 
     // 接近度条（对数刻度）
@@ -273,10 +277,10 @@ fn draw_hint_row(c: &mut Canvas, f: &Fonts, y: f32, row: &HintRow, pool: usize, 
 
 /// 「新」小旗：旋转 -6° 的朱砂方印
 fn draw_flag(c: &mut Canvas, f: &Fonts, cx: f32, cy: f32) {
-    let mut layer = Canvas::new(30.0, 30.0, c.s());
+    let mut layer = Canvas::new(30.0, 30.0, c.s() * SEAL_SS);
     layer.rrect_fill(2.0, 2.0, 26.0, 26.0, 5.0, RED);
     layer.text_center(15.0, 15.0, "新", &f.serif_b, 14.0, CREAM, 0.0);
-    c.blit_rotated(&layer.img, cx, cy, -6.0);
+    c.blit_rotated(&layer.img, cx, cy, -6.0, SEAL_SS);
 }
 
 /// 「注」提示条
@@ -295,7 +299,7 @@ fn draw_note(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
 fn draw_empty(c: &mut Canvas, f: &Fonts, y: f32, text: &str) -> f32 {
     let y = y + 22.0;
     let h = 34.0 * 2.0 + 24.0;
-    dashed_rect(c, CX0, y, CW, h, SEPIA.with_a(0.20));
+    dashed_rect(c, CX0, y, CW, h, 8.0, SEPIA.with_a(0.30));
     c.text_center(CX0 + CW / 2.0, y + h / 2.0, text, &f.serif_b, 18.0, INK3, 0.06 * 18.0);
     y + h + 6.0
 }
@@ -337,10 +341,10 @@ fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) ->
     let head_y = PAD + 42.0;
     let head_cy = head_y + 21.0;
     // 印章：朱砂底 + 旋转 -3° 的「词」
-    let mut seal = Canvas::new(46.0, 46.0, c.s());
-    seal.rrect_fill(2.0, 2.0, 42.0, 42.0, 5.0, RED);
+    let mut seal = Canvas::new(46.0, 46.0, c.s() * SEAL_SS);
+    seal.rrect_fill(2.0, 2.0, 42.0, 42.0, 6.0, RED);
     seal.text_center(23.0, 23.0, "词", &f.serif_b, 25.0, CREAM, 0.0);
-    c.blit_rotated(&seal.img, CX0 + 21.0, head_cy, -3.0);
+    c.blit_rotated(&seal.img, CX0 + 21.0, head_cy, -3.0, SEAL_SS);
     // 品名
     let bx = CX0 + 42.0 + 13.0;
     c.text(bx, head_y + 20.0, "词意", &f.serif_b, 20.0, INK, 0.24 * 20.0);
@@ -461,13 +465,15 @@ pub fn win_card(c: &mut Canvas, f: &Fonts, win: &Win) -> f32 {
     let x = CX0 + (CW - total) / 2.0;
     draw_cells(c, f, x, y, &win.answer, true);
 
-    let mut mark = Canvas::new(mark_d + 8.0, mark_d + 8.0, c.s());
+    let mut mark = Canvas::new(mark_d + 8.0, mark_d + 8.0, c.s() * SEAL_SS);
     let m = mark_d / 2.0 + 4.0;
-    mark.circle_stroke(m, m, mark_d / 2.0 - 1.5, 3.0, RED.with_a(0.7));
-    mark.circle_stroke(m, m, mark_d / 2.0 - 4.0, 1.0, RED.with_a(0.16));
-    mark.text_center(m, m - 15.6, "猜", &f.serif_b, 29.0, RED.with_a(0.82), 0.08 * 29.0);
-    mark.text_center(m, m + 15.6, "中", &f.serif_b, 29.0, RED.with_a(0.82), 0.08 * 29.0);
-    c.blit_rotated(&mark.img, x + cells_w + 34.0 + mark_d / 2.0, y + cell / 2.0, -9.0);
+    // 印泥底 + 外圈 + 一道细内圈：只有一圈线的话，朱砂印看着像个空心圆环
+    mark.circle_fill(m, m, mark_d / 2.0 - 2.0, RED.with_a(0.05));
+    mark.circle_stroke(m, m, mark_d / 2.0 - 1.5, 3.4, RED.with_a(0.78));
+    mark.circle_stroke(m, m, mark_d / 2.0 - 5.5, 1.0, RED.with_a(0.20));
+    mark.text_center(m, m - 16.0, "猜", &f.serif_b, 32.0, RED.with_a(0.86), 0.06 * 32.0);
+    mark.text_center(m, m + 16.0, "中", &f.serif_b, 32.0, RED.with_a(0.86), 0.06 * 32.0);
+    c.blit_rotated(&mark.img, x + cells_w + 34.0 + mark_d / 2.0, y + cell / 2.0, -9.0, SEAL_SS);
     y += cell + 30.0 + 6.0;
 
     // 数字卡：第三格只有当局历时超过一分钟才出现
@@ -549,8 +555,8 @@ fn draw_rank_row(c: &mut Canvas, f: &Fonts, y: f32, place: usize, item: &RankIte
         c.rrect_fill(lx, ly, 38.0, 38.0, 9.0, RED);
         c.text_center(lx + 19.0, ly + 19.0, &place.to_string(), &f.sans_b, 17.0, CREAM, 0.0);
     } else {
-        c.rrect_fill(lx, ly, 38.0, 38.0, 9.0, RED.with_a(0.09));
-        c.rrect_stroke(lx, ly, 38.0, 38.0, 9.0, 1.0, RED.with_a(0.22));
+        c.rrect_fill(lx, ly, 38.0, 38.0, 9.0, RED.with_a(0.08));
+        c.rrect_stroke(lx, ly, 38.0, 38.0, 9.0, 1.2, RED.with_a(0.34));
         c.text_center(lx + 19.0, ly + 19.0, &place.to_string(), &f.sans_b, 17.0, RED, 0.0);
     }
 
@@ -562,7 +568,8 @@ fn draw_rank_row(c: &mut Canvas, f: &Fonts, y: f32, place: usize, item: &RankIte
     let bar_y = y + 15.0 + 26.0 + 11.0;
     c.rrect_fill(name_x, bar_y, name_max, 5.0, 2.5, SEPIA.with_a(0.10));
     let bw = (name_max * item.score as f32 / top).max(5.0);
-    c.rrect_fill(name_x, bar_y, bw, 5.0, 2.5, RED);
+    // 与提示行的接近度条同一种画法：淡调起手渐到本色，短条也有分量
+    gradient_bar(c, name_x, bar_y, bw, 5.0, RED);
 
     // 分数
     let score = item.score.to_string();
@@ -594,9 +601,10 @@ pub fn help_card(c: &mut Canvas, f: &Fonts, prefix: &str) -> f32 {
             let w = c.text_w(&main, &f.serif_b, 20.0, 0.06 * 20.0);
             c.text(CX0 + 12.0 + w + 6.0, base, extra, &f.sans, 13.5, RED, 0.0);
         } else if has_u {
+            // 别名要落在本行的行内：基线再往下就撞上行末的分隔线了
             c.text(
                 CX0 + 12.0,
-                base + 24.0 + 5.0 + 12.0,
+                base + 24.0,
                 &format!("亦可 {prefix}{extra}"),
                 &f.sans,
                 12.5,
@@ -682,8 +690,8 @@ pub fn rules_card(c: &mut Canvas, f: &Fonts) -> f32 {
 
 /// 分区标题：编号印 + 标题
 fn draw_section_head(c: &mut Canvas, f: &Fonts, y: f32, num: &str, title: &str) -> f32 {
-    c.rrect_fill(CX0 + 2.0, y, 24.0, 24.0, 4.0, RED);
-    c.text_center(CX0 + 14.0, y + 12.0, num, &f.sans_b, 13.0, CREAM, 0.0);
+    c.rrect_fill(CX0 + 2.0, y, 25.0, 25.0, 5.0, RED);
+    c.text_center(CX0 + 14.5, y + 12.5, num, &f.serif_b, 15.0, CREAM, 0.0);
     c.text(CX0 + 2.0 + 24.0 + 11.0, mid_baseline(y + 12.0, 21.0), title, &f.serif_b, 21.0, INK, 0.1 * 21.0);
     y + 25.0
 }
@@ -710,7 +718,7 @@ fn draw_key(c: &mut Canvas, f: &Fonts, y: f32, rows: &[(&str, &str, bool)]) -> f
             c.text_center(CX0 + 50.0, ky + BH / 2.0, term, &f.serif_b, 19.0, CREAM, 0.08 * 19.0);
         } else {
             c.rrect_fill(CX0 + 2.0, ky, 96.0, BH, 6.0, RED.with_a(0.07));
-            dashed_rect(c, CX0 + 2.0, ky, 96.0, BH, RED.with_a(0.26));
+            dashed_rect(c, CX0 + 2.0, ky, 96.0, BH, 6.0, RED.with_a(0.30));
             c.text_center(CX0 + 50.0, ky + BH / 2.0, term, &f.serif_b, 19.0, RED, 0.08 * 19.0);
         }
         c.text(CX0 + 2.0 + 96.0 + 14.0, mid_baseline(ky + BH / 2.0, 15.0), desc, &f.sans, 15.0, INK2, 0.0);
@@ -729,7 +737,8 @@ fn draw_tiers(c: &mut Canvas, f: &Fonts, y: f32, tiers: &[(&str, &str, &str)]) -
         let ink = Ink::hex(color);
         c.rrect_fill(x, y, tw, h, 8.0, Ink::rgb(255, 255, 255).with_a(0.5));
         c.rrect_stroke(x, y, tw, h, 8.0, 1.0, SEPIA.with_a(0.20));
-        c.rect(x + 1.0, y, tw - 2.0, 2.0, ink);
+        // 色条收进圆角以内并自己也圆头，否则方角会从圆角框里探出来
+        c.rrect_fill(x + 8.0, y + 1.0, tw - 16.0, 2.5, 1.25, ink);
         c.text_center(x + tw / 2.0, y + 19.0, label, &f.serif_b, 16.0, ink, 0.1 * 16.0);
         c.text_center(x + tw / 2.0, y + 44.0, range, &f.sans, 11.5, INK3, 0.0);
     }
