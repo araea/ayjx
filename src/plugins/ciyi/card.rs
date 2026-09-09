@@ -178,7 +178,10 @@ fn draw_cells(c: &mut Canvas, f: &Fonts, x: f32, y: f32, word: &str, large: bool
         // 字
         match ch {
             Some(&ch) => {
-                c.text_center(xc, cy, &ch.to_string(), &f.serif_b, font_px, INK, 0.0);
+                // 揭晓的答案是这张卡的主角，用最重的一档；
+                // 盘面里的小格还是正文级加粗，再重就堵死了
+                let face = if large { &f.serif_x } else { &f.serif_b };
+                c.text_center(xc, cy, &ch.to_string(), face, font_px, INK, 0.0);
             }
             None => {
                 // 全角「？」的字形偏左，往右挪四分之一个字身压回中线
@@ -343,7 +346,7 @@ fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) ->
     // 印章：朱砂底 + 旋转 -3° 的「词」
     let mut seal = Canvas::new(46.0, 46.0, c.s() * SEAL_SS);
     seal.rrect_fill(2.0, 2.0, 42.0, 42.0, 6.0, RED);
-    seal.text_center(23.0, 23.0, "词", &f.serif_b, 25.0, CREAM, 0.0);
+    seal.text_center(23.0, 23.0, "词", &f.serif_x, 25.0, CREAM, 0.0);
     c.blit_rotated(&seal.img, CX0 + 21.0, head_cy, -3.0, SEAL_SS);
     // 品名
     let bx = CX0 + 42.0 + 13.0;
@@ -354,7 +357,7 @@ fn shell_head(c: &mut Canvas, f: &Fonts, title: &str, sub: &str, aside: bool) ->
 
     // —— 标题区 ——
     let lede_y = head_y + 42.0 + 22.0;
-    c.text(CX0, lede_y + 37.0, title, &f.serif_b, 38.0, INK, 0.06 * 38.0);
+    c.text(CX0, lede_y + 37.0, title, &f.serif_x, 38.0, INK, 0.06 * 38.0);
     let mut bottom = lede_y + 46.0;
     if !sub.is_empty() {
         c.text(CX0, bottom + 11.0 + 17.0, sub, &f.sans, 14.5, INK3, 0.0);
@@ -471,8 +474,8 @@ pub fn win_card(c: &mut Canvas, f: &Fonts, win: &Win) -> f32 {
     mark.circle_fill(m, m, mark_d / 2.0 - 2.0, RED.with_a(0.05));
     mark.circle_stroke(m, m, mark_d / 2.0 - 1.5, 3.4, RED.with_a(0.78));
     mark.circle_stroke(m, m, mark_d / 2.0 - 5.5, 1.0, RED.with_a(0.20));
-    mark.text_center(m, m - 16.0, "猜", &f.serif_b, 32.0, RED.with_a(0.86), 0.06 * 32.0);
-    mark.text_center(m, m + 16.0, "中", &f.serif_b, 32.0, RED.with_a(0.86), 0.06 * 32.0);
+    mark.text_center(m, m - 16.0, "猜", &f.serif_x, 32.0, RED.with_a(0.86), 0.06 * 32.0);
+    mark.text_center(m, m + 16.0, "中", &f.serif_x, 32.0, RED.with_a(0.86), 0.06 * 32.0);
     c.blit_rotated(&mark.img, x + cells_w + 34.0 + mark_d / 2.0, y + cell / 2.0, -9.0, SEAL_SS);
     y += cell + 30.0 + 6.0;
 

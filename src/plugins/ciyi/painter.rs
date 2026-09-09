@@ -55,19 +55,28 @@ impl std::ops::Deref for Typeface {
     }
 }
 
-/// 合成粗体的外扩量。取值参照浏览器：把轮廓描一圈 1/24 字号的线，
-/// 摊到每一侧就是 1/48 ≈ 0.021 em。再多就糊成一团，再少看不出区别。
+/// 差 300 点字重（Regular → Bold）该外扩多少。取值参照浏览器：
+/// 把轮廓描一圈 1/24 字号的线，摊到每一侧就是 1/48 ≈ 0.021 em。
+/// 再多就糊成一团，再少看不出区别。
 const SYNTHETIC_BOLD: f32 = 0.021;
 
-/// 拿到的字重够不够粗？SemiBold（600）起算真粗体，再轻的都要自己补。
-fn embolden_for(weight: fontdb::Weight) -> f32 {
-    if weight.0 >= 600 { 0.0 } else { SYNTHETIC_BOLD }
+/// 还欠多少粗。字体查询是「最接近匹配」，要 Bold 未必给 Bold——
+/// 差多少就按比例补多少，一点不差时为 0，真字重上不再动手脚。
+fn embolden_for(wanted: fontdb::Weight, got: fontdb::Weight) -> f32 {
+    let gap = (f32::from(wanted.0) - f32::from(got.0)).max(0.0);
+    SYNTHETIC_BOLD * gap / 300.0
 }
 
-/// 两个字族 × 两档字重：宋体管汉字与标题，黑体管数字与元信息；
-/// Bold 用于标题与数字，Regular 用于正文。找不到对应字重时按
+/// 宋体管汉字与标题，黑体管数字与元信息。找不到对应字重时按
 /// 「同族 Regular → 同字族另一档 → 黑体」逐级回退，字重不够就合成。
+///
+/// 宋体分三档而不是两档：`serif_x` 是能拿到的最重的一档，只留给「题字」
+/// ——卡片大标题、揭晓的答案、印章。这几处要的是一眼的分量，
+/// 用它和用 `serif_b` 是两种气质；正文级的加粗仍然走 `serif_b`，
+/// 二十来 px 的字上再重就糊成一团了。
 pub struct Fonts {
+    /// 题字：最重的一档宋体
+    pub serif_x: Typeface,
     pub serif_b: Typeface,
     pub serif: Typeface,
     pub sans_b: Typeface,
@@ -86,6 +95,7 @@ const EXTRA_FONT_DIRS: &[&str] = &[
 /// 连族名都查不到时按文件兜底（Android 自带的 CJK 字体）。
 /// `.ttc` 用 fontdb 给出的 face 序号取。
 const SERIF_FILES: &[&str] = &[
+    "/system/fonts/NotoSerifCJKsc-Black.otf",
     "/system/fonts/NotoSerifCJK-Bold.ttc",
     "/system/fonts/NotoSerifCJK-Regular.ttc",
     "/system/fonts/NotoSerifCJKsc-Bold.otf",
@@ -142,21 +152,20 @@ impl Fonts {
                 .or_else(|| load_files(SERIF_FILES))
         };
         // 「查 Bold 查回来的还是 Regular」在 Android 上是常态，不是异常：
-        // 拿不到真字重就记下来，落笔时把字形外扩一圈补上。
-        let bold = |hit: Option<(FontVec, fontdb::Weight)>| {
-            hit.map(|(font, weight)| Typeface {
+        // 系统自带的中日韩字体往往只有 Regular 一档。差多少字重就记下来，
+        // 落笔时把字形外扩相应的一圈补上；装了真字重则自动不再合成。
+        let face = |hit: Option<(FontVec, fontdb::Weight)>, wanted: fontdb::Weight| {
+            hit.map(|(font, got)| Typeface {
                 font,
-                embolden: embolden_for(weight),
+                embolden: embolden_for(wanted, got),
             })
         };
-        let plain = |hit: Option<(FontVec, fontdb::Weight)>| {
-            hit.map(|(font, _)| Typeface { font, embolden: 0.0 })
-        };
         Some(Fonts {
-            serif_b: bold(serif(fontdb::Weight::BOLD))?,
-            serif: plain(serif(fontdb::Weight::NORMAL))?,
-            sans_b: bold(sans(fontdb::Weight::BOLD))?,
-            sans: plain(sans(fontdb::Weight::NORMAL))?,
+            serif_x: face(serif(fontdb::Weight::BLACK), fontdb::Weight::BLACK)?,
+            serif_b: face(serif(fontdb::Weight::BOLD), fontdb::Weight::BOLD)?,
+            serif: face(serif(fontdb::Weight::NORMAL), fontdb::Weight::NORMAL)?,
+            sans_b: face(sans(fontdb::Weight::BOLD), fontdb::Weight::BOLD)?,
+            sans: face(sans(fontdb::Weight::NORMAL), fontdb::Weight::NORMAL)?,
         })
     }
 }
@@ -209,7 +218,7 @@ fn load_family(
 }
 
 /// 按文件路径兜底：Android 的系统字体没有可查询的 fontconfig 索引。
-/// `.ttc` 直接取 0 号 face，够渲染中日韩汉字。文件名里带 Bold 才算真粗。
+/// `.ttc` 直接取 0 号 face，够渲染中日韩汉字。字重只能从文件名认。
 fn load_files(files: &[&str]) -> Option<(FontVec, fontdb::Weight)> {
     for &file in files {
         if !std::path::Path::new(file).is_file() {
@@ -218,10 +227,10 @@ fn load_files(files: &[&str]) -> Option<(FontVec, fontdb::Weight)> {
         if let Ok(data) = std::fs::read(file)
             && let Ok(f) = FontVec::try_from_vec_and_index(data, 0)
         {
-            let weight = if file.contains("Bold") {
-                fontdb::Weight::BOLD
-            } else {
-                fontdb::Weight::NORMAL
+            let weight = match file {
+                _ if file.contains("Black") => fontdb::Weight::BLACK,
+                _ if file.contains("Bold") => fontdb::Weight::BOLD,
+                _ => fontdb::Weight::NORMAL,
             };
             return Some((f, weight));
         }
@@ -815,14 +824,19 @@ fn stamp_disc(mask: &mut [f32], mw: usize, mh: usize, cx: f32, cy: f32, r: f32) 
 mod tests {
     use super::*;
 
-    /// SemiBold 起才算真粗体；再轻的字面都得自己补一圈，
-    /// 否则在只带 Regular 中日韩字体的机器上，标题和正文一样细。
+    /// 拿到真字重就不再动手脚；差多少补多少，差得越多补得越厚。
+    /// 机器上只有 Regular 中日韩字体时，全靠这一段撑起标题与正文的分野。
     #[test]
-    fn only_a_genuinely_bold_face_skips_the_synthetic_pass() {
-        assert_eq!(embolden_for(fontdb::Weight(400)), SYNTHETIC_BOLD);
-        assert_eq!(embolden_for(fontdb::Weight(500)), SYNTHETIC_BOLD);
-        assert_eq!(embolden_for(fontdb::Weight(600)), 0.0);
-        assert_eq!(embolden_for(fontdb::Weight(700)), 0.0);
+    fn the_synthetic_pass_only_makes_up_the_missing_weight() {
+        let (w400, w700, w900) = (fontdb::Weight(400), fontdb::Weight(700), fontdb::Weight(900));
+        assert_eq!(embolden_for(w700, w700), 0.0, "真粗体不该再外扩");
+        assert_eq!(embolden_for(w400, w400), 0.0, "常规档更不该");
+        assert_eq!(embolden_for(w700, w900), 0.0, "拿到的比要的还重，也不动");
+        assert_eq!(embolden_for(w700, w400), SYNTHETIC_BOLD);
+        assert!(
+            embolden_for(w900, w400) > embolden_for(w700, w400),
+            "要题字那一档却只拿到常规，得补得更厚"
+        );
     }
 
     /// 虚线是用圆头笔触沿路径密集点出来的，笔触必然互相重叠。
@@ -870,14 +884,13 @@ mod tests {
     fn report_resolved_font_files() {
         let db = load_db();
         for (label, families) in [("serif", SERIF_FAMILIES), ("sans", SANS_FAMILIES)] {
-            for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
+            for weight in [
+                fontdb::Weight::NORMAL,
+                fontdb::Weight::BOLD,
+                fontdb::Weight::BLACK,
+            ] {
                 let got = load_family(&db, families, weight).map(|(_, w)| w);
-                // 只有粗体那一档才会去合成；常规档拿到什么就用什么
-                let synth = if weight == fontdb::Weight::BOLD {
-                    got.map_or(0.0, embolden_for)
-                } else {
-                    0.0
-                };
+                let synth = got.map_or(0.0, |g| embolden_for(weight, g));
                 println!("{label} 求 {weight:?} → 得 {got:?}（合成 {synth:.3} em）");
             }
         }

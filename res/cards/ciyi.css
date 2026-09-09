@@ -78,6 +78,7 @@ body {
   background: linear-gradient(150deg, #bd3c31, var(--red-deep));
   color: var(--cream);
   font-family: var(--serif);
+  font-weight: 900;
   font-size: 27px;
   line-height: 46px;
   text-align: center;
@@ -123,10 +124,12 @@ body {
 
 .lede-text { flex: 1; min-width: 0; }
 
+/* 题字用能拿到的最重一档（装了 Noto Serif CJK SC Black 才有 900，
+   没有则由浏览器合成——两种情况都比 700 更有分量） */
 h1 {
   font-family: var(--serif);
   font-size: 40px;
-  font-weight: 700;
+  font-weight: 900;
   line-height: 1.2;
   letter-spacing: .06em;
 }
@@ -209,11 +212,12 @@ h1 {
   border-color: rgba(176, 52, 42, .5);
 }
 
-/* 揭晓卡的放大版 */
+/* 揭晓卡的放大版：答案是主角，压到最重 */
 .cells-lg .cell {
   width: 104px;
   height: 104px;
   border-width: 3px;
+  font-weight: 900;
   font-size: 60px;
   line-height: 98px;
   border-radius: 6px;
@@ -458,7 +462,7 @@ h1 {
   color: rgba(176, 52, 42, .84);
   font-family: var(--serif);
   font-size: 29px;
-  font-weight: 700;
+  font-weight: 900;
   line-height: 1.08;
   letter-spacing: .08em;
   text-indent: .08em;
