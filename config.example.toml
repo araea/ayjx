@@ -65,6 +65,10 @@ enabled = false
 groups = []
 # 判定模型（便宜、能看图），复用 oai 已配置的接口与密钥。
 gate_model = "gemini-3.8-flash"
+# 判定读的「兴趣画像」。默认（不写这一行）用内置浓缩画像，比完整写作人设省一多半 token 且不影响判断。
+# 想自定义就取消注释写一段短文（只写对什么感兴趣、避开什么、怎么接话）；
+# 想退回用完整写作人设（最贵，不推荐）就把它设为空字符串。
+# gate_persona = ""
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
 reply_model = "apilio/gemini-3.8-flash"
 thinking = "low"

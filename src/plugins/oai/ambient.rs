@@ -44,6 +44,20 @@ const LOG_TARGET: &str = "Plugin/OAI";
 const PERSONA: &str = include_str!("../../../res/ambient/persona.md");
 /// 描述 Satori 消息元素的 skill；随代码走，每次启动覆盖。
 const SKILL: &str = include_str!("../../../res/ambient/skills/satori-reply/SKILL.md");
+/// 判定用的「兴趣画像」。
+///
+/// 判定的唯一任务是在每条消息到来时判断「这个人格会不会想接这句话」。
+/// 它只需要知道人格对什么感兴趣、规避什么、怎么接话，而完整写作人设
+/// （语感、句式、节奏示例）是给发言模型用的。9KB 人设在每次判定输入里
+/// 几乎是常量，却占了判定输入的一大半 token——换成这份几百字的画像，
+/// 能让每轮判定便宜一大截，且不影响它判断该不该开口。
+const GATE_PERSONA: &str = "\
+你是 QQ 群里一个常年潜水的熟面孔。你对游戏机制、效率工具、人性、自由和命运感兴趣，
+喜欢雨天、旧书和结构漂亮的论证。你反感拍马屁与被激将，只服能被证明的事，被说中会认。
+情感与纠缠话题（表白、依恋、色情）你本能避开。日常爱接梗、玩机锋、歪用别人的话、
+借典故打比方、短暂装傻；讨厌复读、刷屏、内容已解决或别人明确不想继续，宁可沉默也不刷存在感。
+别人认真求助时你会认真查证并给可核实的来源，有一说一。
+判断「你会不会想接这句话」即可，不必操心措辞风格。";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -54,6 +68,9 @@ pub(crate) struct AmbientConfig {
     pub groups: Vec<i64>,
     /// 判定模型：便宜、快、能看图。
     pub gate_model: String,
+    /// 判定用的浓缩人设画像（见 [`GATE_PERSONA`]）。判定只需知道对什么感兴趣、
+    /// 避开什么、怎么接话，不需要完整写作人设；留空则回退用完整人设（更贵）。
+    pub gate_persona: String,
     /// 发言模型，交给 pi 的 `provider/model`。
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
@@ -106,6 +123,7 @@ impl Default for AmbientConfig {
             enabled: false,
             groups: Vec::new(),
             gate_model: "gemini-3.8-flash".to_string(),
+            gate_persona: GATE_PERSONA.to_string(),
             reply_model: "apilio/gemini-3.8-flash".to_string(),
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
@@ -818,11 +836,16 @@ mod tests {
         let config: AmbientConfig = toml::from_str("").unwrap();
         assert_eq!(config.gate_model, "gemini-3.8-flash");
         assert_eq!(config.reply_model, "apilio/gemini-3.8-flash");
+        // 判定人设默认是浓缩画像，比完整人设便宜得多，且不会被空值覆盖。
+        assert!(!config.gate_persona.trim().is_empty());
         let custom: AmbientConfig =
             toml::from_str("gate_model = 'custom-gate'\nreply_model = 'custom/custom-reply'")
                 .unwrap();
         assert_eq!(custom.gate_model, "custom-gate");
         assert_eq!(custom.reply_model, "custom/custom-reply");
+        // 显式清空 gate_persona 时判定回退用完整人设。
+        let no_gate_persona: AmbientConfig = toml::from_str("gate_persona = ''").unwrap();
+        assert!(no_gate_persona.gate_persona.trim().is_empty());
     }
 
     #[test]

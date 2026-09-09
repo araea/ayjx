@@ -89,9 +89,18 @@ pub(crate) async fn judge(
     } else {
         RUBRIC
     };
+    // 判定只需要判断「值不值得开口」，所以喂一份浓缩的兴趣画像，而不是完整的
+    // 写作人设（那是给发言模型的）。完整人设在每次判定输入里几乎不变，却是最大的
+    // 恒定开销——换上几百字的画像，能在不影响判断的前提下省下这笔钱。
+    // 配置里显式清空 gate_persona 时，回退用完整人设。
+    let gate_persona = if config.gate_persona.trim().is_empty() {
+        persona
+    } else {
+        config.gate_persona.as_str()
+    };
     let mut messages: Vec<ChatCompletionRequestMessage> = vec![
         ChatCompletionRequestSystemMessageArgs::default()
-            .content(format!("{rubric}\n\n实际人格：\n{persona}"))
+            .content(format!("{rubric}\n\n实际人格画像：\n{gate_persona}"))
             .build()?
             .into(),
     ];

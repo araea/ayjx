@@ -168,11 +168,18 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 
 `config.toml` 的 `[oai.ambient]`：
 
+> 成本分两头：**判定**便宜、频繁（每条新消息都来一次），**发言**贵、罕见（只有判定通过才发生）。
+> 判定占据绝大多数调用，所以默认给它一口浓缩的「兴趣画像」（`gate_persona`）而非完整写作人设——
+> 完整人设在每次判定里几乎不变，却是判定输入里最大的恒定开销；画像只保留"对什么感兴趣、
+> 避开什么、怎么接话"，足够判定该不该开口，也能让每轮判定便宜一大截。
+> 若你有更便宜的判定模型（如 flash 系或本地模型），可再用 `/ctl set oai ambient.gate_model …` 进一步降本。
+
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 总开关 |
 | `groups` | `[]` | 允许搭话的群号 |
 | `gate_model` | `gemini-3.8-flash` | 判定模型，复用 oai 接口与密钥 |
+| `gate_persona` | （浓缩画像） | 判定读的「兴趣画像」。判定只需知道对什么感兴趣、避开什么、怎么接话，不必读完整写作人设；完整人设在每次判定输入里几乎不变，却是判定最大的恒定开销，换成几百字画像可让每轮判定便宜一大截且不改变判断。留空则回退用完整人设 |
 | `reply_model` | `apilio/gemini-3.8-flash` | pi 的发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,bash,web_search,fetch_content,get_search_content` | 原有工具白名单；本轮自动附加三个 satori 工具 |
