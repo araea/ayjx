@@ -1,8 +1,8 @@
 //! OpenAI 兼容的图像生成接口（`/v1/images/generations` 与 `/v1/images/edits`）。
 //!
 //! 站点上的 `gpt-image-2.5-*` 系列走专用图像接口：纯文字走生成接口，消息自带或
-//! 引用的图片作为垫图走编辑接口；尺寸、画质这类绘图参数由接口直接接收。结果拼回
-//! 与聊天补全一致的 markdown 图片链接，复用下游的提取、发送与历史记录逻辑。
+//! 引用的图片及房间名后 @用户的头像作为垫图走编辑接口；尺寸、画质由接口直接接收。
+//! 结果拼回与聊天补全一致的 markdown 图片链接，复用下游的提取、发送与历史记录逻辑。
 
 use super::logic::Reply;
 use super::types::{Agent, ChatMessage};
@@ -127,7 +127,7 @@ fn is_quality(value: &str) -> bool {
 }
 
 /// 最后一条用户消息就是本轮提示词；房间系统提示词作为风格前缀。
-/// 消息自带的图片（发送或引用）作为垫图，走 `/v1/images/edits`。
+/// 消息自带的图片（发送、引用或 @用户头像）作为垫图，走 `/v1/images/edits`。
 fn last_user(hist: &[ChatMessage]) -> Option<&ChatMessage> {
     hist.iter().rev().find(|message| message.role == "user")
 }

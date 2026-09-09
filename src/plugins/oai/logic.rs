@@ -1610,10 +1610,11 @@ pub async fn execute(
 ## 图像生成房间 (gpt-image)
 | 房间模型 | 直接操作 |
 |------|------|
-| `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` | 输入提示词直接出图；发图或引用图片则作为垫图编辑 |
+| `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` | 输入提示词直接出图；发图、引用图片或房间名后 @用户则作为垫图编辑 |
 
 > 例：`##画图 gpt-image-2.5-flare` 创建房间，然后 `画图 一只在窗台晒太阳的橘猫`。
-> 垫图：直接发送图片或引用图片，再说修改要求，如「把背景改成星空」；最多 4 张。
+> 垫图：直接发送图片、引用图片，或在房间名后 @用户，再说修改要求；合计最多 4 张。
+> 头像示例：`画图 @某位群友 把头像改成水彩风格`（使用聊天界面的真实 @提及）。与 Gemini 生图共用提取逻辑，房间名前的 @ 和 @全体不作为垫图。
 > 可选参数：`--size 1536x1024`（或 `-s auto`）、`--quality high`（或 `-q low/medium/high/auto`）。
 > 走图像接口的模型关键字由 `[oai].image_models` 配置，默认 `["gpt-image-2.5"]`。
 
@@ -1828,6 +1829,117 @@ pub async fn handle_create(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mentioned_avatars_reach_gpt_image_edits() {
+        use crate::event::{BotStatus, EventType};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let ctx = Context {
+            event: EventType::Satori(
+                simd_json::serde::to_owned_value(serde_json::json!({
+                    "post_type": "message",
+                    "message": [
+                        {"type":"at", "data":{"qq":"10000"}},
+                        {"type":"text", "data":{"text":"画图 "}},
+                        {"type":"at", "data":{"qq":"114514"}},
+                        {"type":"at", "data":{"qq":1919810}},
+                        {"type":"at", "data":{"qq":"all"}},
+                        {"type":"image", "data":{"url":png}},
+                        {"type":"text", "data":{"text":" 把头像改成水彩 --quality high"}}
+                    ]
+                }))
+                .unwrap(),
+            ),
+            config: Arc::new(std::sync::RwLock::new(crate::config::AppConfig::default())),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            db: sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+            scheduler: Arc::new(crate::scheduler::Scheduler::new()),
+            matcher: Arc::new(crate::matcher::Matcher::new()),
+            config_path: Arc::from("unused-image-test.toml"),
+            bot: Arc::new(BotStatus::default()),
+        };
+        let writer = Arc::new(crate::adapters::satori::SatoriClient::console());
+        let raw = super::super::extract_clean_text(&ctx).unwrap();
+        let cmd = super::super::parser::parse_agent_cmd(&raw, &["画图".into()]).unwrap();
+        let (quote, images) =
+            super::super::utils::get_full_content(&ctx, &writer, Some(&cmd.agent)).await;
+        assert!(quote.is_empty());
+        assert_eq!(
+            images,
+            vec![
+                "https://q.qlogo.cn/g?b=qq&nk=114514&s=640".to_string(),
+                "https://q.qlogo.cn/g?b=qq&nk=1919810&s=640".to_string(),
+                png.to_string(),
+            ]
+        );
+        // Seed the normal download cache: no QQ avatar or model service is contacted.
+        for url in &images[..2] {
+            remember_data_url(url, png);
+        }
+        let history = prepare_history(&[], &cmd.args, &images, false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            // Both image-model variants must upload the avatars through edits.
+            for model in ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line.trim(), "POST /v1/images/edits HTTP/1.1");
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).await.unwrap();
+                let form = String::from_utf8_lossy(&body);
+                assert_eq!(form.matches("name=\"image[]\"").count(), 3);
+                assert_eq!(
+                    body.windows(4).filter(|bytes| *bytes == b"\x89PNG").count(),
+                    3
+                );
+                assert!(form.contains(model));
+                assert!(form.contains("把头像改成水彩"));
+                assert!(form.contains("name=\"quality\"\r\n\r\nhigh"));
+                let response = r#"{"data":[{"url":"https://example.invalid/result.png"}]}"#;
+                reader.get_mut().write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(), response,
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        for model in ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] {
+            let config = super::super::OaiConfig::default();
+            assert!(super::super::images::is_images_model(
+                model,
+                &config.image_models
+            ));
+            let agent = Agent::new("画图", model, "", "");
+            let reply = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                super::super::images::generate_reply(&base, "test-only", &agent, &history),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                reply
+                    .text
+                    .contains("![image](https://example.invalid/result.png)")
+            );
+        }
+        server.await.unwrap();
+    }
 
     #[test]
     fn ordinary_chat_request_has_no_tools() {

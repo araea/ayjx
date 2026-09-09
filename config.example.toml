@@ -66,7 +66,7 @@ groups = []
 # 判定模型（便宜、能看图），复用 oai 已配置的接口与密钥。
 gate_model = "gemini-3.8-flash"
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
-reply_model = "deepseek/deepseek-v4-flash-vision-exp"
+reply_model = "apilio/gemini-3.8-flash"
 thinking = "low"
 # 发言时开放的辅助工具白名单；每轮额外加载三个 satori 聊天工具。
 # 去掉 bash 可关闭本轮命令执行工具。

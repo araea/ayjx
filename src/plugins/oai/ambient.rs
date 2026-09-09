@@ -103,7 +103,7 @@ impl Default for AmbientConfig {
             enabled: false,
             groups: Vec::new(),
             gate_model: "gemini-3.8-flash".to_string(),
-            reply_model: "deepseek/deepseek-v4-flash-vision-exp".to_string(),
+            reply_model: "apilio/gemini-3.8-flash".to_string(),
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
             score_threshold: 45,
@@ -785,6 +785,18 @@ mod tests {
 
     fn event(value: serde_json::Value) -> OwnedValue {
         simd_json::serde::to_owned_value(value).unwrap()
+    }
+
+    #[test]
+    fn default_models_match_but_explicit_overrides_are_preserved() {
+        let config: AmbientConfig = toml::from_str("").unwrap();
+        assert_eq!(config.gate_model, "gemini-3.8-flash");
+        assert_eq!(config.reply_model, "apilio/gemini-3.8-flash");
+        let custom: AmbientConfig =
+            toml::from_str("gate_model = 'custom-gate'\nreply_model = 'custom/custom-reply'")
+                .unwrap();
+        assert_eq!(custom.gate_model, "custom-gate");
+        assert_eq!(custom.reply_model, "custom/custom-reply");
     }
 
     #[test]

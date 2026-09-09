@@ -140,11 +140,11 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 本机控制台也支持。发言模型影响所有已启用搭话的群：
 
 ```text
-/ctl set oai ambient.reply_model deepseek/deepseek-v4-flash-vision-exp
+/ctl set oai ambient.reply_model apilio/gemini-3.8-flash
 /ctl show oai ambient.reply_model
 ```
 
-`deepseek` 是本机 Pi 中已配置的 provider 名；换其他模型时填写 Pi 能识别的 `provider/model`。
+`apilio` 是本机 Pi 中已配置的 provider 名；换其他模型时填写 Pi 能识别的 `provider/model`。
 前置判定走 oai 的接口与密钥，单独切换，模型名不加 Pi 的 provider 前缀：
 
 ```text
@@ -152,9 +152,8 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 /ctl show oai ambient.gate_model
 ```
 
-默认判定用 Gemini 3.8 Flash，发言用 DeepSeek V4 Flash（官方直连）——两者都便宜、快、能看图。
-判定只做打分，用中转站上当前最划算的多模态档位即可；发言走 Pi 的 DeepSeek provider，
-按百万 token 计费比中转站的 Claude / GPT 档位低一个数量级，中文口语也够自然。
+默认判定和发言统一使用 Gemini 3.8 Flash。判定通过 oai 的接口调用，
+发言通过 Pi 的 `apilio/gemini-3.8-flash` 调用，保留人格、上下文与聊天工具。
 发言端保留 `thinking = "low"`。
 指令保存到配置并在下一轮读取，无需重启；已经开始的请求仍可能使用旧模型。
 已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。
@@ -170,7 +169,7 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 | `enabled` | `false` | 总开关 |
 | `groups` | `[]` | 允许搭话的群号 |
 | `gate_model` | `gemini-3.8-flash` | 判定模型，复用 oai 接口与密钥 |
-| `reply_model` | `deepseek/deepseek-v4-flash-vision-exp` | pi 的发言模型 |
+| `reply_model` | `apilio/gemini-3.8-flash` | pi 的发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,bash,web_search,fetch_content,get_search_content` | 原有工具白名单；本轮自动附加三个 satori 工具 |
 | `score_threshold` | `45` | 普通开口意愿门槛，调高更沉默 |
