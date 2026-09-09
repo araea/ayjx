@@ -483,6 +483,7 @@ mod tests {
                     header: "AI 资讯".into(),
                     entries: vec!["1. 测试\n   🔗 https://example.com".into()],
                     footer: "AIHOT".into(),
+                    links: Vec::new(),
                 },
             }],
             ..Default::default()

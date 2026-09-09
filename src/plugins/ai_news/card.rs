@@ -277,7 +277,7 @@ fn shell(
 }
 
 /// 一级推送只发图；用户引用图片后按序号或批量提取链接。
-const FOOT_LINKS: &str = "引用本图回复 /ai提取 1 或 /ai提取 全部";
+const FOOT_LINKS: &str = "引用本图 /ai提取 1｜全部 取链接";
 
 /// 一条资讯的元信息行：来源 · 分类 · 时间
 fn meta_html(item: &Item) -> String {

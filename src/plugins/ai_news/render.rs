@@ -9,7 +9,8 @@
 //!
 //! 渲染结果统一用 [`Rendered`] 表示，拆成「头 / 逐条 / 尾」三段：
 //! 内容短时合成一条纯文本发送；超过阈值时按条目打包成合并转发的节点，
-//! 群里只占一个折叠卡片，不会刷屏。
+//! 群里只占一个折叠卡片，不会刷屏。每条正文同时保留结构化的标题与关键链接
+//! （[`Rendered::links`]），供 `/ai提取` 只回链接、不再复述图片上的正文。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{self, Board};
@@ -17,6 +18,34 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 
 const DIVIDER: &str = "———————————————";
+
+/// 一条可提取的链接：标签 + 地址。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryLink {
+    /// 展示标签，如 `AIHOT` / `原文` / `链接`
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub url: String,
+}
+
+/// 与某一条正文对应的可提取信息：标题 + 关键链接。
+///
+/// `/ai提取` 只回这些内容，不再复述图片上的正文，避免刷屏。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryLinks {
+    /// 条目标题（不含序号）
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub links: Vec<EntryLink>,
+}
+
+impl EntryLinks {
+    pub fn has_link(&self) -> bool {
+        self.links.iter().any(|link| !link.url.trim().is_empty())
+    }
+}
 
 /// 一次渲染的产物。分段保存，以便按需要合成纯文本或拆成转发节点。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -27,15 +56,39 @@ pub struct Rendered {
     pub entries: Vec<String>,
     /// 落款（数据来源等）
     pub footer: String,
+    /// 与 `entries` 同序的标题与关键链接，供 `/ai提取` 只回链接。
+    /// 升级前落盘的旧记录没有该字段，读取时会回退到从正文里解析。
+    #[serde(default)]
+    pub links: Vec<EntryLinks>,
 }
 
 impl Rendered {
+    /// 取某一条的标题与链接：优先用渲染时留下的结构化数据；
+    /// 旧记录（升级前落盘、`links` 为空）则从条目正文里解析。
+    pub fn entry_links(&self, index: usize) -> EntryLinks {
+        if let Some(links) = self.links.get(index) {
+            if !links.title.is_empty() || links.has_link() {
+                return links.clone();
+            }
+        }
+        self.entries
+            .get(index)
+            .map(|entry| parse_entry_links(entry))
+            .unwrap_or_default()
+    }
+
+    /// 这批内容是否带有可提取的链接（决定 `/ai提取` 走链接视图还是正文视图）
+    pub fn has_links(&self) -> bool {
+        (0..self.entries.len()).any(|index| self.entry_links(index).has_link())
+    }
+
     /// 纯提示文本（错误、空结果等），永远按单条纯文本发送
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             header: text.into(),
             entries: Vec::new(),
             footer: String::new(),
+            links: Vec::new(),
         }
     }
 
@@ -136,6 +189,55 @@ pub(super) fn truncate(text: &str, max_chars: usize) -> String {
     format!("{}…", head.trim_end())
 }
 
+/// 从渲染好的条目正文里还原标题与链接。
+///
+/// 条目由本模块生成，格式稳定：首行是 `序号. 标题` 或 `第 N 名 标题`，
+/// 之后是缩进正文，链接行以 `🔗 ` / `📄 ` 开头。仅用于升级前的旧记录，
+/// 新记录直接读结构化的 [`Rendered::links`]。
+fn parse_entry_links(entry: &str) -> EntryLinks {
+    let mut title = String::new();
+    let mut links: Vec<EntryLink> = Vec::new();
+
+    for (idx, raw) in entry.lines().enumerate() {
+        let line = raw.trim();
+        if idx == 0 {
+            title = strip_entry_prefix(line).to_string();
+            continue;
+        }
+        let (label, url) = if let Some(rest) = line.strip_prefix("🔗 ") {
+            ("AIHOT", rest.trim())
+        } else if let Some(rest) = line.strip_prefix("📄 ") {
+            ("原文", rest.trim())
+        } else {
+            continue;
+        };
+        if url.is_empty() || links.iter().any(|link| link.url == url) {
+            continue;
+        }
+        links.push(EntryLink {
+            label: label.to_string(),
+            url: url.to_string(),
+        });
+    }
+
+    EntryLinks { title, links }
+}
+
+/// 去掉 `1. ` / `第 3 名 ` 这类行首序号
+fn strip_entry_prefix(line: &str) -> &str {
+    if let Some((head, rest)) = line.split_once(". ")
+        && head.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return rest.trim();
+    }
+    if let Some(rest) = line.strip_prefix("第 ")
+        && let Some((_, rest)) = rest.split_once('名')
+    {
+        return rest.trim();
+    }
+    line.trim()
+}
+
 /// 一条资讯的时间行：来源 · 时间（无法取得原文时间时标注为收录时间）
 fn meta_line(item: &Item) -> Option<String> {
     let source = item
@@ -180,10 +282,15 @@ pub struct RenderOptions {
 /// 资讯列表（速递 / 搜索结果共用）
 pub fn render_items(header: &str, items: &[Item], opts: &RenderOptions) -> Rendered {
     let mut entries = Vec::with_capacity(items.len());
+    let mut links = Vec::with_capacity(items.len());
 
     for (idx, item) in items.iter().enumerate() {
         let mut out = String::new();
         let title = item.title.as_deref().unwrap_or("(无标题)").trim();
+        let mut entry_links = EntryLinks {
+            title: title.to_string(),
+            links: Vec::new(),
+        };
         out.push_str(&format!("{}. {}", idx + 1, title));
 
         if let Some(meta) = meta_line(item) {
@@ -199,30 +306,45 @@ pub fn render_items(header: &str, items: &[Item], opts: &RenderOptions) -> Rende
         }
         if let Some(link) = item.links.aihot.as_deref().filter(|s| !s.is_empty()) {
             out.push_str(&format!("\n   🔗 {}", link));
+            entry_links.links.push(EntryLink {
+                label: "AIHOT".to_string(),
+                url: link.to_string(),
+            });
         }
         if opts.show_original_link
             && let Some(orig) = item.links.original.as_deref().filter(|s| !s.is_empty())
         {
             out.push_str(&format!("\n   📄 {}", orig));
+            entry_links.links.push(EntryLink {
+                label: "原文".to_string(),
+                url: orig.to_string(),
+            });
         }
         entries.push(out);
+        links.push(entry_links);
     }
 
     Rendered {
         header: header.to_string(),
         entries,
         footer: format!("{} · 共 {} 条", super::api::ATTRIBUTION, items.len()),
+        links,
     }
 }
 
 /// 热点榜：按 rank 展示「第 N 名」，不展示或推算热度值
 pub fn render_hot_topics(topics: &[HotTopic]) -> Rendered {
     let mut entries = Vec::with_capacity(topics.len());
+    let mut links = Vec::with_capacity(topics.len());
 
     for (idx, topic) in topics.iter().enumerate() {
         let mut out = String::new();
         let rank = topic.rank.unwrap_or((idx + 1) as u32);
         let title = topic.title.as_deref().unwrap_or("(无标题)").trim();
+        let mut entry_links = EntryLinks {
+            title: title.to_string(),
+            links: Vec::new(),
+        };
         out.push_str(&format!("第 {} 名 {}", rank, title));
 
         let mut meta: Vec<String> = Vec::new();
@@ -251,14 +373,20 @@ pub fn render_hot_topics(topics: &[HotTopic]) -> Rendered {
         }
         if let Some(link) = topic.links.primary() {
             out.push_str(&format!("\n   🔗 {}", link));
+            entry_links.links.push(EntryLink {
+                label: "AIHOT".to_string(),
+                url: link.to_string(),
+            });
         }
         entries.push(out);
+        links.push(entry_links);
     }
 
     Rendered {
         header: "🔥 AI 当前热点榜".to_string(),
         entries,
         footer: super::api::ATTRIBUTION.to_string(),
+        links,
     }
 }
 
@@ -320,6 +448,7 @@ pub fn render_models(board: &Board, max_items: usize) -> Rendered {
         header: models_header(board),
         entries,
         footer,
+        links: Vec::new(),
     }
 }
 
@@ -412,6 +541,7 @@ pub fn render_daily(report: &DailyReport, max_blocks: usize) -> Rendered {
         header,
         entries,
         footer: super::api::ATTRIBUTION.to_string(),
+        links: Vec::new(),
     }
 }
 

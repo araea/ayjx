@@ -43,8 +43,9 @@
 //!
 //! 呈现方式：定时推送与指令回复共用一套投递逻辑。一级内容只发一张排版好的
 //! 卡片图（见 `card.rs`），负责好看、好读、好转发；用户引用图片执行
-//! `/ai提取 <序号|全部>` 后，才发送对应的资讯文本与原文链接。多个序号与范围
-//! 可一次批量提取。卡片渲染或消息关联失败时自动退回纯文本，不影响阅读。
+//! `/ai提取 <序号|全部>` 后，只回该条目的标题与关键链接（AIHOT 网页 + 原文），
+//! 不再把图片上的正文重发一遍。多个序号与范围可一次批量提取。
+//! 卡片渲染或消息关联失败时自动退回纯文本，不影响阅读。
 //!
 //! 指令：
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
@@ -52,7 +53,7 @@
 //!   /ai日报             最新一期 AI 日报
 //!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
-//!   /ai提取 <序号|全部>  引用资讯图片后提取正文与链接；支持 1,3-5
+//!   /ai提取 <序号|全部>  引用资讯图片后只取标题与链接；支持 1,3-5
 //!   /ai推送添加 <群|私聊> <ID> · /ai推送删除 <群|私聊> <ID>
 //!   /ai推送开启 · /ai推送关闭   不带参数时管理当前会话
 //!   /ai推送列表 · /ai推送状态 · /ai推送重置
@@ -90,7 +91,7 @@ mod render;
 mod state;
 
 use pusher::Payload;
-use render::Rendered;
+use render::{EntryLink, Rendered};
 
 pub const LOG_TARGET: &str = "Plugin/AiNews";
 
@@ -786,7 +787,7 @@ pub fn handle(
                                     &config,
                                     &selected,
                                     Some(message_id),
-                                    selected.entries.len() > 1,
+                                    false,
                                 ),
                                 Err(message) => Message::new().reply(message_id).text(message),
                             }
@@ -878,6 +879,10 @@ pub fn handle(
 
 /// 从已保存的卡片内容中选出用户需要的条目。序号从 1 开始，支持逗号、空格
 /// 和闭区间（如 `1,3-5`）；空参数与“全部”都返回整批。
+///
+/// 条目带有链接时只回「标题 + 链接」，不复述图片上的正文——一级推送已经把
+/// 正文画在卡片里，提取再发一遍只会刷屏。只有模型榜这类没有逐条链接的内容
+/// 才退回原来的正文视图。
 fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, String> {
     let total = rendered.entries.len();
     if total == 0 {
@@ -892,6 +897,10 @@ fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, Strin
         parse_extraction_indices(input, total)?
     };
 
+    if rendered.has_links() {
+        return Ok(link_extraction(rendered, &indices));
+    }
+
     Ok(Rendered {
         header: rendered.header.clone(),
         entries: indices
@@ -899,7 +908,61 @@ fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, Strin
             .map(|index| rendered.entries[*index].clone())
             .collect(),
         footer: format!("{}\n已提取 {} / {} 条", rendered.footer, indices.len(), total),
+        links: Vec::new(),
     })
+}
+
+/// 只含标题与链接的提取视图：`🔗 AIHOT` + `📄 原文`，序号沿用卡片上的序号。
+fn link_extraction(rendered: &Rendered, indices: &[usize]) -> Rendered {
+    let mut entries = Vec::with_capacity(indices.len());
+
+    for index in indices {
+        let links = rendered.entry_links(*index);
+        let title = if links.title.trim().is_empty() {
+            "(无标题)".to_string()
+        } else {
+            links.title.trim().to_string()
+        };
+        let mut out = format!("{}. {}", index + 1, title);
+
+        let available: Vec<&EntryLink> = links
+            .links
+            .iter()
+            .filter(|link| !link.url.trim().is_empty())
+            .collect();
+        if available.is_empty() {
+            out.push_str("\n   （暂无链接）");
+        } else {
+            for link in available {
+                let label = if link.label.trim().is_empty() {
+                    "链接"
+                } else {
+                    link.label.trim()
+                };
+                out.push_str(&format!("\n   🔗 {}：{}", label, link.url.trim()));
+            }
+        }
+        entries.push(out);
+    }
+
+    let header = rendered
+        .header
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("AI 资讯");
+
+    Rendered {
+        header: format!("{} · 链接", header),
+        entries,
+        footer: format!(
+            "{} · 已提取 {} / {} 条",
+            api::ATTRIBUTION,
+            indices.len(),
+            rendered.entries.len()
+        ),
+        links: Vec::new(),
+    }
 }
 
 fn parse_extraction_indices(input: &str, total: usize) -> Result<Vec<usize>, String> {
@@ -1675,6 +1738,7 @@ mod tests {
             header: "AI 资讯".into(),
             entries: (1..=6).map(|index| format!("{}. 资讯", index)).collect(),
             footer: "AIHOT · 共 6 条".into(),
+            links: Vec::new(),
         };
 
         let one = select_extraction(&rendered, "2").unwrap();
@@ -1691,6 +1755,60 @@ mod tests {
         assert!(select_extraction(&rendered, "0").is_err());
         assert!(select_extraction(&rendered, "3-2").is_err());
         assert!(select_extraction(&rendered, "7").is_err());
+    }
+
+    #[test]
+    fn extraction_returns_links_only_when_available() {
+        let rendered = Rendered {
+            header: "🤖 AI 资讯速递 · 过去 24 小时".into(),
+            entries: vec![
+                "1. 第一条\n   官方博客 · 08-21 09:00\n   一大段摘要\n   💡 理由\n   🔗 https://aihot.virxact.com/i/1\n   📄 https://example.com/1".into(),
+                "2. 第二条\n   🔗 https://aihot.virxact.com/i/2".into(),
+            ],
+            footer: "AIHOT · 共 2 条".into(),
+            links: vec![
+                render::EntryLinks {
+                    title: "第一条".into(),
+                    links: vec![
+                        render::EntryLink {
+                            label: "AIHOT".into(),
+                            url: "https://aihot.virxact.com/i/1".into(),
+                        },
+                        render::EntryLink {
+                            label: "原文".into(),
+                            url: "https://example.com/1".into(),
+                        },
+                    ],
+                },
+                render::EntryLinks {
+                    title: "第二条".into(),
+                    links: vec![render::EntryLink {
+                        label: "AIHOT".into(),
+                        url: "https://aihot.virxact.com/i/2".into(),
+                    }],
+                },
+            ],
+        };
+
+        let selected = select_extraction(&rendered, "2").unwrap();
+        let text = selected.to_text();
+        assert!(text.contains("🤖 AI 资讯速递 · 过去 24 小时 · 链接"), "{}", text);
+        assert!(text.contains("2. 第二条"), "{}", text);
+        assert!(text.contains("🔗 AIHOT：https://aihot.virxact.com/i/2"), "{}", text);
+        assert!(!text.contains("一大段摘要"), "正文不应重现: {}", text);
+        assert!(!text.contains("官方博客"), "元信息不应重现: {}", text);
+        assert!(text.contains("已提取 1 / 2 条"), "{}", text);
+
+        // 旧记录没有结构化链接时，从正文里解析
+        let legacy = Rendered {
+            links: Vec::new(),
+            ..rendered.clone()
+        };
+        let legacy_text = select_extraction(&legacy, "1").unwrap().to_text();
+        assert!(legacy_text.contains("1. 第一条"), "{}", legacy_text);
+        assert!(legacy_text.contains("🔗 AIHOT：https://aihot.virxact.com/i/1"), "{}", legacy_text);
+        assert!(legacy_text.contains("🔗 原文：https://example.com/1"), "{}", legacy_text);
+        assert!(!legacy_text.contains("一大段摘要"), "{}", legacy_text);
     }
 
     #[test]
