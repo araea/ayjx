@@ -702,7 +702,7 @@ mod tests {
         assert_eq!(model_vendor("claude-fable-5-1"), "Anthropic");
         assert_eq!(model_vendor("gemini-3-pro-image"), "Google");
         assert_eq!(model_vendor("MiniMax-M2.7"), "MiniMax");
-        assert_eq!(model_vendor("mj-describe"), "Midjourney");
+        assert_eq!(model_vendor("mj"), "Midjourney");
         assert_eq!(model_vendor("something-else"), "其他");
     }
 }

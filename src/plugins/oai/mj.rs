@@ -15,19 +15,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub const MJ_MODELS: &[&str] = &["mj", "mj-describe", "mj-shorten", "mj-blend"];
+pub const MJ_MODELS: &[&str] = &["mj"];
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const TASK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_IMAGE_BYTES: usize = 30 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MjMode {
-    Imagine,
-    Describe,
-    Shorten,
-    Blend,
-}
 
 #[derive(Clone, Debug, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -72,18 +64,8 @@ where
     Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
 }
 
-fn mode(model: &str) -> Option<MjMode> {
-    match model.trim().to_ascii_lowercase().as_str() {
-        "mj" => Some(MjMode::Imagine),
-        "mj-describe" => Some(MjMode::Describe),
-        "mj-shorten" => Some(MjMode::Shorten),
-        "mj-blend" => Some(MjMode::Blend),
-        _ => None,
-    }
-}
-
 pub fn is_mj_model(model: &str) -> bool {
-    mode(model).is_some()
+    model.trim().eq_ignore_ascii_case("mj")
 }
 
 /// OpenAI 接口通常配置为 `.../v1`，MJ 则从同一服务根路径的 fast 接入点调用。
@@ -127,9 +109,6 @@ pub async fn handle_agent(
         Some(event) => event,
         None => return,
     };
-    let Some(mode) = mode(&agent.model) else {
-        return;
-    };
     let (configured_base, key) = {
         let config = mgr.config.read().await;
         (config.api_base.clone(), config.api_key.clone())
@@ -140,15 +119,8 @@ pub async fn handle_agent(
     }
 
     let prompt = join_prompt(&agent.system_prompt, user_prompt);
-    let validation_error = match mode {
-        MjMode::Imagine if prompt.is_empty() => Some("💬 请输入绘图提示词。"),
-        MjMode::Describe if images.is_empty() => Some("🖼️ 请随消息发送或引用一张图片。"),
-        MjMode::Shorten if user_prompt.trim().is_empty() => Some("💬 请输入要精简的提示词。"),
-        MjMode::Blend if images.len() < 2 => Some("🖼️ Blend 至少需要两张图片，可直接发送或引用图片。"),
-        _ => None,
-    };
-    if let Some(message) = validation_error {
-        reply_text(ctx, writer, &event, message).await;
+    if prompt.trim().is_empty() {
+        reply_text(ctx, writer, &event, "💬 请输入绘图提示词。").await;
         return;
     }
 
@@ -158,27 +130,12 @@ pub async fn handle_agent(
     }
     let bases = api_bases(&configured_base);
     let result = async {
-        let body = match mode {
-            MjMode::Imagine => json!({
-                "base64Array": image_data_urls(&images).await,
-                "prompt": prompt,
-            }),
-            MjMode::Describe => json!({
-                "base64": to_data_url(&images[0]).await,
-            }),
-            MjMode::Shorten => json!({ "prompt": user_prompt.trim() }),
-            MjMode::Blend => json!({
-                "base64Array": image_data_urls(&images[..images.len().min(5)]).await,
-                "dimensions": blend_dimensions(user_prompt),
-            }),
-        };
-        let endpoint = match mode {
-            MjMode::Imagine => "/mj/submit/imagine",
-            MjMode::Describe => "/mj/submit/describe",
-            MjMode::Shorten => "/mj/submit/shorten",
-            MjMode::Blend => "/mj/submit/blend",
-        };
-        let (base, task_id) = submit_with_fallback(&bases, &key, endpoint, body).await?;
+        let body = json!({
+            "base64Array": image_data_urls(&images).await,
+            "prompt": prompt,
+        });
+        let (base, task_id) =
+            submit_with_fallback(&bases, &key, "/mj/submit/imagine", body).await?;
         let task = poll(&base, &key, &task_id).await?;
         Ok::<_, anyhow::Error>((base, task))
     }
@@ -189,7 +146,7 @@ pub async fn handle_agent(
     }
     match result {
         Ok((base, task)) => {
-            deliver_task(ctx, writer, mgr, mode, &base, &task, event.message_id()).await
+            deliver_task(ctx, writer, mgr, &base, &task, event.message_id()).await
         }
         Err(error) => {
             warn!(target: "Plugin/OAI/MJ", "MJ {} 任务失败: {:#}", agent.model, error);
@@ -209,17 +166,6 @@ fn join_prompt(system: &str, user: &str) -> String {
 async fn image_data_urls(images: &[String]) -> Vec<String> {
     // 图片通常来自同一条消息，数量很少；并行下载能明显减少垫图等待。
     futures_util::future::join_all(images.iter().map(|url| to_data_url(url))).await
-}
-
-fn blend_dimensions(prompt: &str) -> &'static str {
-    let lower = normalize(prompt).to_ascii_lowercase();
-    if lower.contains("portrait") || lower.contains("竖") || lower.contains("2:3") {
-        "PORTRAIT"
-    } else if lower.contains("landscape") || lower.contains("横") || lower.contains("3:2") {
-        "LANDSCAPE"
-    } else {
-        "SQUARE"
-    }
 }
 
 async fn submit(base: &str, key: &str, endpoint: &str, body: Value) -> anyhow::Result<String> {
@@ -335,7 +281,6 @@ async fn deliver_task(
     ctx: &Context,
     writer: &LockedWriter,
     mgr: &Arc<Manager>,
-    mode: MjMode,
     api_base: &str,
     task: &MjTask,
     reply_to: i64,
@@ -344,11 +289,9 @@ async fn deliver_task(
         Some(event) => event,
         None => return,
     };
-    if matches!(mode, MjMode::Imagine | MjMode::Blend) && !task.image_url.trim().is_empty() {
+    if !task.image_url.trim().is_empty() {
         let image = image_payload(task.image_url.trim()).await;
-        let message = Message::new()
-            .reply(reply_to)
-            .image(image);
+        let message = Message::new().reply(reply_to).image(image);
         match send_msg_id(
             ctx,
             writer.clone(),
@@ -692,13 +635,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recognizes_only_explicit_mj_room_models() {
+    fn recognizes_only_the_bare_mj_room_model() {
         for model in MJ_MODELS {
             assert!(is_mj_model(model));
         }
         assert!(is_mj_model(" MJ "));
         assert!(!is_mj_model("mj-v6"));
         assert!(!is_mj_model("not-mj"));
+        // 描述/精简/融合模式已下线，不应再被认成 MJ 房间。
+        assert!(!is_mj_model("mj-describe"));
+        assert!(!is_mj_model("mj-shorten"));
+        assert!(!is_mj_model("mj-blend"));
     }
 
     #[test]
@@ -718,13 +665,6 @@ mod tests {
                 "https://api.apilio.ai/mj-relax"
             ]
         );
-    }
-
-    #[test]
-    fn understands_convenient_blend_dimensions() {
-        assert_eq!(blend_dimensions("横图"), "LANDSCAPE");
-        assert_eq!(blend_dimensions("portrait"), "PORTRAIT");
-        assert_eq!(blend_dimensions("随便融合"), "SQUARE");
     }
 
     #[test]
