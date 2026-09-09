@@ -99,13 +99,15 @@ pub fn parse_global(raw: &str, prefixes: &[String]) -> Option<Command> {
     None
 }
 
+/// `-` 在房间指令里是删除第 N 条的写法（`助手-1`），所以名字里通常不能出现；
+/// 历史上的 `pi-*` 房间是唯一例外，改名会丢掉它们的聊天记录，继续放行。
 pub(crate) fn valid_agent_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().count() <= 7
         && !name
             .chars()
             .any(|c| c.is_whitespace() || "&\"#~/ _'!@$%:*".contains(c))
-        && (!name.contains('-') || super::pi_agent::is_pi_room(name))
+        && (!name.contains('-') || super::pi_agent::legacy_pi_name(name))
 }
 
 pub fn parse_create(raw: &str) -> Option<(String, String, String, String)> {

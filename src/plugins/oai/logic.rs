@@ -309,7 +309,7 @@ async fn chat(
         }
     };
 
-    let use_pi = super::pi_agent::is_pi_room(name);
+    let use_pi = agent.uses_pi();
     if !use_pi && super::mj::is_mj_model(&agent.model) {
         // MJ 房间天生是无历史任务流；引用文字也不应混入绘图提示词。
         super::mj::handle_agent(&agent, &cmd.args, imgs, ctx, writer, mgr).await;
@@ -399,7 +399,8 @@ async fn chat(
     // 回复，只会在群里插进一段与上下文无关的噪音。
     let mut outcome = {
         // 图像模型走专用绘图接口，其余房间继续走聊天补全 / Pi。
-        let draw = super::images::is_images_model(&agent.model, &oai.image_models);
+        // Pi 房间的模型是交给 Pi 解析的，不能拿它去撞中转站的绘图模型关键字。
+        let draw = !use_pi && super::images::is_images_model(&agent.model, &oai.image_models);
         let work = async {
             if draw {
                 super::images::generate_reply(&api_base, &api.1, &agent, &hist).await
@@ -601,11 +602,15 @@ async fn chat(
     }
 }
 
-fn room_model_label(agent: &Agent) -> &str {
-    if super::pi_agent::is_pi_room(&agent.name) && super::pi_agent::follows_pi_config(&agent.model) {
-        "Pi 本机配置"
+/// 房间列表和回执里显示的模型：Pi 房间前面挂上引擎，一眼能看出这间屋子谁在跑。
+fn room_model_label(agent: &Agent) -> String {
+    if !agent.uses_pi() {
+        return agent.model.clone();
+    }
+    if super::pi_agent::follows_pi_config(&agent.model) {
+        "Pi · 本机配置".to_string()
     } else {
-        &agent.model
+        format!("Pi · {}", agent.model)
     }
 }
 
@@ -628,7 +633,7 @@ async fn respond(
     data_dir: &std::path::Path,
     control: Option<&crate::plugins::ctl::bridge::Lease>,
 ) -> anyhow::Result<Reply> {
-    if super::pi_agent::is_pi_room(&agent.name) {
+    if agent.uses_pi() {
         let result = super::pi_agent::conversation(
             &oai.pi_command,
             data_dir,
@@ -901,6 +906,8 @@ pub async fn execute(
                     &src.system_prompt,
                     &format!("复制自 {}", name),
                 );
+                // 副本要连引擎一起带走：新名字不再能推断出「这是一间 Pi 房间」。
+                new_agent.set_engine(&src.engine, &src.model);
                 new_agent.description = src.description.clone();
                 c.agents.push(new_agent);
                 mgr.save(&c);
@@ -971,41 +978,58 @@ pub async fn execute(
                 reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
             }
         }
+        // 同一个 `%` 既换模型也换引擎：`房间%pi` 交给本机 pi，`房间%pi 模型` 顺带指定
+        // pi 用哪个模型，写中转站模型名则转回中转站房间。房间名不再参与判断。
         Action::SetModel => {
-            if super::pi_agent::is_pi_room(name) {
+            if cmd.args.is_empty() {
                 reply_text(
                     ctx,
                     writer,
                     &msg_event,
-                    "Pi 房间使用本机 Pi 配置的模型，请在 Pi 中修改默认模型。",
+                    "❌ 请指定模型：`智能体%模型名`；交给本机 Pi 用 `智能体%pi` 或 `智能体%pi 模型`。",
                 )
                 .await;
                 return;
             }
-            if cmd.args.is_empty() {
-                reply_text(ctx, writer, &msg_event, "❌ 请指定模型：智能体%模型名").await;
-                return;
-            }
             let mut c = mgr.config.write().await;
             let models = c.models.clone();
-            if let Some(model) = mgr.resolve_model(&cmd.args, &models) {
-                if let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) {
-                    let old = a.model.clone();
-                    a.model = model.clone();
-                    mgr.save(&c);
-                    reply_text(
-                        ctx,
-                        writer,
-                        &msg_event,
-                        format!("🔄 {} 模型：{} → {}", name, old, model),
-                    )
-                    .await;
+            let pi_model = super::pi_agent::parse_pi_spec(&cmd.args);
+            let resolved = match &pi_model {
+                Some(model) => Some(model.clone()),
+                None => mgr.resolve_model(&cmd.args, &models),
+            };
+            let Some(model) = resolved else {
+                reply_text(
+                    ctx,
+                    writer,
+                    &msg_event,
+                    "❌ 无效模型。`/%` 查看中转站模型，或用 `智能体%pi 模型` 交给本机 Pi。",
+                )
+                .await;
+                return;
+            };
+            let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) else {
+                reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
+                return;
+            };
+            let old = room_model_label(a);
+            a.set_engine(
+                if pi_model.is_some() {
+                    super::types::ENGINE_PI
                 } else {
-                    reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
-                }
-            } else {
-                reply_text(ctx, writer, &msg_event, "❌ 无效模型。").await;
-            }
+                    super::types::ENGINE_CHAT
+                },
+                &model,
+            );
+            let new = room_model_label(a);
+            mgr.save(&c);
+            reply_text(
+                ctx,
+                writer,
+                &msg_event,
+                format!("🔄 {} 模型：{} → {}", name, old, new),
+            )
+            .await;
         }
         Action::SetPrompt => {
             let mut c = mgr.config.write().await;
@@ -1067,7 +1091,7 @@ pub async fn execute(
             let mut groups: BTreeMap<String, Vec<(usize, &Agent)>> = BTreeMap::new();
             for (i, a) in c.agents.iter().enumerate() {
                 groups
-                    .entry(room_model_label(a).to_string())
+                    .entry(room_model_label(a))
                     .or_default()
                     .push((i + 1, a));
             }
@@ -1542,7 +1566,7 @@ pub async fn execute(
 ## 配置修改
 | 指令 | 功能 | 示例 |
 |------|------|------|
-| `智能体%模型` | 修改模型 | `助手%gpt-4` |
+| `智能体%模型` | 修改模型/引擎 | `助手%gpt-5.6-luna` |
 | `智能体$提示词` | 修改提示词 | `助手$你是...` |
 | `智能体$` | 清空提示词 | `助手$` |
 | `智能体/$` | 查看提示词 | `助手/$` |
@@ -1559,13 +1583,21 @@ pub async fn execute(
 | `智能体!` | 停止生成 |
 
 ## Pi Agent 房间
-| 房间名 | 能力 |
-|------|------|
-| `pi` 或 `pi-*` | 使用本机 Pi Agent 的模型与工具配置进行对话 |
+| 指令 | 效果 | 示例 |
+|------|------|------|
+| `##名称 pi` | 建一间 Pi 房间 | `##研究 pi` |
+| `##名称 pi/模型` | 建房并指定模型 | `##研究 pi/claude-opus-5` |
+| `智能体%pi` | 已有房间转 Pi | `助手%pi` |
+| `智能体%pi 模型` | 换 Pi 用的模型 | `助手%pi apilio/kimi-k3` |
+| `智能体%中转站模型` | 转回中转站房间 | `助手%gpt-5.6-luna` |
 
+> 房间名可以随便取，中文也行；决定引擎的是这条指令，不是名字。旧的 `pi` / `pi-*`
+> 房间已自动带上 Pi 引擎，行为不变。
+> 模型写 `provider/id`（如 `apilio/claude-opus-5`）或裸 id，由本机 Pi 解析；
+> 只写 `pi` 则沿用 Pi 自己的默认模型。`/#` 里显示为 `Pi · 模型`。
 > 公有、`&` 私有和 `~` 临时模式均使用 Pi，历史按原模式隔离。
-> 使用 `##pi-test` 创建 Pi 房间；模型由本机 Pi 配置决定，房间提示词追加到 Pi 系统提示词。
-> 支持图片、历史编辑/删除/清空/重新生成；长回复卡片显示实际模型、耗时和工具轨迹。
+> 房间提示词追加到 Pi 系统提示词；支持图片、历史编辑/删除/清空/重新生成；
+> 长回复卡片显示实际应答模型、耗时和工具轨迹。
 > Pi 可执行文件由 `[oai].pi_command` 指定，默认 `pi`。
 
 ## MJ 绘图房间
@@ -1733,9 +1765,19 @@ pub async fn handle_create(
     };
     let mut c = mgr.config.write().await;
     let models = c.models.clone();
-    let model = mgr
-        .resolve_model(model, &models)
-        .unwrap_or_else(|| model.to_string());
+    // 建房时的模型位同样认 Pi 写法：`##研究 pi` 或 `##研究 pi/apilio/claude-opus-5`。
+    let pi_model = super::pi_agent::parse_pi_spec(model);
+    let engine = if pi_model.is_some() {
+        super::types::ENGINE_PI
+    } else {
+        super::types::ENGINE_CHAT
+    };
+    let model = match pi_model {
+        Some(model) => model,
+        None => mgr
+            .resolve_model(model, &models)
+            .unwrap_or_else(|| model.to_string()),
+    };
     let prompt = if super::mj::is_mj_model(&model) && prompt.is_empty() {
         String::new()
     } else if prompt.is_empty() && !c.agents.iter().any(|a| a.name == name) {
@@ -1745,14 +1787,15 @@ pub async fn handle_create(
     };
 
     if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
-        if !model.is_empty() {
-            a.model = model.clone();
+        // 省略模型位时只改提示词和描述，保留这个房间原来的引擎。
+        if !model.is_empty() || engine == super::types::ENGINE_PI {
+            a.set_engine(engine, &model);
         }
         a.system_prompt = prompt;
         if !desc.is_empty() {
             a.description = desc.to_string();
         }
-        let updated_model = room_model_label(a).to_string();
+        let updated_model = room_model_label(a);
         mgr.save(&c);
         reply_text(
             ctx,
@@ -1767,22 +1810,16 @@ pub async fn handle_create(
         } else {
             desc.to_string()
         };
-        c.agents
-            .push(Agent::new(name, &model, &prompt, &description));
+        let mut agent = Agent::new(name, &model, &prompt, &description);
+        agent.set_engine(engine, &model);
+        let label = room_model_label(&agent);
+        c.agents.push(agent);
         mgr.save(&c);
         reply_text(
             ctx,
             writer,
             &msg_event,
-            format!(
-                "🤖 已创建 {}（模型：{}）",
-                name,
-                if super::pi_agent::is_pi_room(name) {
-                    "Pi 本机配置"
-                } else {
-                    &model
-                }
-            ),
+            format!("🤖 已创建 {}（模型：{}）", name, label),
         )
         .await;
     }

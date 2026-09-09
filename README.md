@@ -51,8 +51,9 @@ config.toml 不提交到 Git。首次启动会补齐默认字段，不覆盖解�
 ~~~
 
 Termux 下 ./bot start 会取得唤醒锁；需要使用 tmux 时执行 ./bot session 和 ./bot attach。
-名称为 pi 或以 pi- 开头的房间可调用本机 Pi CLI；[oai.ambient] 可让同一个 agent
-以固定人格在指定群里旁听、偶尔搭话。
+任意房间都可以交给本机 Pi CLI：`##研究 pi` 建房，`助手%pi apilio/claude-opus-5`
+换引擎和模型，房间名不受限制；[oai.ambient] 可让同一个 agent 以固定人格在指定群里
+旁听、偶尔搭话。
 
 ## 文档与测试
 

@@ -1,4 +1,4 @@
-//! `pi` / `pi-*` 房间的本机 pi agent 执行层。
+//! Pi 房间的本机 pi agent 执行层。
 //!
 //! 这些房间不再走 OpenAI 端点的工具循环，而是驱动本机安装的 pi CLI
 //! （`pi -p --mode json --session <file>`）：模型、系统提示词与工具全部沿用
@@ -22,10 +22,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-/// 房间名是否由本机 pi agent 接管：`pi` 或 `pi-` 前缀（忽略大小写）。
-pub(crate) fn is_pi_room(room: &str) -> bool {
+/// 旧的房间名规则：`pi` 或 `pi-` 前缀（忽略大小写）。
+///
+/// 引擎现在是房间自己的属性（[`super::types::Agent::uses_pi`]），名字不再决定任何事。
+/// 这个函数只剩两个用途：迁移还没写下 `engine` 的旧配置，以及让历史上带 `-`
+/// 的房间名继续通过校验。
+pub(crate) fn legacy_pi_name(room: &str) -> bool {
     let room = room.trim().to_lowercase();
     room == "pi" || room.starts_with("pi-")
+}
+
+/// 解析房间的 Pi 写法：`pi`、`pi 模型`、`pi/模型`、`pi:模型`（大小写与全角冒号皆可）。
+///
+/// 返回 `Some(模型)`——空串表示沿用 pi 自身配置。不是 Pi 写法时返回 `None`，
+/// 调用方按中转站模型处理。
+pub(crate) fn parse_pi_spec(spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    let tail = spec
+        .get(..2)
+        .filter(|head| head.eq_ignore_ascii_case("pi"))
+        .map(|_| &spec[2..])?;
+    let mut chars = tail.chars();
+    match chars.next() {
+        None => Some(String::new()),
+        Some('/' | ':' | '：' | ' ' | '\t') => Some(chars.as_str().trim().to_string()),
+        // `pixi`、`ping` 这类名字不是 Pi 写法。
+        Some(_) => None,
+    }
 }
 
 /// 每次调用独占目录，避免中文房间名、私有用户及临时请求之间共享文件。
@@ -705,17 +728,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pi_rooms_match_name_and_prefix() {
-        assert!(is_pi_room("pi"));
-        assert!(is_pi_room("PI"));
-        assert!(is_pi_room(" pi "));
-        assert!(is_pi_room("pi-test"));
-        assert!(is_pi_room("PI-猫娘"));
-        assert!(!is_pi_room("ping"));
-        assert!(!is_pi_room("pixi"));
-        assert!(!is_pi_room("api"));
-        assert!(!is_pi_room("pi2"));
-        assert!(!is_pi_room("助手"));
+    fn legacy_pi_names_still_recognised_for_migration() {
+        assert!(legacy_pi_name("pi"));
+        assert!(legacy_pi_name("PI"));
+        assert!(legacy_pi_name(" pi "));
+        assert!(legacy_pi_name("pi-test"));
+        assert!(legacy_pi_name("PI-猫娘"));
+        assert!(!legacy_pi_name("ping"));
+        assert!(!legacy_pi_name("pixi"));
+        assert!(!legacy_pi_name("api"));
+        assert!(!legacy_pi_name("pi2"));
+        assert!(!legacy_pi_name("助手"));
+    }
+
+    #[test]
+    fn pi_spec_accepts_every_separator_and_rejects_lookalike_names() {
+        assert_eq!(parse_pi_spec("pi").as_deref(), Some(""));
+        assert_eq!(parse_pi_spec(" PI ").as_deref(), Some(""));
+        for spec in [
+            "pi apilio/claude-opus-5",
+            "pi/apilio/claude-opus-5",
+            "pi:apilio/claude-opus-5",
+            "PI：apilio/claude-opus-5",
+        ] {
+            assert_eq!(
+                parse_pi_spec(spec).as_deref(),
+                Some("apilio/claude-opus-5"),
+                "{spec}"
+            );
+        }
+        // 中转站模型名不能被误当成 Pi 写法。
+        for spec in ["", "pixi", "ping", "gpt-5.6-luna", "pi-test", "皮"] {
+            assert_eq!(parse_pi_spec(spec), None, "{spec}");
+        }
+        // 空模型等于「沿用 pi 自身配置」。
+        assert!(follows_pi_config(&parse_pi_spec("pi").unwrap()));
+        assert!(!follows_pi_config(&parse_pi_spec("pi kimi-k3").unwrap()));
     }
 
     #[test]

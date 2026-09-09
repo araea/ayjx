@@ -22,11 +22,25 @@ impl ChatMessage {
     }
 }
 
+/// 房间交给本机 pi agent 执行。
+pub const ENGINE_PI: &str = "pi";
+/// 房间走中转站的 Chat Completions（含 MJ / 图像房间）。
+pub const ENGINE_CHAT: &str = "chat";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// 执行引擎：[`ENGINE_PI`] 或 [`ENGINE_CHAT`]。
+    ///
+    /// 房间名曾经是唯一的开关——只有 `pi` 和 `pi-*` 能用 pi agent，于是所有想用 pi
+    /// 的房间都被迫顶着这个前缀。现在引擎是房间自己的属性，名字随便取。
+    /// 留空表示还没迁移过的旧配置，此时仍按旧的名字规则推断。
+    #[serde(default)]
+    pub engine: String,
+    /// 引擎对应的模型：中转站房间是中转站模型 id；pi 房间是 pi 的 `--model`
+    /// （`provider/id` 或裸 id），留空或 `pi` 表示沿用 pi 自身配置。
     pub model: String,
     pub system_prompt: String,
     #[serde(default)]
@@ -44,6 +58,7 @@ impl Agent {
         Self {
             name: name.to_string(),
             description: desc.to_string(),
+            engine: String::new(),
             model: model.to_string(),
             system_prompt: prompt.to_string(),
             public_history: Vec::new(),
@@ -51,6 +66,22 @@ impl Agent {
             generation_id: 0,
             created_at: chrono::Local::now().timestamp(),
         }
+    }
+
+    /// 这个房间是否由本机 pi agent 接管。
+    ///
+    /// 显式的 `engine` 说了算；只有还没迁移过的旧配置才回退到「名字叫 pi 或 pi-*」。
+    pub fn uses_pi(&self) -> bool {
+        match self.engine.trim() {
+            "" => super::pi_agent::legacy_pi_name(&self.name),
+            engine => engine.eq_ignore_ascii_case(ENGINE_PI),
+        }
+    }
+
+    /// 记下这个房间用哪个引擎和模型；引擎一旦写下就不再依赖房间名。
+    pub fn set_engine(&mut self, engine: &str, model: &str) {
+        self.engine = engine.to_string();
+        self.model = model.to_string();
     }
 
     pub fn history_mut(&mut self, private: bool, uid: &str) -> &mut Vec<ChatMessage> {
@@ -201,6 +232,42 @@ impl GeneratingState {
         } else {
             self.public.remove(agent);
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[test]
+    fn any_room_name_can_run_pi_once_the_engine_is_written_down() {
+        let mut room = Agent::new("研究", "gpt-5.6-luna", "", "");
+        assert!(!room.uses_pi(), "名字普通、引擎未定的房间仍走中转站");
+        room.set_engine(ENGINE_PI, "apilio/claude-opus-5");
+        assert!(room.uses_pi(), "名字没变，引擎说了算");
+        assert_eq!(room.model, "apilio/claude-opus-5");
+        room.set_engine(ENGINE_CHAT, "gpt-5.6-luna");
+        assert!(!room.uses_pi(), "换回中转站不需要改名");
+    }
+
+    /// 还没迁移过的配置里 `engine` 是空的；那时仍按当初的名字规则判断，
+    /// 已有的 `pi` / `pi-*` 房间不会在升级的一瞬间变成普通房间。
+    #[test]
+    fn legacy_configs_without_an_engine_field_keep_their_old_behaviour() {
+        let legacy: Agent = serde_json::from_str(
+            r#"{"name":"pi-猫娘","model":"gpt-5.6-luna","system_prompt":""}"#,
+        )
+        .unwrap();
+        assert!(legacy.engine.is_empty());
+        assert!(legacy.uses_pi());
+        let ordinary: Agent =
+            serde_json::from_str(r#"{"name":"助手","model":"gpt-5.6-luna","system_prompt":""}"#)
+                .unwrap();
+        assert!(!ordinary.uses_pi());
+        // 显式引擎优先于名字：叫 pi 也能被改回中转站房间。
+        let mut renamed = legacy.clone();
+        renamed.set_engine(ENGINE_CHAT, "gpt-5.6-luna");
+        assert!(!renamed.uses_pi());
     }
 }
 

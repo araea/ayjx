@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 const LEGACY_DEFAULT_MODEL: &str = "gpt-4o";
-const CURRENT_DEFAULTS_VERSION: u32 = 2;
+const CURRENT_DEFAULTS_VERSION: u32 = 3;
 
 /// `pi` 房间的人设。
 ///
@@ -85,6 +85,21 @@ impl Manager {
             config_dirty = true;
         }
 
+        // 引擎从房间名搬到房间自己身上。老配置里没有这个字段，就按当初的名字规则
+        // 一次性写下来：`pi` / `pi-*` 归 pi，其余归中转站。写完之后名字彻底自由，
+        // 已有房间的行为一个都不变。
+        for agent in config.agents.iter_mut() {
+            if agent.engine.trim().is_empty() {
+                agent.engine = if super::pi_agent::legacy_pi_name(&agent.name) {
+                    super::types::ENGINE_PI
+                } else {
+                    super::types::ENGINE_CHAT
+                }
+                .to_string();
+                config_dirty = true;
+            }
+        }
+
         // 老配置只迁移一次；之后若管理员主动删除 `pi`，尊重这一选择。
         if !config.pi_room_initialized {
             if !config
@@ -97,12 +112,10 @@ impl Manager {
                 } else {
                     &config.default_model
                 };
-                config.agents.push(super::types::Agent::new(
-                    "pi",
-                    model,
-                    PI_PERSONA,
-                    "终端与联网工具助手",
-                ));
+                let mut room =
+                    super::types::Agent::new("pi", model, PI_PERSONA, "终端与联网工具助手");
+                room.set_engine(super::types::ENGINE_PI, model);
+                config.agents.push(room);
             }
             config.pi_room_initialized = true;
             config_dirty = true;
