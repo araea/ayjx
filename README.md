@@ -13,8 +13,8 @@ cargo build --release
 ~~~
 
 默认 Satori 地址为 http://127.0.0.1:3001。网页截图与资讯长图需要本机
-Chrome 或 Chromium，可在 browser_path 中指定路径；帮助、插件控制与词意的
-卡片图是原生绘制的，只需系统里有一份中日韩字体。
+Chrome 或 Chromium，可在 browser_path 中指定路径；帮助与插件控制也使用网页
+卡片，浏览器不可用时自动回退纯文本。词意卡片使用原生绘图。中文出图需系统中日韩字体。
 
 ## 配置
 

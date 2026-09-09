@@ -98,7 +98,7 @@ admins = [] # 填写维护者 QQ 号，例如 [123456789]
 # 允许管理员在 pi 房间里用自然语言驱动 ctl（凭据仅本轮有效，见 docs/CONTROL.md）。
 pi_control = true
 # 用法、状态、配置与差异是否排版成卡片图；短反馈始终走纯文本。
-# 原生绘制，不需要浏览器；没有可用中日韩字体时自动回退纯文本。
+# 网页卡片使用 Chrome/Chromium 与系统中日韩字体；出图失败时自动回退纯文本。
 image_enabled = true
 image_scale = 3.0
 

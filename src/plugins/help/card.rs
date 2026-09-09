@@ -1,29 +1,13 @@
-//! 把帮助排版成一张卡片图（原生绘制，不走浏览器）。
-//!
-//! 设计取向：**蓝图 / 说明书**。帮助本质上是一张「装配图」——先给全貌，
-//! 再给单件的接线方式，所以整张卡片按图纸的语言组织：坐标纸底纹、四角印前
-//! 规线、分区标题带英文代号并用虚线延伸到计数，扫读时不必逐条去数。
-//!
-//! 状态只用一种编码贯穿全卡：主色 = 已启用，虚线灰格 = 已停用。总览顶部那排
-//! 小格是「一格一个插件」的实心仪表，不是按比例拉伸的进度条——数格子就能对上清单。
-//!
-//! 版式与配色都来自框架的 [`crate::render::kit`]：这里只负责把注册表里的数据
-//! 翻译成 [`Block`] 序列。新增一个插件不必碰这个文件；新增一种版式也只需在
-//! kit 里加一种 Block，帮助与控制台同时受益。
-//!
-//! 版心按「群聊里先看缩略图、再点开看」定：总览 720px（双栏），
-//! 详情 680px（单栏，长指令自动换行）；配合 `image_scale`（默认 3 倍）出图。
-//! 两个宽度都比字号那一版收了一档——图进了聊天窗会被缩到屏宽的六七成，
-//! 版心窄一点，等于同一个字号在屏幕上大一点，这比单纯调大字号更划算。
+//! 网页卡片：共用纸面排版，由 Chromium 完成字体塑形、换行与 PNG 截图。
 
 use super::{Entry, Group, needs_prefix};
 use crate::plugins::Cmd;
-use crate::render::kit::{self, Block, Doc, Item, Theme, Tone};
+use crate::render::web::{self, Block, Doc, Item, Theme, Tone};
 
-/// 总览版心宽度（双栏）
-const OVERVIEW_WIDTH: f32 = 720.0;
+/// 总览版心宽度（单列）
+const OVERVIEW_WIDTH: f32 = 640.0;
 /// 详情版心宽度（单栏，长指令自动换行）
-const DETAIL_WIDTH: f32 = 680.0;
+const DETAIL_WIDTH: f32 = 640.0;
 
 /// `"收 / 偷 / 存表情"` → 主指令 + 别名。清单里的别名用 ` / ` 分隔，
 /// 图里把第一个抬成主指令，其余降级成小字，避免一行挤三个同义词。
@@ -46,24 +30,21 @@ fn full_cmd(prefix: &str, cmd: &str) -> String {
 pub struct Card(Doc);
 
 impl Card {
-    /// 出图，返回 PNG base64。字体不可用时返回 None，调用方退回纯文本。
-    pub fn render(&self, scale: f64) -> Option<String> {
-        kit::render(&self.0, scale)
+    /// 出图失败时由调用方回退到完整文本。
+    pub async fn render(&self, scale: f64, browser_path: Option<&str>) -> anyhow::Result<String> {
+        web::capture(&self.0, scale, browser_path).await
     }
 }
 
-/// 总览卡：分区 → 双栏清单。主色格 = 已启用，虚线灰格 = 已停用。
+/// 总览卡：分区 → 单列清单，状态文字与颜色同时呈现。
 pub fn overview(groups: &[Group], prefix: &str) -> Card {
-    let total: usize = groups.iter().map(|g| g.items.len()).sum();
-    let enabled = groups.iter().flat_map(|g| g.items.iter()).filter(|e| e.enabled).count();
-
     let mut blocks = vec![
         Block::Title {
             title: "插件总览".into(),
             pill: None,
-            sub: format!("共 {total} 个插件 · 已启用 {enabled} 个 · 指令前缀 {prefix}"),
+            sub: format!("按用途查找功能 · 指令前缀 {prefix}"),
         },
-        // 仪表：一格一个插件，顺序与下方清单一致
+        // 汇总启用与停用数量，状态清单在下方逐项展开
         Block::Meter(groups.iter().flat_map(|g| g.items.iter()).map(|e| e.enabled).collect()),
         Block::Rule,
     ];
@@ -96,11 +77,11 @@ pub fn overview(groups: &[Group], prefix: &str) -> Card {
     });
 
     Card(Doc {
-        theme: Theme::blueprint(),
+        theme: Theme::Help,
         width: OVERVIEW_WIDTH,
         kicker: "AYJX · MANUAL".into(),
         blocks,
-        foot: "实心格与主色 = 已启用 · 虚线格 = 已停用".into(),
+        foot: "开关状态以当前配置为准".into(),
         hint: ("查看某个插件的全部指令".into(), format!("{prefix}help <插件名>")),
     })
 }
@@ -134,7 +115,7 @@ pub fn detail(entry: &Entry, cmds: &[Cmd], prefix: &str) -> Card {
             cmds.iter()
                 .map(|c| {
                     let (primary, aliases) = split_aliases(c.cmd);
-                    kit::Cmd {
+                    web::Cmd {
                         prefix: if needs_prefix(primary) { prefix.into() } else { String::new() },
                         cmd: primary.into(),
                         note: c.note.into(),
@@ -155,7 +136,7 @@ pub fn detail(entry: &Entry, cmds: &[Cmd], prefix: &str) -> Card {
     });
 
     Card(Doc {
-        theme: Theme::blueprint(),
+        theme: Theme::Help,
         width: DETAIL_WIDTH,
         kicker: "MANUAL · PLUGIN".into(),
         blocks,
@@ -180,9 +161,9 @@ mod tests {
 
     /// 把两张帮助卡各出一次图，确认能走完绘制并编码成 PNG：
     ///   HELP_CARD_DUMP=/tmp/help cargo test help::card -- --ignored
-    #[test]
-    #[ignore = "需要可用的 CJK 字体，落盘 PNG 供人工核对"]
-    fn renders_sample_cards_to_png() {
+    #[tokio::test]
+    #[ignore = "需要 Chromium，落盘网页与 PNG 供人工核对"]
+    async fn renders_sample_cards_to_png() {
         use crate::plugins::get_plugins;
         let Ok(dir) = std::env::var("HELP_CARD_DUMP") else {
             return;
@@ -233,7 +214,9 @@ mod tests {
             ("detail_widest", detail(&entry(wide, true), wide.commands, "/")),
         ];
         for (name, card) in cases {
-            let b64 = card.render(3.0).expect("字体可用时应当出图");
+            std::fs::write(format!("{dir}/{name}.html"), web::html(&card.0)).unwrap();
+            let browser_path = std::env::var("CHROME_BIN").ok();
+            let b64 = card.render(3.0, browser_path.as_deref()).await.expect("浏览器应当出图");
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)
                 .expect("应是合法 base64");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{name} 应是 PNG");
@@ -244,6 +227,7 @@ mod tests {
                 .save(format!("{dir}/{name}_phone.png")).unwrap();
             println!("{name} 出图 {} 字节", bytes.len());
         }
+        cdp_html_shot::Browser::shutdown_global().await;
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! 两条展示线并存：
 //!   - **卡片图**（默认）：把清单排版成一张图发出去，长内容不再刷屏，
-//!     版式见 [`card`]，绘制走框架的原生渲染层，不需要浏览器；
+//!     版式见 [`card`]，使用 Chromium 网页截图，字体与换行交给浏览器；
 //!   - **纯文本**：`image_enabled = false` 或渲染失败时自动接管，
 //!     内容与图一致，绝不出现「图里一套、文字另一套」。
 //!
@@ -302,16 +302,15 @@ pub fn handle(
                 let reply = build_reply(&ctx, &arg);
 
                 let mut out = Message::new().reply(msg.message_id());
-                // 原生绘制是纯 CPU 工作，没有浏览器可失败；拿不到字体时
-                // render 返回 None，直接落到纯文本这一路
+                let browser_path = ctx.config.read().unwrap().browser_path.clone();
                 let image = match (&reply.card, config.image_enabled) {
-                    (Some(c), true) => {
-                        let b64 = c.render(config.image_scale);
-                        if b64.is_none() {
-                            warn!(target: LOG_TARGET, "没有可用的 CJK 字体，帮助改发纯文本");
+                    (Some(c), true) => match c.render(config.image_scale, browser_path.as_deref()).await {
+                        Ok(b64) => Some(b64),
+                        Err(e) => {
+                            warn!(target: LOG_TARGET, "帮助网页卡片出图失败，改发纯文本：{e}");
+                            None
                         }
-                        b64
-                    }
+                    },
                     _ => None,
                 };
                 out = match image {

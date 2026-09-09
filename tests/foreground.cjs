@@ -65,13 +65,13 @@ async function main() {
   await until(() => (output.match(/已保存 help.image_enabled/g) || []).length === 2, 'enable help images');
   const previousReplies = (output.match(/\[Bot Reply\]/g) || []).length;
   child.stdin.write('/help ctl\n');
-  await until(() => (output.match(/\[Bot Reply\]/g) || []).length > previousReplies, 'image help or text fallback', 25000);
-  // 列表的文本测试显式关闭图片；这里再验证真实 ctl 原生出图。
+  await until(() => (output.match(/\[Bot Reply\]/g) || []).length > previousReplies, 'image help or text fallback', 55000);
+  // 列表的文本测试显式关闭图片；这里再验证真实 ctl 网页出图。
   child.stdin.write('/ctl set ctl image_enabled 开\n');
   await until(() => output.includes('已保存 ctl.image_enabled'), 'enable control images');
   const imageStart = output.length;
   child.stdin.write('/ctl list\n');
-  await until(() => /base64(?:,|:\/\/)iVBOR/.test(output.slice(imageStart)), 'native control PNG', 25000);
+  await until(() => /base64(?:,|:\/\/)iVBOR/.test(output.slice(imageStart)), 'browser control PNG', 55000);
   assert(!output.slice(imageStart).includes('插件状态（全局配置）'), 'control should render a PNG');
   const stopping = Date.now();
   // Leave stdin open to catch blocking-stdin shutdown regressions.

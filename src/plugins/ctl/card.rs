@@ -1,34 +1,25 @@
-//! 把插件控制的输出排版成一张卡片图（原生绘制，不走浏览器）。
-//!
-//! 设计取向沿用帮助中心的「图纸」语言，只把主色从青绿换成琥珀——
-//! 同一套版式、不同的色相，一眼能认出「这张是管理面板，不是说明书」。
-//!
-//! 只有**要被读、要被翻回去看**的四种输出才配图：用法、状态清单、配置值、
-//! 配置差异。`on/off`、`set`、`reset` 的确认与各类报错一律走纯文本——
-//! 它们是一句话反馈，出图既慢又刷屏，还挡住了复制粘贴。
-//!
-//! 版式与配色全部来自 [`crate::render::kit`]，这里只负责把数据翻成 Block。
+//! 网页卡片：共用纸面排版，由 Chromium 完成字体塑形、换行与 PNG 截图。
 
 use crate::plugins::help::needs_prefix;
-use crate::render::kit::{self, Block, Doc, Row, Theme, Tile, Tone};
+use crate::render::web::{self, Block, Doc, Row, Theme, Tile, Tone};
 
-/// 控制面板版心：状态清单一行一个插件，不需要帮助总览那么宽。
-/// 收窄到 680 是为了读得清——同一个字号，版心越窄，在手机上看到的字就越大。
-const WIDTH: f32 = 680.0;
+/// 控制面板版心：状态清单一行一个插件。
+/// 640px 版心让正文在手机预览中保持可读大小。
+const WIDTH: f32 = 640.0;
 
 /// 一张待渲染的控制卡
 pub struct Card(Doc);
 
 impl Card {
-    /// 出图，返回 PNG base64。字体不可用时返回 None，调用方退回纯文本。
-    pub fn render(&self, scale: f64) -> Option<String> {
-        kit::render(&self.0, scale)
+    /// 出图失败时由调用方回退到完整文本。
+    pub async fn render(&self, scale: f64, browser_path: Option<&str>) -> anyhow::Result<String> {
+        web::capture(&self.0, scale, browser_path).await
     }
 }
 
 fn doc(kicker: &str, blocks: Vec<Block>, foot: &str, hint: (String, String)) -> Card {
     Card(Doc {
-        theme: Theme::graphite(),
+        theme: Theme::Control,
         width: WIDTH,
         kicker: kicker.into(),
         blocks,
@@ -62,7 +53,7 @@ pub fn usage(prefix: &str, cmds: &[crate::plugins::Cmd]) -> Card {
                         .skip(1)
                         .map(|a| format!("{prefix}{}", a.trim()))
                         .collect();
-                    kit::Cmd {
+                    web::Cmd {
                         prefix: if needs_prefix(primary) { prefix.into() } else { String::new() },
                         cmd: primary.into(),
                         note: c.note.into(),
@@ -100,7 +91,7 @@ pub fn usage(prefix: &str, cmds: &[crate::plugins::Cmd]) -> Card {
     doc(
         "AYJX · CONTROL",
         blocks,
-        "琥珀点 = 已启用 · 暗点 = 已停用",
+        "状态以当前配置为准 · 待重启项需重启生效",
         ("查看全局状态".into(), format!("{prefix}ctl list")),
     )
 }
@@ -114,7 +105,7 @@ pub struct Status {
     pub pending: bool,
 }
 
-/// 状态卡：仪表 + 一行一个插件 + 三个合计
+/// 状态卡：三个合计 + 一行一个插件
 pub fn list(prefix: &str, filter: &str, rows: &[Status]) -> Card {
     let on = rows.iter().filter(|r| r.on).count();
     let pending = rows.iter().filter(|r| r.pending).count();
@@ -126,7 +117,11 @@ pub fn list(prefix: &str, filter: &str, rows: &[Status]) -> Card {
 
     let mut blocks = vec![
         Block::Title { title: "插件状态".into(), pill: None, sub },
-        Block::Meter(rows.iter().map(|r| r.on).collect()),
+        Block::Tiles(vec![
+            Tile { value: on.to_string(), label: "已启用".into() },
+            Tile { value: (rows.len() - on).to_string(), label: "已停用".into() },
+            Tile { value: pending.to_string(), label: "待重启".into() },
+        ]),
         Block::Rule,
     ];
 
@@ -146,11 +141,6 @@ pub fn list(prefix: &str, filter: &str, rows: &[Status]) -> Card {
                 })
                 .collect(),
         ));
-        blocks.push(Block::Tiles(vec![
-            Tile { value: on.to_string(), label: "已启用".into() },
-            Tile { value: (rows.len() - on).to_string(), label: "已停用".into() },
-            Tile { value: pending.to_string(), label: "待重启".into() },
-        ]));
     }
 
     blocks.push(Block::Callout {
@@ -164,7 +154,7 @@ pub fn list(prefix: &str, filter: &str, rows: &[Status]) -> Card {
     doc(
         "CONTROL · STATUS",
         blocks,
-        "琥珀点 = 已启用 · 暗点 = 已停用",
+        "状态以当前配置为准 · 待重启项需重启生效",
         ("查看用法".into(), format!("{prefix}ctl")),
     )
 }
@@ -236,9 +226,9 @@ mod tests {
 
     /// 把四种控制卡各出一次图，确认都能走完绘制并编码成 PNG：
     ///   CTL_CARD_DUMP=/tmp/ctl cargo test ctl::card -- --ignored
-    #[test]
-    #[ignore = "需要可用的 CJK 字体，落盘 PNG 供人工核对"]
-    fn renders_sample_cards_to_png() {
+    #[tokio::test]
+    #[ignore = "需要 Chromium，落盘网页与 PNG 供人工核对"]
+    async fn renders_sample_cards_to_png() {
         let Ok(dir) = std::env::var("CTL_CARD_DUMP") else {
             return;
         };
@@ -272,7 +262,9 @@ mod tests {
             ("diff_clean", diff("/", "ping", &[])),
         ];
         for (name, card) in cases {
-            let b64 = card.render(3.0).expect("字体可用时应当出图");
+            std::fs::write(format!("{dir}/{name}.html"), web::html(&card.0)).unwrap();
+            let browser_path = std::env::var("CHROME_BIN").ok();
+            let b64 = card.render(3.0, browser_path.as_deref()).await.expect("浏览器应当出图");
             let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &b64)
                 .expect("应是合法 base64");
             assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{name} 应是 PNG");
@@ -283,5 +275,6 @@ mod tests {
                 .save(format!("{dir}/{name}_phone.png")).unwrap();
             println!("{name} 出图 {} 字节", bytes.len());
         }
+        cdp_html_shot::Browser::shutdown_global().await;
     }
 }

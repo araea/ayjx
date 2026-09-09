@@ -620,21 +620,18 @@ pub fn handle(
             .await
             .unwrap_or_else(|e| Output::from(format!("操作未完成：{e}")));
 
-        // 出图是纯 CPU 工作，没有浏览器可失败；没有可用字体时 render 返回 None，
-        // 直接落回下面的纯文本这一路。
-        if config.image_enabled
-            && let Some(card) = &response.card
-            && let Some(b64) = card.render(config.image_scale)
-        {
-            send_msg(
-                &ctx,
-                writer,
-                msg.group_id(),
-                Some(msg.user_id()),
-                Message::new().image(format!("base64://{b64}")),
-            )
-            .await?;
-            return Ok(None);
+        let browser_path = ctx.config.read().unwrap().browser_path.clone();
+        if config.image_enabled && let Some(card) = &response.card {
+            match card.render(config.image_scale, browser_path.as_deref()).await {
+                Ok(b64) => {
+                    send_msg(
+                        &ctx, writer, msg.group_id(), Some(msg.user_id()),
+                        Message::new().image(format!("base64://{b64}")),
+                    ).await?;
+                    return Ok(None);
+                }
+                Err(e) => warn!(target: "Plugin/Ctl", "控制网页卡片出图失败，改发纯文本：{e}"),
+            }
         }
 
         // Bound each message so a large array/config does not exceed adapter limits.
