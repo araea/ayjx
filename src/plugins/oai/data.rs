@@ -7,7 +7,10 @@ use tokio::sync::RwLock;
 
 const DEFAULT_MODEL: &str = "gpt-5.6-luna";
 const LEGACY_DEFAULT_MODEL: &str = "gpt-4o";
-const CURRENT_DEFAULTS_VERSION: u32 = 3;
+const CURRENT_DEFAULTS_VERSION: u32 = 4;
+
+/// 旧版建房间时自动填充的默认系统提示词，现已改为留空；迁移时按原样匹配后清掉。
+const LEGACY_DEFAULT_PROMPT: &str = "You are a helpful assistant.";
 
 /// `pi` 房间的人设。
 ///
@@ -40,7 +43,6 @@ impl Manager {
         // 同步加载一次配置 (初始化时使用)
         let default = Config {
             default_model: DEFAULT_MODEL.to_string(),
-            default_prompt: "You are a helpful assistant.".to_string(),
             ..Default::default()
         };
 
@@ -80,6 +82,13 @@ impl Manager {
                 && pi.system_prompt.trim() == LEGACY_PI_PERSONA
             {
                 pi.system_prompt = PI_PERSONA.to_string();
+            }
+            // 不再默认填充「你是一个有帮助的助手」：清掉历史建房时被写入该默认值的房间。
+            // 只匹配完全相同的那句，避免误伤管理员自定义的提示词。
+            for agent in config.agents.iter_mut() {
+                if agent.system_prompt == LEGACY_DEFAULT_PROMPT {
+                    agent.system_prompt = String::new();
+                }
             }
             config.defaults_version = CURRENT_DEFAULTS_VERSION;
             config_dirty = true;

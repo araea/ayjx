@@ -1779,13 +1779,9 @@ pub async fn handle_create(
             .resolve_model(model, &models)
             .unwrap_or_else(|| model.to_string()),
     };
-    let prompt = if super::mj::is_mj_model(&model) && prompt.is_empty() {
-        String::new()
-    } else if prompt.is_empty() && !c.agents.iter().any(|a| a.name == name) {
-        c.default_prompt.clone()
-    } else {
-        prompt.to_string()
-    };
+    // 不再默认填充「你是一个有帮助的助手」：没写提示词就留空，让模型用裸提示词。
+    // 生图房间尤其不该被一句通用预设污染提示词；普通房间也保持中立（MJ 同样留空）。
+    let prompt = prompt.to_string();
 
     if let Some(a) = c.agents.iter_mut().find(|a| a.name == name) {
         // 省略模型位时只改提示词和描述，保留这个房间原来的引擎。
@@ -1998,6 +1994,60 @@ mod tests {
             let result = respond(&client, &agent, &history, &config, &dir, None).await;
             assert!(result.err().unwrap().to_string().contains("无法启动 pi"));
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// 新建房间没写提示词时不再默认填充「你是一个有帮助的助手」，生图房间尤其如此。
+    #[tokio::test]
+    async fn new_agents_without_a_prompt_keep_an_empty_system_prompt() {
+        use crate::event::{BotStatus, EventType};
+
+        let dir = std::env::temp_dir().join(format!("oai-noprompt-{:032x}", rand::random::<u128>()));
+        let mgr = Arc::new(Manager::new(dir.clone()));
+        let ctx = Context {
+            event: EventType::Satori(
+                simd_json::serde::to_owned_value(serde_json::json!({
+                    "post_type": "message",
+                    "message_type": "group",
+                    "group_id": 1,
+                    "user_id": 42,
+                    "message_id": 7,
+                    "time": 1_788_800_000_i64,
+                    "message": [{"type": "text", "data": {"text": "画图"}}],
+                }))
+                .unwrap(),
+            ),
+            config: Arc::new(std::sync::RwLock::new(crate::config::AppConfig::default())),
+            config_save_lock: Arc::new(tokio::sync::Mutex::new(())),
+            db: sea_orm::Database::connect("sqlite::memory:").await.unwrap(),
+            scheduler: Arc::new(crate::scheduler::Scheduler::new()),
+            matcher: Arc::new(crate::matcher::Matcher::new()),
+            config_path: Arc::from("unused-noprompt.toml"),
+            bot: Arc::new(BotStatus::default()),
+        };
+        let writer = Arc::new(crate::adapters::satori::SatoriClient::console());
+
+        // 生图房间：没给提示词，系统提示词应当留空，避免「帮助者」预设污染绘图提示词。
+        handle_create("画图", "", "gpt-image-2.5-flare", "", &ctx, &writer, &mgr).await;
+        let agents = mgr.config.read().await.agents.clone();
+        let image_room = agents.iter().find(|a| a.name == "画图").unwrap();
+        assert!(
+            image_room.system_prompt.is_empty(),
+            "无提示词的生图房间不应被默认填充：{}",
+            image_room.system_prompt
+        );
+        assert_eq!(image_room.model, "gpt-image-2.5-flare");
+
+        // 普通房间同样不默认填充。
+        handle_create("助手", "", "gpt-5.6-luna", "", &ctx, &writer, &mgr).await;
+        let agents = mgr.config.read().await.agents.clone();
+        let assistant = agents.iter().find(|a| a.name == "助手").unwrap();
+        assert!(
+            assistant.system_prompt.is_empty(),
+            "无提示词的普通房间不应被默认填充：{}",
+            assistant.system_prompt
+        );
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
