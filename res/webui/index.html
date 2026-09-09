@@ -260,6 +260,44 @@ select.txt option{background:var(--card);color:var(--ink)}
   .bar .stat.hide-sm{display:none}
   input.txt,select.txt{width:100%}
 }
+
+/* 阅读与触控：同一套布局适配桌面、手机和系统动效偏好。 */
+html{color-scheme:dark}html[data-theme="light"]{color-scheme:light}
+:root{--bg:#0c1118;--bg2:#101720;--card:#161e29;--card2:#1b2532;--ink3:#93a3b7;--r:16px;--r2:12px}
+html[data-theme="light"]{--bg:#f5f7fa;--bg2:#edf1f5;--card:#fff;--card2:#f7f9fb;--ink3:#5d6d80;--accent:#087e6c}
+body{height:100dvh}button,input,select,textarea{-webkit-tap-highlight-color:transparent}
+button{touch-action:manipulation}button:disabled{cursor:wait;opacity:.55}
+.bar{padding:14px 22px;padding-top:calc(14px + env(safe-area-inset-top));background:var(--bg2)}
+.iconbtn{width:40px;height:40px}.brand b{font-size:20px;letter-spacing:-.6px}
+.side{width:304px;flex-basis:304px}.search{padding:20px 16px 12px}.search input{min-height:44px}
+.chip{min-height:34px}.list{padding:0 12px 24px}.row{padding:0;gap:8px;margin:3px 0}
+.row[aria-current="true"]{border-color:var(--accent-line);background:var(--accent-dim)}
+.rowlink{display:flex;align-items:center;gap:10px;flex:1;min-width:0;text-align:left;padding:12px 10px}
+.row>.sw{margin-right:10px}.row .txt{background:none;border:0;padding:0;width:auto}
+.pad{max-width:960px;padding:34px 32px 120px}.head h1{font-size:29px;letter-spacing:-.5px}
+.head h1{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.head .keychip{margin:0}
+.summary{max-width:72ch;line-height:1.8}.group{margin-bottom:18px}.field{padding:18px 20px;align-items:center}
+.field .ctrl{flex:0 1 44%;width:44%;min-width:0}.field .ctrl>.txt{width:100%}
+.field .ctrl>.sw{margin-left:auto}.field .name code,.group>summary code{overflow-wrap:anywhere;min-width:0}
+.field .sub{line-height:1.7}.field.wide{align-items:stretch}.field.wide .ctrl{width:100%}.field .ctrl:has(textarea){width:100%}
+.field.pending{box-shadow:inset 3px 0 var(--warn)}.field.bad{box-shadow:inset 3px 0 var(--bad)}
+.field-status{font-size:12px;margin-top:6px;color:var(--warn);overflow-wrap:anywhere}.field-status:empty{display:none}
+.field.bad .field-status{color:var(--bad)}
+input.txt,select.txt{min-height:42px}textarea.txt{min-height:140px;font-size:13px}
+.tagbox input{background:transparent;border:0;padding:8px;min-width:100px;flex:1;width:100px;outline:none}
+.tag button{width:30px;height:30px}.tag{max-width:100%;overflow-wrap:anywhere}.tag>span{min-width:0}
+.group .group{margin:10px;border-radius:10px}.group>summary{min-height:48px;flex-wrap:wrap}
+.cmd{flex-wrap:wrap}.cmd code{white-space:normal;overflow-wrap:anywhere}.cmd .note{min-width:160px}
+.tools{position:sticky;top:0;z-index:2;background:var(--bg);padding:12px 0;margin-top:-12px}
+.savebar{display:flex;gap:12px;align-items:center;padding:10px 22px;padding-bottom:calc(10px + env(safe-area-inset-bottom));border-top:1px solid var(--line);background:var(--bg2);font-size:12px;flex-wrap:wrap}
+.savebar .grow{flex:1}.save-state{color:var(--accent)}.save-state[data-tone="bad"]{color:var(--bad)}.save-state[data-tone="pending"]{color:var(--warn)}
+.connection{color:var(--ink3)}.connection[data-offline="true"]{color:var(--bad)}.save-help{color:var(--ink3)}
+.editor-actions{display:flex;gap:8px;margin-top:8px;justify-content:flex-end;flex-wrap:wrap}.editor-wrap{width:100%}.editor-wrap>input.txt:not(.num){width:100%}.editor-wrap>input.num{display:block;margin-left:auto}
+.toasts{bottom:82px}.gate .box{padding:30px;background:var(--card);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow)}
+@media(min-width:1400px){.pad{padding-top:48px}.side{width:330px;flex-basis:330px}}
+@media(max-width:880px){.side{width:100%}.pad{padding:20px 16px 80px}.bar{padding-left:16px;padding-right:16px;gap:6px}.brand small{display:none}.back{min-height:40px}.field{padding:16px;align-items:stretch}.field .ctrl{width:100%;flex-basis:auto;max-width:none}.field .ctrl>.sw{margin-left:0}.head h1{font-size:25px}.savebar{padding-left:16px;padding-right:16px;gap:8px}.save-help{display:none}input,textarea,select,input.txt,textarea.txt{font-size:16px}.sw{width:44px;height:28px}.sw::after{width:22px;height:22px}.sw[aria-checked="true"]::after{transform:translateX(16px)}.tools{flex-wrap:wrap}.tools input{min-width:150px}}
+@media(max-width:880px){.field:has(>.ctrl>.sw){flex-direction:row;align-items:center}.field:has(>.ctrl>.sw)>.ctrl{width:auto;flex:0 0 auto}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 </style>
 </head>
 <body data-view="list">
@@ -274,11 +312,11 @@ select.txt option{background:var(--card);color:var(--ink)}
   </header>
 
   <div class="wrap">
-    <nav class="side">
+    <nav class="side" aria-label="插件导航">
       <div class="search">
         <label class="box">
           <span>⌕</span>
-          <input id="q" placeholder="搜索插件、指令或配置项" autocomplete="off" spellcheck="false">
+          <input id="q" aria-label="搜索插件、指令或配置项" placeholder="搜索插件、指令或配置项" autocomplete="off" spellcheck="false">
           <button class="clear" id="qclear" title="清空">✕</button>
         </label>
         <div class="chips" id="filters">
@@ -292,6 +330,13 @@ select.txt option{background:var(--card);color:var(--ink)}
     </nav>
     <main class="main" id="main"><div class="pad" id="detail"></div></main>
   </div>
+  <footer class="savebar">
+    <span id="connection" class="connection" role="status">正在连接…</span>
+    <span class="grow"></span>
+    <span class="save-help">编辑后自动保存 · Ctrl / ⌘ + S 立即保存</span>
+    <span id="save-state" class="save-state" role="status" aria-live="polite">所有修改已保存</span>
+    <button class="chip" id="save-all" hidden>立即保存</button>
+  </footer>
 </div>
 
 <div class="gate" id="gate" hidden>
@@ -299,13 +344,13 @@ select.txt option{background:var(--card);color:var(--ink)}
     <div class="brand" style="justify-content:center;margin-bottom:14px"><span class="dot"></span><b>ayjx</b><small>控制台</small></div>
     <h2>需要访问密钥</h2>
     <p>密钥写在 config.toml 的 <code>[webui] token</code> 里，<br>也可以在私聊或本机控制台发送 <code>webui</code> 取回带密钥的链接。</p>
-    <input class="txt" id="key" placeholder="粘贴访问密钥" autocomplete="off" spellcheck="false">
+    <input class="txt" id="key" type="password" aria-label="访问密钥" placeholder="粘贴访问密钥" autocomplete="off" spellcheck="false">
     <button class="go" id="enter">进入</button>
-    <div class="err" id="gate-err"></div>
+    <div class="err" id="gate-err" role="alert"></div>
   </div>
 </div>
 
-<div class="toasts" id="toasts"></div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
 
 <script>
 "use strict";
@@ -324,117 +369,202 @@ const LABELS = {
   limit:"数量上限", token:"访问密钥", bind:"监听地址", port:"端口", public_url:"对外地址",
   font_path:"字体文件", font_family:"字体名称", retention_days:"保留天数",
   request_timeout_seconds:"请求超时", timeout_seconds:"超时", quality:"图片质量",
-  max_chars:"字数上限", min_times:"触发次数", time:"执行时刻"
+  max_chars:"字数上限", min_times:"触发次数", time:"执行时刻",
+  viewport_width:"浏览器视口宽度", device_scale_factor:"截图倍率", max_height:"最大高度",
+  ignore_domains:"忽略的域名", interrupt_texts:"打断语", interrupt_probability:"打断概率",
+  allow_same_user:"允许同一人连续触发", allow_media:"允许图片与表情", ignore_commands:"跳过指令",
+  max_delay_ms:"最大响应延迟", ambient:"群聊搭话", pi_control:"允许 Pi 管理配置",
+  group_preferences:"各群偏好", card_theme:"卡片主题", mode:"模式", category:"分类"
 };
 const label = (key) => LABELS[key] || key;
 
-/* ================= 会话 ================= */
+/* ================= 会话与保存队列 ================= */
 let TOKEN = null, STATE = null, CURRENT = null, TAB = "config";
-let filter = "all", query = "", busy = 0, poller = null;
+let filter = "all", query = "", busy = 0, poller = null, bound = false;
+let fieldQuery = "", onlyChanged = false, polling = false, starting = false, composing = false;
+let queue = Promise.resolve(), lastSaved = "", connected = false;
+// 草稿只留在当前页面内存，切换插件、筛选或刷新状态不会丢失，也不把密钥写入草稿存储。
+const drafts = new Map();
+const draftKey = (name, path) => name + ":" + path;
+const pick = name => name && STATE.plugins.some(p => p.name === name) ? name : null;
+const hashPlugin = () => { try { return decodeURIComponent((location.hash.match(/^#p=(.+)$/) || [])[1] || ""); } catch (_) { return ""; } };
+const plugin = name => STATE.plugins.find(p => p.name === name);
+const currentField = (name, path) => flatten(plugin(name).fields).find(f => f.path === path);
+const editing = () => document.activeElement?.matches("#detail input, #detail textarea, #detail select");
 
-(function boot(){
-  const theme = store.get(THEME_KEY);
-  if (theme) document.documentElement.dataset.theme = theme;
-  const url = new URL(location.href);
-  const k = url.searchParams.get("k");
-  // 内存里的这一份才是权威：浏览器可能根本不给 localStorage（隐私窗口、禁用站点
-  // 数据），那时链接里的密钥仍旧要一次就能用，只是下次得重新带上。
-  if (k) { TOKEN = k; store.set(TOKEN_KEY, k); url.searchParams.delete("k"); history.replaceState(null, "", url.pathname + url.hash); }
-  else TOKEN = store.get(TOKEN_KEY);
-  TOKEN ? start() : gate();
-})();
+function connection(ok){
+  connected = ok;
+  $("#connection").textContent = ok ? "已连接 · 自动同步" : "连接中断 · 草稿已保留";
+  $("#connection").dataset.offline = String(!ok);
+}
+function status(){
+  const entries = [...drafts.values()];
+  const failed = entries.filter(d => d.error).length;
+  const state = $("#save-state");
+  state.dataset.tone = failed ? "bad" : entries.length || busy ? "pending" : "saved";
+  state.textContent = busy ? "正在保存…" : failed ? failed + " 项待处理" : entries.length ? entries.length + " 项待保存" : lastSaved ? "已保存 · " + lastSaved : "所有修改已保存";
+  $("#save-all").hidden = !entries.length;
+  $("#save-all").textContent = failed ? "重试保存" : "立即保存";
+  $("#save-all").disabled = !!busy;
+  document.querySelectorAll(".row[data-plugin]").forEach(row => {
+    const mark = $(".draft-mark", row);
+    const count = entries.filter(d => d.name === row.dataset.plugin).length;
+    if (mark) { mark.hidden = !count; mark.textContent = count + " 待保存"; }
+  });
+  document.querySelectorAll(".field[data-path]").forEach(row => {
+    const d = drafts.get(draftKey(row.dataset.plugin, row.dataset.path));
+    row.classList.toggle("pending", !!d);
+    row.classList.toggle("bad", !!d?.error);
+    const note = $(".field-status", row);
+    if (note) note.textContent = d ? d.error || (d.saving ? "正在写入配置…" : d.manual ? "草稿未保存 · 点击保存或按 Ctrl / ⌘ + S" : "等待自动保存…") : "";
+    row.querySelectorAll("input,textarea,select").forEach(input => input.setAttribute("aria-invalid", String(!!d?.error)));
+  });
+}
+function apply(state){
+  STATE = state;
+  $("#s-prefix").textContent = state.prefix || "（无）";
+  $("#s-count").textContent = state.summary.enabled + "/" + state.summary.total;
+}
 
 function gate(message){
+  clearInterval(poller);
   $("#app").hidden = true; $("#gate").hidden = false;
-  if (message) $("#gate-err").textContent = message;
-  const input = $("#key");
-  input.focus();
+  $("#gate-err").textContent = message || "";
+  const input = $("#key"); input.focus();
   const submit = () => {
-    const value = input.value.trim();
-    if (!value) return;
-    TOKEN = value; store.set(TOKEN_KEY, value); $("#gate-err").textContent = ""; start();
+    if (starting || !input.value.trim()) return;
+    TOKEN = input.value.trim(); start();
   };
   $("#enter").onclick = submit;
-  input.onkeydown = (e) => { if (e.key === "Enter") submit(); };
+  input.onkeydown = e => { if (e.key === "Enter" && !e.isComposing) submit(); };
 }
-
 async function api(path, options){
-  const res = await fetch(path, Object.assign({
-    headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" }
-  }, options || {}));
-  if (res.status === 401) { store.set(TOKEN_KEY, ""); TOKEN = null; throw new Error("密钥无效"); }
-  const data = await res.json();
-  if (!res.ok && data.message) throw new Error(data.message);
-  return data;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(path, { ...options, cache: "no-store", signal: controller.signal,
+      headers: { "Authorization": "Bearer " + TOKEN, "Content-Type": "application/json" } });
+    if (res.status === 401) {
+      store.set(TOKEN_KEY, ""); TOKEN = null;
+      gate("密钥已失效，请重新输入。未保存的草稿仍保留在本页。");
+      throw new Error("密钥无效");
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.message || "请求失败（" + res.status + "）");
+    connection(true);
+    return data;
+  } catch (e) {
+    connection(false);
+    if (e.name === "AbortError") throw new Error("请求超时，结果尚未确认；请重试保存");
+    throw e;
+  } finally { clearTimeout(timeout); }
 }
-
 async function start(){
+  if (starting) return;
+  starting = true; $("#enter").disabled = true;
   try {
     const data = await api("/api/state");
+    store.set(TOKEN_KEY, TOKEN); $("#key").value = "";
     $("#gate").hidden = true; $("#app").hidden = false;
     apply(data.state);
-    // 打开顺序：地址栏里指名的 → 上次看的 → 第一个真有可调项的。
-    // 最后那条不是随手一挑：注册表第一位是个只有总开关的后台插件，
-    // 拿它当门面等于告诉人「这里没什么可看」。
     const first = STATE.plugins.find(p => p.fields.length) || STATE.plugins[0];
     const linked = pick(hashPlugin());
-    CURRENT = linked || pick(store.get(LAST_KEY)) || (first && first.name);
-    // 带 #p= 打开的链接是「我要看这一个」；窄屏上就该直接落在它的详情里
+    CURRENT = linked || pick(CURRENT) || pick(store.get(LAST_KEY)) || first?.name;
     if (linked) document.body.dataset.view = "detail";
-    render();
-    bind();
-    watch();
-  } catch (e) {
-    gate(e.message === "密钥无效" ? "密钥无效，请重新输入。" : "连接失败：" + e.message);
-  }
+    render(); bind(); watch();
+  } catch (e) { gate("连接失败：" + e.message); }
+  finally { starting = false; $("#enter").disabled = false; }
 }
-
-const pick = (name) => (name && STATE.plugins.some(p => p.name === name) ? name : null);
-const hashPlugin = () => decodeURIComponent((location.hash.match(/^#p=(.+)$/) || [])[1] || "");
-const plugin = (name) => STATE.plugins.find(p => p.name === name);
-function apply(state){ STATE = state; $("#s-prefix").textContent = state.prefix || "（无）";
-  $("#s-count").textContent = state.summary.enabled + "/" + state.summary.total; }
-
-/* 配置在别处被改动（聊天里的 /ctl、手改文件后重启）时自己跟上，
-   但不打断正在输入的人：有焦点在输入框里就先按住不动。 */
-function watch(){
-  clearInterval(poller);
-  poller = setInterval(async () => {
-    if (busy || document.hidden) return;
-    const active = document.activeElement;
-    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && active.id !== "q") return;
-    try {
-      const data = await api("/api/version");
-      if (data.version !== STATE.version) { apply((await api("/api/state")).state); render(); }
-    } catch (_) {}
-  }, 4000);
-}
-
-/* ================= 写入 ================= */
-async function send(command, node){
-  busy++;
-  let spinner = null;
-  if (node) { spinner = el("div", "saving"); node.appendChild(spinner); }
+async function refresh(force = false){
+  if (polling || busy || !TOKEN || !STATE || document.hidden || composing) return;
+  polling = true;
+  const revision = STATE.version;
   try {
+    const data = force ? null : await api("/api/version");
+    if (force || data.version !== STATE.version) {
+      const next = await api("/api/state");
+      // 读请求期间发生过写入时，丢弃旧快照，下一轮再同步。
+      if (!busy && STATE.version === revision) { apply(next.state); refreshView(); }
+    }
+  } catch (e) { if (force) toast(e.message, true); }
+  finally { polling = false; }
+}
+function watch(){ clearInterval(poller); poller = setInterval(() => refresh(), 4000); }
+// 正在编辑的控件保持原 DOM、焦点、光标、输入法和撤销历史。
+function refreshView(){
+  if (!STATE) return;
+  renderList();
+  if (!editing() && !composing) renderDetail();
+  document.querySelectorAll(".sw[data-plugin]").forEach(sw => {
+    const p = plugin(sw.dataset.plugin);
+    const value = sw.dataset.path ? currentField(p.name, sw.dataset.path)?.value : p.enabled;
+    sw.setAttribute("aria-checked", String(!!value));
+  });
+  status();
+}
+function send(command){
+  busy++; status();
+  const task = queue.then(async () => {
+    if (!TOKEN) throw new Error("请先重新输入访问密钥");
     const data = await api("/api/command", { method: "POST", body: JSON.stringify(command) });
     apply(data.state);
-    if (spinner) spinner.remove();
-    if (data.ok) { if (node) flash(node); toast(data.message, false); }
-    else { toast(data.message, true); }
-    render();
-    return data.ok;
-  } catch (e) {
-    if (spinner) spinner.remove();
-    if (!TOKEN) { clearInterval(poller); gate("密钥已失效，请重新输入。"); return false; }
-    toast("请求失败：" + e.message, true);
-    return false;
-  } finally { busy--; }
+    if (!data.ok) throw new Error(data.message);
+    lastSaved = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+    // 修改面板自身密钥后继续使用新凭据，避免下一次轮询把维护者踢出。
+    if (command.name === "webui" && command.path === "token" && command.action === "set") {
+      TOKEN = command.value; store.set(TOKEN_KEY, TOKEN);
+    }
+    return true;
+  });
+  queue = task.catch(() => {});
+  return task.finally(() => { busy--; status(); });
 }
-
-function flash(node){
-  const tick = el("span", "tick", "✓");
-  node.appendChild(tick);
-  setTimeout(() => tick.remove(), 1100);
+function draft(p, f, text, value, raw = false, error = "", manual = false){
+  const key = draftKey(p.name, f.path), old = drafts.get(key);
+  if (old) clearTimeout(old.timer);
+  const d = { name:p.name, path:f.path, text, value, raw, error, manual,
+    revision:(old?.revision || 0) + 1, saving:old?.saving || false, timer:null };
+  drafts.set(key, d);
+  if (!manual && !error && !composing) d.timer = setTimeout(() => saveDraft(key), 800);
+  status(); return d;
+}
+async function saveDraft(key){
+  const d = drafts.get(key);
+  if (!d || d.saving || composing) return;
+  clearTimeout(d.timer);
+  if (d.invalid) { status(); return; }
+  d.saving = true; d.error = ""; status();
+  try {
+    await send({ action:"set", name:d.name, path:d.path, value:d.value, raw:d.raw });
+    if (drafts.get(key) === d) {
+      drafts.delete(key);
+      const input = [...document.querySelectorAll("[data-editor]")].find(input => input.dataset.editor === key);
+      if (input && currentField(d.name, d.path).sensitive) input.value = "";
+    }
+  } catch (e) {
+    if (drafts.get(key) === d) d.error = e.message;
+  } finally {
+    const next = drafts.get(key);
+    if (next) next.saving = false;
+    if (next && next !== d && !next.manual && !next.invalid) next.timer = setTimeout(() => saveDraft(key), 0);
+    refreshView();
+  }
+}
+function saveAll(){
+  if (composing) return;
+  document.querySelectorAll("#detail [data-flush]").forEach(input => input.dispatchEvent(new Event("change")));
+  for (const key of drafts.keys()) saveDraft(key);
+}
+async function action(command){
+  try { await send(command); toast("配置已写入并保存"); }
+  catch (e) { toast(e.message, true); }
+  finally { refreshView(); }
+}
+function discard(key){
+  const d = drafts.get(key);
+  if (d?.saving) return;
+  if (d) clearTimeout(d.timer);
+  drafts.delete(key); status();
 }
 
 function toast(text, bad){
@@ -459,7 +589,7 @@ function matches(p){
   const q = query.toLowerCase();
   if (p.name.toLowerCase().includes(q) || p.display.includes(query) || p.summary.toLowerCase().includes(q)) return true;
   if (p.commands.some(c => c.cmd.toLowerCase().includes(q) || c.note.includes(query))) return true;
-  return flatten(p.fields).some(f => f.path.toLowerCase().includes(q));
+  return flatten(p.fields).some(f => f.path.toLowerCase().includes(q) || label(f.key).toLowerCase().includes(q) || f.hint.toLowerCase().includes(q));
 }
 function flatten(fields){
   const out = [];
@@ -468,7 +598,11 @@ function flatten(fields){
 }
 
 function renderList(){
-  const list = $("#list"); list.textContent = "";
+  const list = $("#list"), scroll = list.scrollTop;
+  const focused = document.activeElement?.closest(".row");
+  const focusName = focused?.dataset.plugin;
+  const focusSwitch = document.activeElement?.classList.contains("sw");
+  list.textContent = "";
   const shown = STATE.plugins.filter(matches);
   if (!shown.length) { list.appendChild(el("div", "empty", "没有匹配的插件")); return; }
   STATE.sections.forEach(section => {
@@ -481,20 +615,32 @@ function renderList(){
     list.appendChild(head);
     items.forEach(p => list.appendChild(listRow(p)));
   });
+  list.scrollTop = scroll;
+  if (focusName) {
+    const row = [...list.querySelectorAll(".row")].find(row => row.dataset.plugin === focusName);
+    row?.querySelector(focusSwitch ? ".sw" : ".rowlink")?.focus({preventScroll:true});
+  }
 }
 
 function listRow(p){
-  const row = el("button", "row " + (p.enabled ? "on" : "off"));
+  const row = el("div", "row " + (p.enabled ? "on" : "off"));
   row.setAttribute("aria-current", String(p.name === CURRENT));
-  row.appendChild(el("span", "led"));
+  row.dataset.plugin = p.name;
+  const link = el("button", "rowlink");
+  link.setAttribute("aria-current", p.name === CURRENT ? "page" : "false");
+  link.appendChild(el("span", "led"));
   const txt = el("span", "txt");
   txt.appendChild(el("b", "nm", p.display));
   txt.appendChild(el("span", "ky", p.name));
-  row.appendChild(txt);
+  link.appendChild(txt);
+  row.appendChild(link);
   if (p.pending) row.appendChild(el("span", "mark", "待重启"));
   else if (p.diff.length) row.appendChild(el("span", "mark", "已改"));
+  const pending = el("span", "mark draft-mark");
+  const count = [...drafts.values()].filter(d => d.name === p.name).length;
+  pending.hidden = !count; pending.textContent = count + " 待保存"; row.appendChild(pending);
   row.appendChild(toggle(p, false));
-  row.onclick = (e) => { if (e.target.closest(".sw")) return; select(p.name); };
+  link.onclick = () => select(p.name);
   return row;
 }
 
@@ -503,11 +649,13 @@ function toggle(p, large){
   sw.setAttribute("role", "switch");
   sw.setAttribute("aria-checked", String(p.enabled));
   sw.setAttribute("aria-label", (p.enabled ? "关闭 " : "启用 ") + p.display);
-  sw.onclick = async (e) => {
-    e.stopPropagation();
-    sw.dataset.busy = "1";
-    sw.setAttribute("aria-checked", String(!p.enabled));   // 先动，再等回执
-    await send({ action: "toggle", name: p.name, on: !p.enabled });
+  sw.dataset.plugin = p.name;
+  sw.disabled = p.name === "ctl";
+  if (sw.disabled) sw.title = "保留配置管理入口";
+  sw.onclick = async e => {
+    e.stopPropagation(); sw.disabled = true;
+    await action({ action:"toggle", name:p.name, on:!plugin(p.name).enabled });
+    sw.disabled = p.name === "ctl";
   };
   return sw;
 }
@@ -522,12 +670,12 @@ function select(name){
 }
 
 /* ================= 详情 ================= */
-function render(){ renderList(); renderDetail(); }
+function render(){ renderList(); renderDetail(); status(); }
 
 /* 重画表单而不夺走筛选框的焦点与光标 */
 function redrawConfig(p, input){
   const at = input.selectionStart;
-  renderDetail();
+  renderDetail(); status();
   const next = $(".tools input");
   if (next) { next.focus(); next.setSelectionRange(at, at); }
 }
@@ -563,27 +711,41 @@ function renderDetail(){
   pad.appendChild(el("p", "summary", p.summary));
 
   const tabs = el("div", "tabs");
+  tabs.setAttribute("role", "tablist"); tabs.setAttribute("aria-label", "插件详情");
   [["config", "配置"], ["cmds", "指令 " + (p.commands.length || "")], ["diff", "差异 " + (p.diff.length || "")]]
     .forEach(([id, text]) => {
       const tab = el("button", "tab", text.trim());
+      tab.setAttribute("role", "tab");
+      tab.id = "tab-" + id; tab.tabIndex = TAB === id ? 0 : -1;
+      tab.setAttribute("aria-controls", "tab-panel");
       tab.setAttribute("aria-selected", String(TAB === id));
-      tab.onclick = () => { TAB = id; renderDetail(); };
+      tab.onclick = () => { TAB = id; renderDetail(); status(); };
+      tab.onkeydown = e => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+        e.preventDefault();
+        const tabs = [...tab.parentNode.children];
+        const at = e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : (tabs.indexOf(tab) + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        tabs[at].click(); $(".tab[aria-selected=true]").focus();
+      };
       tabs.appendChild(tab);
     });
   pad.appendChild(tabs);
 
-  if (TAB === "config") renderConfig(pad, p);
-  else if (TAB === "cmds") renderCmds(pad, p);
-  else renderDiff(pad, p);
+  const panel = el("section"); panel.id = "tab-panel";
+  panel.setAttribute("role", "tabpanel"); panel.setAttribute("aria-labelledby", "tab-" + TAB);
+  pad.appendChild(panel);
+  if (TAB === "config") renderConfig(panel, p);
+  else if (TAB === "cmds") renderCmds(panel, p);
+  else renderDiff(panel, p);
 }
 
-let fieldQuery = "", onlyChanged = false;
-
 /* 一个字段能不能被这次筛选看见：自己命中，或者它的某个子项命中 */
-function fieldVisible(f){
-  const hit = (x) => (!fieldQuery || x.path.toLowerCase().includes(fieldQuery) || label(x.key).includes(fieldQuery))
-                  && (!onlyChanged || x.changed);
-  return hit(f) || f.children.some(fieldVisible);
+function queryMatches(f){
+  return !fieldQuery || f.path.toLowerCase().includes(fieldQuery) || label(f.key).toLowerCase().includes(fieldQuery) || f.hint.toLowerCase().includes(fieldQuery);
+}
+function fieldVisible(f, inherited = false){
+  const hit = inherited || queryMatches(f);
+  return (hit && (!onlyChanged || f.changed)) || f.children.some(child => fieldVisible(child, hit));
 }
 
 function renderConfig(pad, p){
@@ -593,20 +755,20 @@ function renderConfig(pad, p){
   }
 
   // 配置项一多，翻找就成了主要成本；超过一屏才给筛选，少的时候不添乱
-  const many = flatten(p.fields).length > 12;
+  const many = p.fields.length > 0;
   if (many) {
     const tools = el("div", "tools");
     const find = el("input", "txt");
-    find.placeholder = "筛选配置项"; find.value = fieldQuery; find.spellcheck = false;
+    find.setAttribute("aria-label", "筛选配置名称、路径和说明"); find.placeholder = "筛选配置名称、路径和说明"; find.value = fieldQuery; find.spellcheck = false;
     find.oninput = () => { fieldQuery = find.value.trim().toLowerCase(); redrawConfig(p, find); };
     const only = el("button", "chip", "只看已改动");
     only.setAttribute("aria-pressed", String(onlyChanged));
-    only.onclick = () => { onlyChanged = !onlyChanged; renderDetail(); };
+    only.onclick = () => { onlyChanged = !onlyChanged; renderDetail(); status(); };
     tools.appendChild(find); tools.appendChild(only);
     pad.appendChild(tools);
   }
 
-  const visible = p.fields.filter(fieldVisible);
+  const visible = p.fields.filter(f => fieldVisible(f));
   if (!visible.length) {
     pad.appendChild(box(el("div", "empty", onlyChanged ? "这个插件的配置与默认值完全一致。" : "没有匹配的配置项")));
     return;
@@ -623,8 +785,10 @@ function renderConfig(pad, p){
   const danger = el("div", "danger");
   const reset = el("button", null, "恢复该插件全部默认值");
   reset.onclick = async () => {
-    if (!confirm("将 " + p.display + " 的全部配置恢复为默认值？开关与管理员会保留。")) return;
-    await send({ action: "reset", name: p.name, path: "" }, null);
+    if (!confirm("将 " + p.display + " 的全部配置恢复为默认值？开关、管理员与面板密钥会保留。")) return;
+    if ([...drafts.values()].some(d => d.name === p.name && d.saving)) return;
+    for (const [key, d] of drafts) if (d.name === p.name) discard(key);
+    await action({ action: "reset", name: p.name, path: "" });
   };
   danger.appendChild(reset);
   pad.appendChild(danger);
@@ -640,10 +804,11 @@ function box(child){
   return group;
 }
 
-function tableGroup(p, f){
+function tableGroup(p, f, inherited = false){
+  inherited = inherited || queryMatches(f);
   const open = store.get("ayjx.open." + p.name + "." + f.path) !== "0";
   const details = el("details", "group");
-  details.open = open;
+  details.open = !!fieldQuery || onlyChanged || open;
   const summary = el("summary");
   summary.appendChild(el("span", "caret", "▶"));
   const text = label(f.key);
@@ -653,18 +818,19 @@ function tableGroup(p, f){
   if (changed) summary.appendChild(el("span", "badge acc", changed + " 项已改"));
   details.appendChild(summary);
   const inner = el("div", "inner");
-  f.children.forEach(child => inner.appendChild(field(p, child)));
+  f.children.filter(child => fieldVisible(child, inherited)).forEach(child => inner.appendChild(field(p, child, inherited)));
   if (!f.children.length) inner.appendChild(el("div", "empty", "空表"));
   details.appendChild(inner);
-  details.ontoggle = () => store.set("ayjx.open." + p.name + "." + f.path, details.open ? "1" : "0");
+  details.ontoggle = () => { if (fieldQuery || onlyChanged) return; store.set("ayjx.open." + p.name + "." + f.path, details.open ? "1" : "0"); };
   return details;
 }
 
-function field(p, f){
-  if (f.kind === "table") return tableGroup(p, f);
-  const wide = f.kind === "raw" || f.kind.endsWith("_array");
+function field(p, f, inherited = false){
+  if (f.kind === "table") return tableGroup(p, f, inherited);
+  const wide = f.kind === "raw" || f.kind.endsWith("_array") || (f.kind === "string" && !f.sensitive && (String(f.value || "").length > 70 || /prompt|persona|instruction/.test(f.key)));
   const row = el("div", "field" + (wide ? " wide" : "") + (f.changed ? " dirty" : ""));
 
+  row.dataset.path = f.path; row.dataset.plugin = p.name;
   const meta = el("div", "meta");
   const name = el("div", "name");
   const text = label(f.key);
@@ -679,14 +845,26 @@ function field(p, f){
   else sub.appendChild(el("span", "def", "默认 " + short(f.default)));
   if (f.changed && !f.sensitive) {
     const reset = el("button", "reset", "恢复默认");
-    reset.onclick = () => send({ action: "reset", name: p.name, path: f.path }, row);
+    reset.onclick = async () => {
+      const key = draftKey(p.name, f.path);
+      if (drafts.get(key)?.saving) return;
+      if (drafts.has(key) && !confirm("恢复默认会替换这一项的草稿，继续？")) return;
+      discard(key); await action({ action:"reset", name:p.name, path:f.path });
+    };
     sub.appendChild(reset);
   }
   meta.appendChild(sub);
+  const note = el("div", "field-status");
+  note.id = "note-" + p.name + "-" + f.path;
+  note.setAttribute("aria-live", "polite"); meta.appendChild(note);
   row.appendChild(meta);
 
   const ctrl = el("div", "ctrl");
   ctrl.appendChild(control(p, f, row));
+  ctrl.querySelectorAll("input,textarea,select").forEach(input => {
+    input.setAttribute("aria-label", label(f.key) + " · " + f.path);
+    input.setAttribute("aria-describedby", note.id);
+  });
   row.appendChild(ctrl);
   return row;
 }
@@ -700,143 +878,194 @@ function short(value){
 }
 
 function control(p, f, row){
-  const commit = (value, raw) => send({ action: "set", name: p.name, path: f.path, value, raw: !!raw }, row);
-
+  const key = draftKey(p.name, f.path);
+  const commit = (value, raw = false, text = value) => {
+    draft(p, f, text, value, raw, "", true);
+    saveDraft(key);
+  };
   if (f.kind === "bool") {
     const sw = el("button", "sw");
+    sw.dataset.plugin = p.name; sw.dataset.path = f.path;
     sw.setAttribute("role", "switch");
     sw.setAttribute("aria-checked", String(!!f.value));
     sw.setAttribute("aria-label", label(f.key));
-    sw.onclick = () => { sw.setAttribute("aria-checked", String(!f.value)); commit(!f.value); };
+    sw.onclick = async () => {
+      sw.disabled = true;
+      commit(!currentField(p.name, f.path).value);
+      await queue; sw.disabled = false;
+    };
     return sw;
   }
-
-  if (f.kind === "int" || f.kind === "float") {
-    const input = el("input", "txt num");
-    input.type = "number"; input.inputMode = "decimal";
-    if (f.kind === "float") input.step = "0.1";
-    input.value = f.value == null ? "" : f.value;
-    const save = () => {
-      const text = input.value.trim();
-      if (text === "" || Number(text) === Number(f.value)) { input.value = f.value; return; }
-      const number = Number(text);
-      if (!Number.isFinite(number)) { input.value = f.value; toast("请输入一个数字", true); return; }
-      commit(number);
-    };
-    input.onblur = save;
-    input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { input.value = f.value; input.blur(); } };
-    return input;
-  }
-
   if (f.kind === "string" && f.options.length && !f.sensitive) {
     const sel = el("select", "txt");
-    f.options.forEach(choice => {
+    const value = drafts.get(key)?.value ?? f.value;
+    const choices = f.options.includes(value) ? f.options : [value, ...f.options];
+    choices.forEach(choice => {
       const opt = el("option", null, choice);
-      opt.value = choice;
-      if (choice === f.value) opt.selected = true;
-      sel.appendChild(opt);
+      opt.value = choice; opt.selected = choice === value; sel.appendChild(opt);
     });
-    // 磁盘上的值不在候选里（手改过配置）也要照实显示，不能悄悄替人改掉
-    if (f.value != null && !f.options.includes(f.value)) {
-      const kept = el("option", null, f.value + "（当前）");
-      kept.value = f.value; kept.selected = true;
-      sel.insertBefore(kept, sel.firstChild);
-    }
     sel.onchange = () => commit(sel.value);
     return sel;
   }
+  if (f.kind.endsWith("_array")) return tagEditor(p, f);
 
-  if (f.kind === "string") {
-    const input = el("input", "txt");
-    input.type = f.sensitive ? "password" : "text";
-    input.autocomplete = "off"; input.spellcheck = false;
-    input.value = f.sensitive ? "" : (f.value == null ? "" : f.value);
-    input.placeholder = f.sensitive ? (f.filled ? "留空则保持不变" : "未设置") : "";
-    const save = () => {
-      const text = input.value;
-      if (f.sensitive) { if (!text) return; commit(text); input.value = ""; return; }
-      if (text === (f.value == null ? "" : f.value)) return;
-      commit(text);
-    };
-    input.onblur = save;
-    input.onkeydown = (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { input.value = f.sensitive ? "" : f.value; input.blur(); } };
-    return input;
+  const raw = f.kind === "raw";
+  const numeric = f.kind === "int" || f.kind === "float";
+  const multiline = raw || (row.classList.contains("wide") && f.kind === "string");
+  const manual = raw || f.sensitive;
+  const wrap = el("div", "editor-wrap");
+  const input = el(multiline ? "textarea" : "input", "txt" + (numeric ? " num" : ""));
+  // 用文本接收数字，保留非法/未完成输入，不让浏览器偷偷清空草稿。
+  if (!multiline) input.type = f.sensitive ? "password" : "text";
+  if (numeric) input.inputMode = f.kind === "int" ? "numeric" : "decimal";
+  input.autocomplete = "off"; input.spellcheck = false;
+  const base = () => {
+    const now = currentField(p.name, f.path);
+    return f.sensitive ? "" : raw ? now.raw_text ?? toToml(now.value) : String(now.value ?? "");
+  };
+  input.value = drafts.get(key)?.text ?? base();
+  input.placeholder = f.sensitive ? (f.filled ? "已设置 · 输入新值后保存" : "输入密钥后保存") : raw ? "按 TOML 格式编辑，支持多行" : "";
+  input.dataset.flush = "1"; input.dataset.editor = key;
+  const update = () => {
+    const text = input.value;
+    if (text === base() && !drafts.get(key)?.saving) { discard(key); return; }
+    const existing = drafts.get(key);
+    if (existing && existing.text === text) {
+      if (!manual && !existing.error && !existing.saving && !composing) {
+        clearTimeout(existing.timer); existing.timer = setTimeout(() => saveDraft(key), 800);
+      }
+      return;
+    }
+    let value = text, error = "";
+    if (numeric) {
+      if (!text.trim()) error = "请输入数字，或按 Esc 恢复已保存值";
+      else if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(text.trim()) || !Number.isFinite(Number(text))) error = "请输入有效数字";
+      else if (f.kind === "int" && !Number.isSafeInteger(Number(text))) error = "请输入安全范围内的整数，不能包含小数";
+      value = Number(text);
+    }
+    const d = draft(p, f, text, value, raw, error, manual);
+    d.invalid = !!error;
+  };
+  input.oninput = update;
+  input.onchange = () => { if (!composing) update(); };
+  input.addEventListener("compositionstart", () => { composing = true; clearTimeout(drafts.get(key)?.timer); });
+  input.addEventListener("compositionend", () => { composing = false; update(); });
+  input.onblur = () => { if (!manual && !composing) saveDraft(key); };
+  input.onkeydown = e => {
+    if (e.isComposing || composing) return;
+    if (e.key === "Escape") {
+      e.stopPropagation(); e.preventDefault();
+      if (!drafts.get(key)?.saving) { discard(key); input.value = base(); }
+    } else if (e.key === "Enter" && !multiline) {
+      e.preventDefault(); update(); saveDraft(key);
+    }
+  };
+  wrap.appendChild(input);
+  const bar = el("div", "editor-actions");
+  if (manual) {
+    const save = el("button", "chip", raw ? "保存 TOML" : "保存密钥");
+    save.onclick = () => { update(); saveDraft(key); };
+    bar.appendChild(save);
   }
-
-  if (f.kind.endsWith("_array")) return tagEditor(f, commit);
-
-  /* raw：交给 TOML 文本，写法与 /ctl set 完全一致 */
-  const wrap = el("div");
-  wrap.style.width = "100%";
-  const area = el("textarea", "txt");
-  area.spellcheck = false;
-  area.placeholder = "这一项的键由你自己定，按 TOML 写；留空表示没有内容。";
-  area.value = toToml(f.value);
-  const bar = el("div"); bar.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:8px";
-  const save = el("button", "chip", "保存 TOML");
-  save.onclick = () => commit(area.value, true);
-  bar.appendChild(save);
-  wrap.appendChild(area); wrap.appendChild(bar);
+  const undo = el("button", "chip", "撤销草稿");
+  undo.onclick = () => {
+    if (drafts.get(key)?.saving) return;
+    discard(key); input.value = base();
+  };
+  if (manual || drafts.has(key)) bar.appendChild(undo);
+  if (bar.children.length) wrap.appendChild(bar);
   return wrap;
 }
 
+// 后端提供原生 TOML 文本；此兜底使用内联表，避免子表改变后续根键的归属。
 function toToml(value){
-  if (value == null) return "";
-  if (Array.isArray(value)) return JSON.stringify(value);
-  if (typeof value === "object") {
-    const lines = [];
-    const walk = (obj, prefix) => Object.entries(obj).forEach(([k, v]) => {
-      if (v && typeof v === "object" && !Array.isArray(v)) { lines.push("[" + (prefix ? prefix + "." : "") + JSON.stringify(k) + "]"); walk(v, (prefix ? prefix + "." : "") + JSON.stringify(k)); }
-      else lines.push(JSON.stringify(k) + " = " + JSON.stringify(v));
-    });
-    walk(value, "");
-    return lines.join("\n");
-  }
-  return JSON.stringify(value);
+  const literal = v => {
+    if (Array.isArray(v)) return "[" + v.map(literal).join(", ") + "]";
+    if (v && typeof v === "object") return "{ " + Object.entries(v).map(([k, x]) => JSON.stringify(k) + " = " + literal(x)).join(", ") + " }";
+    return JSON.stringify(v);
+  };
+  if (value && typeof value === "object" && !Array.isArray(value))
+    return Object.entries(value).map(([k, v]) => JSON.stringify(k) + " = " + literal(v)).join("\n");
+  return value == null ? "" : literal(value);
 }
 
-function tagEditor(f, commit){
+function tagEditor(p, f){
+  const key = draftKey(p.name, f.path);
   const numeric = f.kind === "int_array" || f.kind === "float_array";
-  const values = Array.isArray(f.value) ? f.value.slice() : [];
+  const boolean = f.kind === "bool_array";
+  const wrap = el("div", "editor-wrap");
   const boxEl = el("div", "tagbox");
-  const push = (next) => commit(next);
-
-  values.forEach((value, index) => {
-    const tag = el("span", "tag");
-    tag.appendChild(el("span", null, String(value)));
-    const kill = el("button", null, "✕");
-    kill.title = "移除";
-    kill.onclick = () => { const next = values.slice(); next.splice(index, 1); push(next); };
-    tag.appendChild(kill);
-    boxEl.appendChild(tag);
-  });
-
   const input = el("input");
-  input.placeholder = values.length ? "添加…" : (numeric ? "输入数字后回车" : "输入内容后回车");
+  input.placeholder = numeric ? "输入数字，回车添加" : boolean ? "true / false，回车添加" : "输入一项，回车添加";
   if (numeric) input.inputMode = "decimal";
   input.autocomplete = "off"; input.spellcheck = false;
+  let values = (drafts.get(key)?.value ?? f.value ?? []).slice();
+  input.value = drafts.get(key)?.entry || "";
+  const mark = (error = "") => {
+    if (!input.value && !error && !drafts.get(key)?.saving && JSON.stringify(values) === JSON.stringify(currentField(p.name, f.path).value)) {
+      discard(key); return;
+    }
+    const d = draft(p, f, null, values.slice(), false, error, true);
+    d.entry = input.value; d.invalid = !!error || !!input.value.trim();
+    return d;
+  };
+  const paint = () => {
+    boxEl.querySelectorAll(".tag").forEach(tag => tag.remove());
+    values.forEach((value, index) => {
+      const tag = el("span", "tag");
+      tag.appendChild(el("span", null, String(value)));
+      const kill = el("button", null, "×");
+      kill.setAttribute("aria-label", "移除 " + value);
+      // 点击删除时先处理尚未提交的输入，避免 blur 与 click 同时发出旧数组。
+      kill.onpointerdown = e => e.preventDefault();
+      kill.onclick = () => {
+        if (input.value.trim()) { add(); if (input.value.trim()) return; }
+        values.splice(index, 1); mark(); paint(); saveDraft(key);
+      };
+      tag.appendChild(kill); boxEl.insertBefore(tag, input);
+    });
+  };
   const add = () => {
-    const text = input.value.trim().replace(/[,，\s]+$/, "");
-    if (!text) return;
-    const parts = text.split(/[,，\s]+/).filter(Boolean);
-    const next = values.slice();
+    if (composing || !input.value.trim()) return;
+    const text = input.value.trim();
+    // 字符串中的空格和逗号可能是正文，整段作为一项保存；数字支持批量粘贴。
+    const parts = numeric || boolean ? text.split(/[,，\s]+/).filter(Boolean) : [text];
+    const added = [];
     for (const part of parts) {
       if (numeric) {
-        const number = Number(part);
-        if (!Number.isFinite(number)) { toast("「" + part + "」不是数字", true); return; }
-        next.push(f.kind === "int_array" ? Math.trunc(number) : number);
-      } else next.push(part);
+        const n = Number(part);
+        if (!/^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(part) || !Number.isFinite(n) || (f.kind === "int_array" && !Number.isSafeInteger(n))) {
+          mark("「" + part + "」不是有效的" + (f.kind === "int_array" ? "整数" : "数字")); return;
+        }
+        added.push(n);
+      } else if (boolean) {
+        if (part !== "true" && part !== "false") { mark("布尔数组只能填写 true 或 false"); return; }
+        added.push(part === "true");
+      } else added.push(part);
     }
-    input.value = "";
-    push(next);
+    values.push(...added); input.value = ""; mark(); paint(); saveDraft(key);
   };
-  input.onkeydown = (e) => {
-    if (e.key === "Enter" || e.key === "," || e.key === "，") { e.preventDefault(); add(); }
-    else if (e.key === "Backspace" && !input.value && values.length) { push(values.slice(0, -1)); }
+  input.oninput = () => mark();
+  input.addEventListener("compositionstart", () => { composing = true; });
+  input.addEventListener("compositionend", () => { composing = false; mark(); });
+  input.onkeydown = e => {
+    if (e.isComposing || composing) return;
+    if (e.key === "Enter") { e.preventDefault(); add(); }
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      if (!drafts.get(key)?.saving) {
+        discard(key); values = currentField(p.name, f.path).value.slice(); input.value = ""; paint();
+      }
+    }
   };
-  input.onblur = add;
-  boxEl.appendChild(input);
-  return boxEl;
+  input.onblur = add; input.onchange = add; input.dataset.flush = "1";
+  boxEl.appendChild(input); paint(); wrap.appendChild(boxEl);
+  const bar = el("div", "editor-actions");
+  const addButton = el("button", "chip", "添加"); addButton.onclick = add;
+  const undo = el("button", "chip", "撤销草稿");
+  undo.onclick = () => { if (!drafts.get(key)?.saving) { discard(key); values = currentField(p.name, f.path).value.slice(); input.value = ""; paint(); } };
+  bar.append(addButton, undo); wrap.appendChild(bar);
+  return wrap;
 }
 
 function renderCmds(pad, p){
@@ -873,38 +1102,60 @@ function renderDiff(pad, p){
 
 /* ================= 交互绑定 ================= */
 function bind(){
+  if (bound) return;
+  bound = true;
   const search = $("#q");
   search.oninput = () => { query = search.value.trim(); renderList(); };
   $("#qclear").onclick = () => { search.value = ""; query = ""; renderList(); search.focus(); };
-  $("#filters").onclick = (e) => {
+  $("#filters").onclick = e => {
     const chip = e.target.closest(".chip"); if (!chip) return;
     filter = chip.dataset.f;
     [...$("#filters").children].forEach(c => c.setAttribute("aria-pressed", String(c === chip)));
     renderList();
   };
   $("#theme").onclick = () => {
-    const dark = document.documentElement.dataset.theme !== "light";
-    document.documentElement.dataset.theme = dark ? "light" : "dark";
-    store.set(THEME_KEY, dark ? "light" : "dark");
+    const theme = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    document.documentElement.dataset.theme = theme; store.set(THEME_KEY, theme);
   };
-  $("#refresh").onclick = async () => {
-    const icon = $("#refresh"); icon.style.transition = "transform .5s"; icon.style.transform = "rotate(360deg)";
-    setTimeout(() => { icon.style.transition = ""; icon.style.transform = ""; }, 520);
-    try { apply((await api("/api/state")).state); render(); } catch (e) { toast(e.message, true); }
-  };
+  $("#refresh").onclick = () => refresh(true);
+  $("#save-all").onclick = saveAll;
   addEventListener("hashchange", () => {
     const name = pick(hashPlugin());
-    if (name && name !== CURRENT) { CURRENT = name; TAB = "config"; document.body.dataset.view = "detail"; render(); }
+    if (name && name !== CURRENT) {
+      CURRENT = name; TAB = "config"; fieldQuery = ""; onlyChanged = false;
+      document.body.dataset.view = "detail"; render();
+    } else if (!name) document.body.dataset.view = "list";
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
-      e.preventDefault(); document.body.dataset.view = "list"; $("#q").focus(); $("#q").select();
-    } else if (e.key === "Escape") {
-      if (document.activeElement === $("#q")) { $("#q").blur(); }
-      else if (document.body.dataset.view === "detail") document.body.dataset.view = "list";
+  addEventListener("beforeunload", e => {
+    if (drafts.size || busy) { e.preventDefault(); e.returnValue = ""; }
+  });
+  addEventListener("online", () => refresh(true));
+  addEventListener("offline", () => connection(false));
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+  $("#detail").addEventListener("focusout", () => setTimeout(() => {
+    if (!editing() && !busy && !composing) { renderDetail(); status(); }
+  }, 0));
+  document.addEventListener("keydown", e => {
+    if (e.isComposing || composing) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); saveAll(); }
+    else if (e.key === "/" && !document.activeElement.matches("input,textarea,select")) {
+      e.preventDefault(); document.body.dataset.view = "list"; search.focus(); search.select();
+    } else if (e.key === "Escape" && !document.activeElement.matches("input,textarea,select")) {
+      document.body.dataset.view = "list";
     }
   });
 }
+
+// 所有状态和函数准备好后启动；没有凭据时也能安全显示登录页。
+(function boot(){
+  document.documentElement.dataset.theme = store.get(THEME_KEY) || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  const url = new URL(location.href), k = url.searchParams.get("k");
+  if (k) {
+    TOKEN = k; url.searchParams.delete("k");
+    history.replaceState(null, "", url.pathname + url.search + url.hash);
+  } else TOKEN = store.get(TOKEN_KEY);
+  TOKEN ? start() : gate();
+})();
 </script>
 </body>
 </html>

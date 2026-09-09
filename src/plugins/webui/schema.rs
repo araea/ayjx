@@ -40,6 +40,8 @@ pub(super) struct Field {
     /// 只能取固定几个值时的候选清单（来自 `ctl::options`），否则为空
     pub options: &'static [&'static str],
     pub children: Vec<Field>,
+    /// 原生 TOML，保留浮点类型、整数精度与子表归属。敏感值永不包含在内。
+    pub raw_text: Option<String>,
 }
 
 /// 把一份插件配置展开成表单。`enabled` 由页面顶部的总开关承担，不进表单。
@@ -79,8 +81,8 @@ fn field(
 ) -> Field {
     // 形状看默认值，没有默认值（磁盘上的额外项）才退回当前值。
     let shape = default.or(current);
-    let sensitive = ctl::sensitive(path);
     let kind = kind_of(plugin, root, path, shape, current);
+    let sensitive = ctl::sensitive(path) || (kind == "raw" && current.is_some_and(contains_secret));
 
     let mut children = Vec::new();
     if kind == "table" {
@@ -110,7 +112,8 @@ fn field(
 
     let filled = current
         .and_then(Value::as_str)
-        .is_some_and(|s| !s.is_empty());
+        .is_some_and(|s| !s.is_empty())
+        || (sensitive && current.is_some_and(|v| v.is_table() || v.is_array()));
     Field {
         path: path.to_string(),
         key: key.to_string(),
@@ -134,6 +137,27 @@ fn field(
         hint: hint(path, shape),
         options: ctl::options(plugin.name, path),
         children,
+        raw_text: if kind == "raw" && !sensitive {
+            current.map(|v| {
+                if v.is_table() {
+                    toml::to_string_pretty(v).unwrap_or_default()
+                } else {
+                    v.to_string()
+                }
+            })
+        } else {
+            None
+        },
+    }
+}
+
+fn contains_secret(value: &Value) -> bool {
+    match value {
+        Value::Table(t) => t
+            .iter()
+            .any(|(key, v)| ctl::sensitive(key) || contains_secret(v)),
+        Value::Array(a) => a.iter().any(contains_secret),
+        _ => false,
     }
 }
 
@@ -277,7 +301,20 @@ pub(super) fn to_json(value: &Value) -> Json {
         Value::Boolean(b) => json!(b),
         Value::Datetime(d) => json!(d.to_string()),
         Value::Array(a) => Json::Array(a.iter().map(to_json).collect()),
-        Value::Table(t) => Json::Object(t.iter().map(|(k, v)| (k.clone(), to_json(v))).collect()),
+        Value::Table(t) => Json::Object(
+            t.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        if ctl::sensitive(k) {
+                            Json::Null
+                        } else {
+                            to_json(v)
+                        },
+                    )
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -406,19 +443,68 @@ mod tests {
         assert!(!json.contains("real-secret"), "{json}");
     }
 
+    #[test]
+    fn nested_secrets_are_hidden_in_parent_values_and_raw_editors() {
+        let p = plugin("oai");
+        let mut current = (p.default_config)();
+        current.as_table_mut().unwrap().insert(
+            "custom".into(),
+            toml::from_str::<Value>(
+                "[nested]\napi_key = \"nested-secret\"\n[[entries]]\npassword = \"array-secret\"\n",
+            )
+            .unwrap(),
+        );
+        let mut defaults = current.clone();
+        defaults["custom"] = Value::Table(Default::default());
+        let form = fields(p, &current, &defaults);
+        let custom = form.iter().find(|f| f.key == "custom").unwrap();
+        assert!(custom.sensitive);
+        assert!(custom.raw_text.is_none());
+        let json = serde_json::to_string(&form).unwrap();
+        assert!(!json.contains("nested-secret"));
+        assert!(!json.contains("array-secret"));
+        let form = fields(p, &current, &current);
+        let json = serde_json::to_string(&form).unwrap();
+        assert!(!json.contains("nested-secret"));
+        assert!(!json.contains("array-secret"));
+    }
+
+    #[test]
+    fn raw_editor_text_round_trips_nested_tables_and_precise_numbers() {
+        let p = plugin("ai_news");
+        let defaults = (p.default_config)();
+        let mut current = defaults.clone();
+        let value =
+            toml::from_str::<Value>("z = 9007199254740993\nscale = 2.0\n[a]\nname = \"example\"\n")
+                .unwrap();
+        current["group_preferences"] = value.clone();
+        let form = fields(p, &current, &defaults);
+        let f = form.iter().find(|f| f.key == "group_preferences").unwrap();
+        assert_eq!(
+            parse_toml(f.raw_text.as_deref().unwrap(), Some(&value)).unwrap(),
+            value
+        );
+    }
+
     /// 名字像时刻、值却是次数的键不该被标成时间格式。
     #[test]
     fn hints_are_checked_against_the_real_default_value() {
         assert_eq!(hint("min_times", Some(&Value::Integer(2))), "");
         assert_eq!(
-            hint("brief_times", Some(&Value::Array(vec![Value::String("12:50:00".into())]))),
+            hint(
+                "brief_times",
+                Some(&Value::Array(vec![Value::String("12:50:00".into())]))
+            ),
             "每项 HH:MM:SS"
         );
         assert_eq!(
             hint("daily_time", Some(&Value::String("08:20:00".into()))),
             "HH:MM 或 HH:MM:SS"
         );
-        assert_eq!(hint("restart_command", Some(&Value::String(String::new()))), "");
+        assert_eq!(
+            hint("restart_command", Some(&Value::String(String::new()))),
+            ""
+        );
         assert_eq!(hint("cooldown_seconds", Some(&Value::Integer(15))), "秒");
     }
 

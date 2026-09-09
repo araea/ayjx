@@ -54,7 +54,15 @@ struct Request {
 async fn session(mut stream: TcpStream) -> std::io::Result<()> {
     let request = match read_request(&mut stream).await? {
         Some(request) => request,
-        None => return write_response(&mut stream, 400, "text/plain; charset=utf-8", b"bad request").await,
+        None => {
+            return write_response(
+                &mut stream,
+                400,
+                "text/plain; charset=utf-8",
+                b"bad request",
+            )
+            .await;
+        }
     };
     let (status, kind, body) = route(request).await;
     write_response(&mut stream, status, kind, &body).await
@@ -77,6 +85,9 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>
         buffer.extend_from_slice(&chunk[..read]);
     };
 
+    if head_end > MAX_HEAD {
+        return Ok(None);
+    }
     let head = String::from_utf8_lossy(&buffer[..head_end]).into_owned();
     let mut lines = head.split("\r\n");
     let mut start = lines.next().unwrap_or_default().split(' ');
@@ -90,7 +101,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>
         None => (target, String::new()),
     };
 
-    let mut length = 0usize;
+    let mut content_length = None;
     let mut token = None;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
@@ -98,7 +109,16 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>
         };
         let value = value.trim();
         match name.trim().to_ascii_lowercase().as_str() {
-            "content-length" => length = value.parse().unwrap_or(0),
+            "content-length" => {
+                if content_length.is_some() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Ok(None);
+                }
+                let Ok(length) = value.parse::<usize>() else {
+                    return Ok(None);
+                };
+                content_length = Some(length);
+            }
+            "transfer-encoding" => return Ok(None),
             "authorization" => {
                 token = value
                     .strip_prefix("Bearer ")
@@ -109,6 +129,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>
             _ => {}
         }
     }
+    let length = content_length.unwrap_or(0);
     if length > MAX_BODY {
         return Ok(None);
     }
@@ -117,7 +138,7 @@ async fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>
     while body.len() < length {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
-            break;
+            return Ok(None);
         }
         body.extend_from_slice(&chunk[..read]);
     }
@@ -144,10 +165,7 @@ fn secret_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() || a.is_empty() {
         return false;
     }
-    a.iter()
-        .zip(b)
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 fn authorized(request: &Request) -> bool {
@@ -180,7 +198,9 @@ async fn route(request: Request) -> (u16, &'static str, Vec<u8>) {
                 return (
                     401,
                     JSON,
-                    body(&json!({"ok": false, "message": "密钥无效；请用日志里的链接重新打开面板。"})),
+                    body(
+                        &json!({"ok": false, "message": "密钥无效；请用日志里的链接重新打开面板。"}),
+                    ),
                 );
             }
             let Some(running) = super::running() else {
@@ -197,10 +217,7 @@ async fn route(request: Request) -> (u16, &'static str, Vec<u8>) {
     }
 }
 
-async fn api_route(
-    ctx: &crate::event::Context,
-    request: &Request,
-) -> (u16, &'static str, Vec<u8>) {
+async fn api_route(ctx: &crate::event::Context, request: &Request) -> (u16, &'static str, Vec<u8>) {
     const JSON: &str = "application/json; charset=utf-8";
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/api/version") => (
@@ -263,7 +280,7 @@ async fn write_response(
          Cache-Control: no-store\r\n\
          X-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'\r\n\
+         Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n\
          Connection: close\r\n\r\n",
         body.len()
     );
@@ -312,8 +329,11 @@ mod tests {
         let mut oversized = TcpStream::connect(addr).await.unwrap();
         oversized
             .write_all(
-                format!("POST /api/command HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1)
-                    .as_bytes(),
+                format!(
+                    "POST /api/command HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                    MAX_BODY + 1
+                )
+                .as_bytes(),
             )
             .await
             .unwrap();
@@ -327,6 +347,33 @@ mod tests {
         assert_eq!(parsed.token.as_deref(), Some("tok"));
         assert_eq!(parsed.body, b"{}");
         assert!(refused, "超长 body 必须被拒绝");
+    }
+
+    #[tokio::test]
+    async fn malformed_lengths_truncated_bodies_and_large_headers_are_rejected() {
+        let requests = [
+            "POST /api/command HTTP/1.1\r\nContent-Length: nope\r\n\r\n{}".to_string(),
+            "POST /api/command HTTP/1.1\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\n{}"
+                .to_string(),
+            "POST /api/command HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_string(),
+            "POST /api/command HTTP/1.1\r\nContent-Length: 4\r\n\r\n{}".to_string(),
+            format!(
+                "GET / HTTP/1.1\r\nX-Padding: {}\r\n\r\n",
+                "a".repeat(MAX_HEAD)
+            ),
+        ];
+        for request in requests {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = tokio::spawn(async move {
+                let mut stream = TcpStream::connect(addr).await.unwrap();
+                let _ = stream.write_all(request.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert!(read_request(&mut stream).await.unwrap().is_none());
+            client.await.unwrap();
+        }
     }
 
     /// 页面不该带上任何外链，否则断网的机器上打开就是一张白纸。

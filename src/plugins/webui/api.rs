@@ -43,7 +43,11 @@ fn section_code(code: &str) -> &'static str {
 /// 于是聊天里用 `/ctl` 改的东西几秒内自己出现在页面上。
 pub(super) fn version(ctx: &Context) -> String {
     let snapshot = ctx.config.read().unwrap();
-    let text = toml::to_string(&*snapshot).unwrap_or_default();
+    config_version(&snapshot)
+}
+
+fn config_version(snapshot: &crate::config::AppConfig) -> String {
+    let text = toml::to_string(snapshot).unwrap_or_default();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in text.as_bytes() {
         hash ^= u64::from(*byte);
@@ -58,11 +62,13 @@ fn commands(cmds: &'static [Cmd]) -> Vec<Json> {
         .collect()
 }
 
-fn plugin_json(ctx: &Context, p: &'static Plugin) -> Json {
+fn plugin_json(snapshot: &crate::config::AppConfig, p: &'static Plugin) -> Json {
     let defaults = (p.default_config)();
-    let snapshot = ctx.config.read().unwrap();
-    let current = snapshot.plugins.get(p.name).cloned().unwrap_or_else(|| defaults.clone());
-    drop(snapshot);
+    let current = snapshot
+        .plugins
+        .get(p.name)
+        .cloned()
+        .unwrap_or_else(|| defaults.clone());
 
     let mut diff = Vec::new();
     ctl::differences(&defaults, &current, "", &mut diff);
@@ -88,8 +94,9 @@ fn plugin_json(ctx: &Context, p: &'static Plugin) -> Json {
 
 /// 完整状态：全局概况 + 每个插件的开关、表单与差异。
 pub(super) fn state(ctx: &Context) -> Json {
+    // 字段与指纹来自同一份快照，避免并发保存时返回新指纹配旧字段。
+    let snapshot = ctx.config.read().unwrap().clone();
     let (prefix, bots, filter) = {
-        let snapshot = ctx.config.read().unwrap();
         let prefix = snapshot.command_prefix.first().cloned().unwrap_or_default();
         let bots: Vec<Json> = snapshot
             .bots
@@ -111,14 +118,17 @@ pub(super) fn state(ctx: &Context) -> Json {
         (prefix, bots, filter)
     };
 
-    let plugins: Vec<Json> = get_plugins().iter().map(|p| plugin_json(ctx, p)).collect();
+    let plugins: Vec<Json> = get_plugins()
+        .iter()
+        .map(|p| plugin_json(&snapshot, p))
+        .collect();
     let on = plugins
         .iter()
         .filter(|p| p["enabled"].as_bool().unwrap_or(false))
         .count();
 
     json!({
-        "version": version(ctx),
+        "version": config_version(&snapshot),
         "prefix": prefix,
         "sections": SECTIONS.iter().map(|(code, title)| json!({"code": code, "title": title})).collect::<Vec<_>>(),
         "plugins": plugins,
@@ -159,7 +169,18 @@ pub(super) async fn execute(ctx: &Context, command: Command) -> (bool, String, J
                 .map(|out| out.text)
         }
         Command::Reset { name, path } => {
-            if path.is_empty() {
+            if path.is_empty() && name.eq_ignore_ascii_case("webui") {
+                // 整体恢复仍走 ctl 原子事务，但保留当前访问凭据。
+                ctl::change(ctx, |cfg| {
+                    let old = cfg.plugins.get("webui").ok_or("配置不存在")?;
+                    let mut value = super::default_config();
+                    value["enabled"] = old["enabled"].clone();
+                    value["token"] = old["token"].clone();
+                    cfg.plugins.insert("webui".into(), value);
+                    Ok("已恢复网页面板默认参数，保留开关与访问密钥；监听参数重启后生效。".into())
+                })
+                .await
+            } else if path.is_empty() {
                 ctl::execute(ctx, &format!("reset {name} --confirm"))
                     .await
                     .map(|out| out.text)
@@ -204,11 +225,20 @@ async fn set_field(
     } else {
         schema::to_toml(value, old.as_ref())?
     };
+    if plugin.name == "webui"
+        && path == "token"
+        && next.as_str().is_none_or(|s| s.trim().is_empty())
+    {
+        return Err("访问密钥不能为空；请填写新密钥后保存。".into());
+    }
     ctl::set_value(ctx, plugin.name, path, next).await
 }
 
 async fn reset_field(ctx: &Context, name: &str, path: &str) -> Result<String, String> {
     let plugin = ctl::resolve(name)?;
+    if plugin.name == "webui" && path == "token" {
+        return Err("访问密钥不能恢复为空值；请填写新密钥后保存。".into());
+    }
     let defaults = (plugin.default_config)();
     let value = ctl::at(&defaults, path)
         .cloned()
@@ -357,10 +387,11 @@ mod tests {
             .find(|p| p["name"] == "repeater")
             .unwrap();
         assert!(
-            repeater["diff"].as_array().unwrap().iter().any(|line| line
-                .as_str()
+            repeater["diff"]
+                .as_array()
                 .unwrap()
-                .contains("channel.white")),
+                .iter()
+                .any(|line| line.as_str().unwrap().contains("channel.white")),
             "{repeater}"
         );
 
@@ -375,6 +406,51 @@ mod tests {
         )
         .await;
         assert!(ok, "{message}");
+        cleanup(&ctx).await;
+    }
+
+    #[tokio::test]
+    async fn resetting_webui_preserves_access_and_empty_tokens_are_rejected() {
+        let ctx = context().await;
+        ctx.config
+            .write()
+            .unwrap()
+            .plugins
+            .get_mut("webui")
+            .unwrap()["token"] = Value::String("test-key".into());
+        let (ok, message, _) = execute(
+            &ctx,
+            Command::Reset {
+                name: "webui".into(),
+                path: String::new(),
+            },
+        )
+        .await;
+        assert!(ok, "{message}");
+        assert_eq!(
+            ctx.config.read().unwrap().plugins["webui"]["token"].as_str(),
+            Some("test-key")
+        );
+        let (ok, _, _) = execute(
+            &ctx,
+            Command::Set {
+                name: "webui".into(),
+                path: "token".into(),
+                value: json!(""),
+                raw: false,
+            },
+        )
+        .await;
+        assert!(!ok);
+        let (ok, _, _) = execute(
+            &ctx,
+            Command::Reset {
+                name: "webui".into(),
+                path: "token".into(),
+            },
+        )
+        .await;
+        assert!(!ok);
         cleanup(&ctx).await;
     }
 
