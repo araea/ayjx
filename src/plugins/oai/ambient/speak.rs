@@ -109,7 +109,9 @@ pub(crate) async fn compose(
         tool_rules
     );
     let prompt = format!(
-        "当前参与状态：{rhythm}\n最近的群聊记录：\n{}\n{}",
+        "{}\n当前参与状态：{}\n最近的群聊记录：\n{}\n{}",
+        super::now_context(),
+        rhythm,
         transcript(turns),
         closing(mentioned)
     );

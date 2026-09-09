@@ -99,7 +99,9 @@ pub(crate) async fn judge(
     let mut parts = vec![
         ChatCompletionRequestMessageContentPartTextArgs::default()
             .text(format!(
-                "当前参与状态：{rhythm}\n最近的群聊：\n{}",
+                "{}\n当前参与状态：{}\n最近的群聊：\n{}",
+                super::now_context(),
+                rhythm,
                 transcript(turns)
             ))
             .build()?

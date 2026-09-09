@@ -223,6 +223,7 @@ impl Session {
                 }
                 Ok(
                     json!({"revision":seq,"group_id":self.group.to_string(),"self_id":self.ctx.bot.login_user.id,
+                    "now":super::now_context(),
                     "capabilities":self.capabilities,"rhythm":rhythm,"messages":turns,"media":media,
                     "writes_remaining":self.config.max_actions.clamp(1,12).saturating_sub(self.writes),
                     "messages_remaining":self.config.max_messages.clamp(1,5).saturating_sub(self.messages),

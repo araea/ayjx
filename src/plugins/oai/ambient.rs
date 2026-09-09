@@ -15,6 +15,7 @@
 use crate::adapters::satori::{LockedWriter, send_msg_id};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
+use chrono::Datelike as _;
 use serde::{Deserialize, Serialize};
 use simd_json::base::ValueAsScalar;
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
@@ -170,6 +171,28 @@ impl AmbientConfig {
             think_seconds: self.think_seconds,
         }
     }
+}
+
+/// 当前本机日期、星期与时刻，让判定与发言模型感知「现在几点」。
+///
+/// 群聊语境里早晚、工作日与周末是有信息量的——模型拿不到真实时钟，只能靠文本。
+pub(crate) fn now_context() -> String {
+    let now = chrono::Local::now();
+    let weekday = match now.weekday() {
+        chrono::Weekday::Mon => "周一",
+        chrono::Weekday::Tue => "周二",
+        chrono::Weekday::Wed => "周三",
+        chrono::Weekday::Thu => "周四",
+        chrono::Weekday::Fri => "周五",
+        chrono::Weekday::Sat => "周六",
+        chrono::Weekday::Sun => "周日",
+    };
+    format!(
+        "现在：{} {} {}（本机时间）",
+        now.format("%Y-%m-%d"),
+        weekday,
+        now.format("%H:%M")
+    )
 }
 
 /// 数据目录下的资源位置。
@@ -922,5 +945,16 @@ mod tests {
     fn spoken_messages_are_written_back_as_readable_text() {
         let message = Message::new().at(114_514).text("这步缺前提").face(178);
         assert_eq!(plain_text(&message), "@114514 这步缺前提[表情]");
+    }
+
+    #[test]
+    fn now_context_reports_the_local_clock() {
+        let text = now_context();
+        let year = chrono::Local::now().format("%Y").to_string();
+        let hour = chrono::Local::now().format("%H:%M").to_string();
+        assert!(text.starts_with("现在："), "{text}");
+        assert!(text.contains(&year), "{text}");
+        assert!(text.contains(&hour), "{text}");
+        assert!(text.contains("（本机时间）"), "{text}");
     }
 }
