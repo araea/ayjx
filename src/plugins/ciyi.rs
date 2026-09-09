@@ -3,11 +3,16 @@
 //! 一局的作用域是「会话」而非「群」：群聊各群一局，私聊各人一局，
 //! 两处都能玩，互不干扰（作用域键见 `scope_of`）。
 //!
-//! 呈现方式：盘面、揭晓、排行榜、玩法说明都原生绘制成一张宣纸风的卡片图
-//! （见 `card.rs` 与 `painter.rs`），一局下来翻回去看历次提示不必在聊天
-//! 记录里大海捞针；「不在词库中」这类即时纠错仍走纯文本——它要的是快，
-//! 不是好看。绘制不走浏览器截图：文字由 ab_glyph 直接光栅化，环境里
-//! 连一个可用字体都没有时才退回文本，功能不受影响。
+//! 呈现方式：盘面、揭晓、排行榜、玩法说明都排版成一张宣纸风的卡片图，
+//! 一局下来翻回去看历次提示不必在聊天记录里大海捞针；「不在词库中」这类
+//! 即时纠错仍走纯文本——它要的是快，不是好看。
+//!
+//! 出图有三层，逐层兜底，任何一层塌了功能都不受影响：
+//!   1. **网页卡片**（`web.rs` + `res/cards/ciyi.css`）：交给无头浏览器排版，
+//!      字距、折行、省略号、弹性列宽都由排版引擎负责，版面最经得起看；
+//!   2. **原生绘制**（`card.rs` + `painter.rs`）：浏览器缺席或截图失败时顶上，
+//!      文字由 ab_glyph 直接光栅化，不依赖任何外部进程；
+//!   3. **纯文本**：连一个可用字体都没有时的最后一手。
 
 pub mod card;
 pub mod config;
@@ -16,6 +21,7 @@ pub mod engine;
 pub mod entity;
 pub mod painter;
 pub mod view;
+pub mod web;
 
 use crate::adapters::satori::{LockedWriter, send_msg};
 use crate::command::{get_prefixes, match_command};
@@ -226,8 +232,8 @@ async fn send_response(
         msg = msg.at(user_id).text("\n");
     }
 
-    msg = match render_card(&reply, config, &get_prefixes(ctx).first().cloned().unwrap_or_default())
-    {
+    let prefix = get_prefixes(ctx).first().cloned().unwrap_or_default();
+    msg = match render_card(ctx, &reply, config, &prefix).await {
         Some(b64) => msg.image(format!("base64://{b64}")),
         None => msg.text(reply.to_text()),
     };
@@ -236,20 +242,39 @@ async fn send_response(
     Ok(())
 }
 
-/// 排版并原生绘制成 PNG；关掉图片、内容不值得出图、或字体不可用时返回 None。
+/// 排版成 PNG：先试网页卡片，退回原生绘制，再退回纯文本。
+///
+/// 关掉图片或内容不值得出图（`Notice`）时直接返回 None。两条出图路径共用
+/// 同一份数据，所以任何一层被跳过，图上说的都还是同一件事。
 /// 附带把每次发出去的图落盘到 `CIYI_CARD_DEBUG_DUMP/last_sent.png`，
-/// 便于排查"图片底部被截"等疑似被 QQ 二次处理的问题。
-fn render_card(reply: &Reply, config: &CiYiConfig, prefix: &str) -> Option<String> {
+/// 便于排查「图片底部被截」等疑似被 QQ 二次处理的问题。
+async fn render_card(
+    ctx: &Context,
+    reply: &Reply,
+    config: &CiYiConfig,
+    prefix: &str,
+) -> Option<String> {
     if !config.plugin.image_enabled || !reply.wants_card() {
         return None;
     }
-    let b64 = match card::render(reply, prefix, config.plugin.image_scale) {
-        Some(s) => s,
-        None => {
-            crate::warn!(target: LOG_TARGET, "卡片绘制失败（字体不可用？），本次改发纯文本");
-            return None;
+
+    let browser_path = ctx.config.read().unwrap().browser_path.clone();
+    let b64 = match web::render(reply, prefix, config.plugin.image_scale, browser_path.as_deref())
+        .await
+    {
+        Ok(b64) => b64,
+        Err(e) => {
+            crate::warn!(target: LOG_TARGET, "网页卡片出图失败（{e}），改用原生绘制");
+            match card::render(reply, prefix, config.plugin.image_scale) {
+                Some(b64) => b64,
+                None => {
+                    crate::warn!(target: LOG_TARGET, "原生绘制也失败（字体不可用？），本次改发纯文本");
+                    return None;
+                }
+            }
         }
     };
+
     if let Ok(dir) = std::env::var("CIYI_CARD_DEBUG_DUMP") {
         let _ = std::fs::create_dir_all(&dir);
         let _ = std::fs::write(

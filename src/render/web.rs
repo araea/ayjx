@@ -187,8 +187,20 @@ fn scale_factor(scale: f64) -> f64 {
 }
 
 pub async fn capture(doc: &Doc, scale: f64, browser_path: Option<&str>) -> Result<String> {
-    let html = html(doc);
-    let width = doc.width as u32;
+    capture_html(&html(doc), doc.width as u32, scale, browser_path).await
+}
+
+/// 把一段自带样式的整页 HTML 截成 PNG base64。
+///
+/// 与 [`capture`] 走同一道串行闸门与同一套尺寸护栏，只是版面由调用方自己写——
+/// help / ctl 的 `Doc` 模型排不出来的卡片（如词意的盘面）走这里。
+/// 页面里必须有一个 `.shot` 元素，它的外接矩形就是出图范围。
+pub async fn capture_html(
+    html: &str,
+    width: u32,
+    scale: f64,
+    browser_path: Option<&str>,
+) -> Result<String> {
     let scale = scale_factor(scale);
     let mut page = None;
     // cdp-html-shot 的全局实例初始化失败会 panic，转换为可回退的普通错误。
@@ -201,7 +213,7 @@ pub async fn capture(doc: &Doc, scale: f64, browser_path: Option<&str>) -> Resul
         page = Some(browser.new_tab().await?);
         let tab = page.as_ref().unwrap();
         tab.set_viewport(&Viewport::new(width, 600).with_device_scale_factor(scale)).await?;
-        tab.set_content(&html).await?;
+        tab.set_content(html).await?;
         tab.evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))))").await?;
         let height = tab.evaluate("Math.ceil(document.querySelector('.shot').getBoundingClientRect().height)").await?
             .as_f64().ok_or_else(|| anyhow!("无法测量卡片高度"))?;

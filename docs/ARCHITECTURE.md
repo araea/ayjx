@@ -123,8 +123,8 @@ msg 支持 `Message`、`&str`、`String`。下载资源用 `crate::http::downloa
 
 | 路线 | 依赖 | 谁在用 | 适用 |
 | --- | --- | --- | --- |
-| 网页阅读卡片 `render/web.rs` | Chrome/Chromium、系统 CJK 字体 | help、ctl | 插件手册、状态清单、配置与差异 |
-| 插件自有原生绘图 `ciyi/painter.rs` | 系统 CJK 字体 | ciyi | 宣纸风盘面 |
+| 网页阅读卡片 `render/web.rs` | Chrome/Chromium、系统 CJK 字体 | help、ctl、ciyi | 插件手册、状态清单、配置与差异、宣纸风盘面 |
+| 插件自有原生绘图 `ciyi/painter.rs` | 系统 CJK 字体 | ciyi（截图不可用时兜底） | 宣纸风盘面 |
 | 图表 plotters | 无 | stats、wordcloud | 坐标轴、折线、柱状、词云 |
 | 浏览器截图 cdp_html_shot | Chrome/Chromium | webshot、ai_news、oai | 真实网页、资讯长图、Markdown |
 
@@ -138,8 +138,13 @@ help 与 ctl 共用 `render/web.rs` 的结构化文档和 `res/cards/reading.css
 关闭页面。最大高度 16000 CSS px、位图最多 6400 万像素，超过限制回复完整文本，
 不裁掉内容。`image_scale` 有限值限制为 1—4 倍，非有限值回退默认 3 倍。
 
+ciyi 用 `render/web.rs::capture_html` 送自己写的整页 HTML（`ciyi/web.rs` +
+`res/cards/ciyi.css`），660 CSS px 版心，宣纸底、朱砂一色、汉字走宋体，
+`Doc` 模型排不出来的盘面走这条路。它比 help/ctl 多一层兜底：网页截图失败时
+落到 `ciyi/card.rs` 的原生绘图，原生也失败才发纯文本。
+
 原生工具 `render/font.rs`、`canvas.rs`、`kit.rs` 保留供原生绘图使用；迁移渲染方式
-以实际阅读质量为准。ciyi 保持自己的宣纸版式，ai_news 保持网页日夜主题。
+以实际阅读质量为准。ai_news 保持网页日夜主题。
 
 **出图失败回退纯文本**。浏览器缺失、初始化失败、截图超时或尺寸超限都不应让
 帮助与控制失去响应。图文数据来自同一份注册表及经过权限校验、敏感字段脱敏的配置。

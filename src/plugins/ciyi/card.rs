@@ -55,13 +55,13 @@ const NOTE_C: Ink = Ink::rgb(109, 74, 64); // #6D4A40 提示条
 // ================= 通用小件 =================
 
 /// 出图时刻（北京时间），压在页眉右上角
-fn stamp() -> String {
+pub(super) fn stamp() -> String {
     let tz = FixedOffset::east_opt(8 * 3600).expect("UTC+8 是合法时区偏移");
     Utc::now().with_timezone(&tz).format("%m-%d %H:%M").to_string()
 }
 
 /// 千分位：词池动辄四五位数，不分节读不出量级
-fn group(n: usize) -> String {
+pub(super) fn group(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, ch) in digits.chars().enumerate() {
@@ -77,7 +77,7 @@ fn group(n: usize) -> String {
 ///
 /// 分档参照词意的实际手感：前十基本咬住答案，五十以内已在同一语义簇，
 /// 两百以内还算相近，千以内只是沾亲带故，再往后就是天涯了。
-fn tier(rank: usize) -> (&'static str, &'static str) {
+pub(super) fn tier(rank: usize) -> (&'static str, &'static str) {
     match rank {
         0..=10 => ("咫尺", "#B0342A"),
         11..=50 => ("相邻", "#C0662A"),
@@ -91,7 +91,7 @@ fn tier(rank: usize) -> (&'static str, &'static str) {
 ///
 /// 取对数刻度：名次每翻一倍，条长退一档固定距离。线性刻度下
 /// 名次 1 和名次 50 在一个万词的词池里几乎一样长，那条就白画了。
-fn heat(rank: usize, pool: usize) -> f64 {
+pub(super) fn heat(rank: usize, pool: usize) -> f64 {
     let rank = rank.max(1) as f64;
     let pool = pool.max(rank as usize + 1) as f64;
     (1.0 - rank.ln() / pool.ln()).clamp(0.04, 1.0)
