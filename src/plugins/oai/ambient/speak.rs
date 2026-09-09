@@ -90,12 +90,12 @@ pub(crate) async fn compose(
         vec![]
     };
     let tools = if bridge.is_some() {
-        format!("{},satori_context,satori_read,satori_action", config.tools)
+        format!("{},satori_context,satori_read,satori_action,satori_draw", config.tools)
     } else {
         config.tools.clone()
     };
     let tool_rules = if bridge.is_some() {
-        "\n本轮已接通真实聊天工具。先用 satori_context 查看最新记录和可用资源，再用 satori_action 发送或互动，satori_read 可查原消息，forward:true 还能把合并转发（含嵌套）整段读出来——记录里的「[合并转发]」只是占位，不读就不知道里面说了什么，别猜。工具成功回执才算做过；失败或上下文更新要重新判断。工具已发完后最终只输出 [silent]（可附 focus），不复述。可以只点赞/表态/戳一下，也可以什么都不做。需要帮助时可搜索并附可核实的来源链接，材料较多可发文件或合并转发。文本元素可保留换行；不受旧版一行一条的限制。不要用 bash/curl 绕过聊天工具发送或管理平台。"
+        "\n本轮已接通真实聊天工具。先用 satori_context 查看最新记录和可用资源，再用 satori_action 发送或互动，satori_read 可查原消息，forward:true 还能把合并转发（含嵌套）整段读出来——记录里的「[合并转发]」只是占位，不读就不知道里面说了什么，别猜。工具成功回执才算做过；失败或上下文更新要重新判断。工具已发完后最终只输出 [silent]（可附 focus），不复述。可以只点赞/表态/戳一下，也可以什么都不做。需要帮助时可搜索并附可核实的来源链接，材料较多可发文件或合并转发。文本元素可保留换行；不受旧版一行一条的限制。不要用 bash/curl 绕过聊天工具发送或管理平台。\n有人想让你画画或生成配图时：用 satori_draw 生成（传入画什么的提示词，可选尺寸/画质/垫图），会保存到本轮 ambient/media 并返回本地路径；再用 satori_action 的 send + type:image 把图片发出去。绘图是独立模型调用，不占发送额度，但每轮有张数上限。"
     } else {
         ""
     };

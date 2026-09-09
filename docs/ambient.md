@@ -50,6 +50,9 @@
 - `satori_context` 读取最新窗口、精确消息 ID、原始资源、当前平台能力和剩余额度。
 - `satori_read` 查询窗口中的原消息，或完整展开其合并转发（见下）。
 - `satori_action` 执行一个结构化动作并返回回执，然后由同一轮 Pi 根据结果继续判断。
+- `satori_draw` 调用 oai 的 GPT Image 2.5 生成一张图片并保存到 ambient/media，返回本地路径、
+  改写的标题与剩余绘图额度；随后用 `satori_action` 的 send + image 发给群友。绘图是独立的模型调用，
+  不占平台写动作额度，受 `draw_budget` 限流。
 
 支持精确引用、@群成员、QQ 小表情、图片/GIF、复用入站图片/商城表情、文件、语音、视频、
 骰子、猜拳、戳一戳、资料卡点赞、消息表态/取消表态、撤回自己的消息、合并转发。
@@ -185,6 +188,7 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 | `reply_on_mention` | `true` | 新 @ / 引用跳过筛选，但人格仍可沉默 |
 | `max_messages` | `3` | 一轮最多发送消息数，限制在 1–5 |
 | `max_actions` | `6` | 一轮平台写动作总数，限制在 1–12，失败尝试也计入 |
+| `draw_budget` | `2` | 每轮最多生成图片的张数；0 关闭绘图；绘图走 oai 的 GPT Image 2.5 接口 |
 | `typing_cpm` | `150` | 打字速度，字/分钟 |
 | `voice_cpm` | `420` | 长句等效语音输入速度 |
 | `think_seconds` | `3.0` | 思考等待，模型耗时计入其中 |

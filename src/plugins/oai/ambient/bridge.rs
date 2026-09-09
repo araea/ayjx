@@ -9,7 +9,7 @@ use crate::{
     event::Context,
     message::Message,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -76,6 +76,7 @@ struct Session {
     attempted: Arc<AtomicBool>,
     writes: usize,
     messages: usize,
+    draws: usize,
     spoke: bool,
     started: Instant,
     receipts: HashMap<String, Value>,
@@ -113,6 +114,7 @@ pub(crate) async fn start(
         attempted: attempted.clone(),
         writes: 0,
         messages: 0,
+        draws: 0,
         spoke: false,
         started: Instant::now(),
         receipts: HashMap::new(),
@@ -223,7 +225,8 @@ impl Session {
                     json!({"revision":seq,"group_id":self.group.to_string(),"self_id":self.ctx.bot.login_user.id,
                     "capabilities":self.capabilities,"rhythm":rhythm,"messages":turns,"media":media,
                     "writes_remaining":self.config.max_actions.clamp(1,12).saturating_sub(self.writes),
-                    "messages_remaining":self.config.max_messages.clamp(1,5).saturating_sub(self.messages)}),
+                    "messages_remaining":self.config.max_messages.clamp(1,5).saturating_sub(self.messages),
+                    "draws_remaining":self.config.draw_budget.clamp(0,8).saturating_sub(self.draws)}),
                 )
             }
             "read" => {
@@ -269,6 +272,86 @@ impl Session {
                     )
                     .await
                 }
+            }
+            "draw" => {
+                ensure!(self.enabled(), "该群的搭话功能已停用");
+                ensure!(self.current(), "群聊已更新，先读 satori_context 再决定");
+                let prompt = request["prompt"].as_str().unwrap_or("").trim().to_string();
+                ensure!(!prompt.is_empty(), "绘图提示词不能为空");
+                let images: Vec<String> = request["images"]
+                    .as_array()
+                    .map(|array| {
+                        array
+                            .iter()
+                            .filter_map(|value| value.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let size = request["size"].as_str().map(str::to_string);
+                let quality = request["quality"].as_str().map(str::to_string);
+                let budget = self.config.draw_budget.clamp(0, 8);
+                ensure!(budget > 0, "本群已关闭绘图（[oai.ambient] draw_budget = 0）");
+                ensure!(self.draws < budget, "本轮绘图额度已用完");
+                let (api_base, api_key, model) = {
+                    let mgr = super::super::data::MANAGER
+                        .get()
+                        .ok_or_else(|| anyhow::anyhow!("OAI 尚未初始化，暂不能绘图"))?;
+                    let config = mgr.config.read().await;
+                    let oai = crate::plugins::get_config_or_default::<super::super::OaiConfig>(
+                        &self.ctx,
+                        "oai",
+                    );
+                    let model = config
+                        .models
+                        .iter()
+                        .find(|model| {
+                            super::super::images::is_images_model(model, &oai.image_models)
+                        })
+                        .cloned()
+                        .or_else(|| {
+                            oai.image_models
+                                .iter()
+                                .find(|keyword| !keyword.trim().is_empty())
+                                .cloned()
+                        })
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("未配置图像模型，请在 [oai] image_models 指定")
+                        })?;
+                    (config.api_base.clone(), config.api_key.clone(), model)
+                };
+                ensure!(
+                    !api_base.is_empty() && !api_key.is_empty(),
+                    "OAI 接口地址或密钥未配置"
+                );
+                // 绘图是模型调用而不是平台写操作，不占用 writes/messages 额度；
+                // 单独设每轮张数上限，让语音/表情之外多一种表达不失控。
+                self.draws += 1;
+                let generated = super::super::images::generate(
+                    &api_base,
+                    &api_key,
+                    &model,
+                    &prompt,
+                    &images,
+                    size.as_deref(),
+                    quality.as_deref(),
+                )
+                .await?;
+                let mut saved = Vec::new();
+                for (index, url) in generated.urls.iter().enumerate() {
+                    match self.save_image_to_media(url, index).await {
+                        Ok(path) => saved.push(json!({ "file": path, "url": url })),
+                        Err(error) => {
+                            warn!(target: "Plugin/OAI", "保存生成的图片失败 {url}: {error:#}");
+                        }
+                    }
+                }
+                ensure!(!saved.is_empty(), "生成了图片，但写入本地失败");
+                Ok(json!({
+                    "images": saved,
+                    "caption": generated.caption,
+                    "model": generated.model,
+                    "draws_remaining": budget.saturating_sub(self.draws),
+                }))
             }
             "action" => {
                 // 一旦选择工具动作，就不再把最终解释当作第二份消息发送。
@@ -546,6 +629,65 @@ impl Session {
             });
         });
         self.spoke |= success;
+    }
+
+    /// 把生成的图片（远程直链或内联 base64）落盘到 ambient/media，供随后用工具发送。
+    /// 直接发远程直链会受签名过期与防盗链影响，先下载下来再由 satori_action 上传更稳。
+    async fn save_image_to_media(&self, url: &str, index: usize) -> Result<String> {
+        use base64::Engine as _;
+        let bytes: Vec<u8> = if let Some((meta, payload)) = url.split_once(',')
+            && meta.starts_with("data:")
+        {
+            base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .context("解码内联图片失败")?
+        } else {
+            let response = crate::http::client()
+                .get(url)
+                .header(
+                    reqwest::header::USER_AGENT,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                )
+                .timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await
+                .context("下载生成图片失败")?;
+            if !response.status().is_success() {
+                anyhow::bail!("下载生成图片失败：HTTP {}", response.status().as_u16());
+            }
+            response.bytes().await.context("读取生成图片失败")?.to_vec()
+        };
+        if bytes.is_empty() {
+            anyhow::bail!("生成的图片为空");
+        }
+        tokio::fs::create_dir_all(&self.media)
+            .await
+            .context("创建图片目录失败")?;
+        let name = format!(
+            "draw-{}-{index}.{}",
+            chrono::Local::now().format("%Y%m%d%H%M%S"),
+            image_extension(&bytes)
+        );
+        let path = self.media.join(&name);
+        tokio::fs::write(&path, bytes).await.context("写入生成图片失败")?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+}
+
+/// 按文件头识别图片扩展名，用于给落盘的绘图结果起一个正确的文件名。
+fn image_extension(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        "gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(b"BM") {
+        "bmp"
+    } else {
+        "png"
     }
 }
 
@@ -1034,5 +1176,104 @@ mod tests {
         assert!(!methods.contains(&"message.create".into()));
         assert!(raw.contains("[silent]"));
         server.abort();
+    }
+
+    /// 绘图：调用 oai 图像接口生成并落盘到 ambient/media，不占平台写动作额度。
+    #[tokio::test]
+    async fn draw_generates_saves_a_local_image_and_returns_its_path() {
+        use crate::plugins::oai::data::Manager;
+        use std::sync::Arc;
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        // 假图像接口：生成路径返回内联 base64 PNG（免去下载外部直链）。
+        let image_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let image_addr = image_listener.local_addr().unwrap();
+        let image_server = tokio::spawn(async move {
+            let (stream, _) = image_listener.accept().await.unwrap();
+            let (rx, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(rx);
+            let mut first = String::new();
+            reader.read_line(&mut first).await.unwrap();
+            let mut size = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    size = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut payload = vec![0u8; size];
+            reader.read_exact(&mut payload).await.unwrap();
+            let body = r#"{"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}],"model":"gpt-image-2.5-flare"}"#;
+            writer
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let group = -8_000_106;
+        let (ctx, writer, _calls, server) = fixture(group).await;
+        let oai_dir = crate::plugins::oai::pi_agent::ScratchDir::under(
+            &std::env::temp_dir(),
+            "oai-draw",
+        )
+        .unwrap();
+        let oai_root = oai_dir.path().to_path_buf();
+        tokio::fs::write(
+            oai_root.join("config.json"),
+            serde_json::json!({
+                "api_base": format!("http://{image_addr}"),
+                "api_key": "sk-test",
+                "models": ["gpt-image-2.5-flare"],
+                "defaults_version": 999,
+                "pi_room_initialized": true,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+        let manager = Arc::new(Manager::new(oai_root.clone()));
+        assert!(crate::plugins::oai::data::MANAGER.set(manager).is_ok());
+        tokio::fs::create_dir_all(oai_root.join("media")).await.unwrap();
+
+        let config = crate::plugins::get_config_or_default::<OaiConfig>(&ctx, "oai").ambient;
+        let lease = start(&ctx, &writer, group, 1, &config, &oai_root, &oai_root)
+            .await
+            .unwrap();
+        // 与人格一致：绘图前先读一次上下文（同步 revision 与可用额度）。
+        assert_eq!(
+            request(&lease, json!({"id":"ctx","op":"context"})).await["ok"],
+            true
+        );
+        let drawn = request(
+            &lease,
+            json!({"id":"draw","op":"draw","prompt":"一只橘猫","size":"1024x1024"}),
+        )
+        .await;
+        assert_eq!(drawn["ok"], true, "{drawn}");
+        let result = &drawn["result"];
+        assert_eq!(result["caption"], "一只橘猫");
+        assert_eq!(result["model"], "gpt-image-2.5-flare");
+        let file = result["images"][0]["file"].as_str().unwrap();
+        assert!(file.ends_with(".png"), "{file}");
+        assert!(std::path::Path::new(file).is_file(), "{file}");
+        // 每轮默认 2 张，画了一张后剩 1 张。
+        assert_eq!(result["draws_remaining"], 1);
+        // 绘图是模型调用，不占平台写动作额度。
+        let context = request(&lease, json!({"id":"ctx2","op":"context"})).await;
+        assert_eq!(context["result"]["writes_remaining"], config.max_actions);
+        drop(lease);
+        server.abort();
+        let _ = image_server.await.unwrap();
     }
 }

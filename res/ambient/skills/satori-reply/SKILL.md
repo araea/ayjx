@@ -46,6 +46,12 @@ metadata:
 - `{"type":"dice"}` / `{"type":"rps"}`：QQ 骰子、猜拳。结果由 QQ 现摇，你事先不知道，
   也不要在同一条消息里替它编一个点数。
 
+要画一张图（配图、改图、给群友画个东西）时用 `satori_draw`：传入画什么的提示词 `prompt`
+（可选 `size` / `quality` / 参考图直链 `images`），会调用 oai 的 GPT Image 2.5 生成并保存到本轮
+`ambient/media`，返回 `images[].file`（本地路径）、`images[].url`（原站链接）、`caption`
+（改写的标题）与 `draws_remaining`。再用 `satori_action` 的 send + `{"type":"image","source":"<file 路径>"}`
+把图发出去；想配一句话就再加一个 text 元素。绘图是独立的模型调用，不占发送次数，但每轮有张数上限。
+
 `react` 的 `emoji_id`：三位以内的数字是 QQ 小表情（`76` 赞、`14` 微笑），
 更长的数字按 Unicode 码点算（`128077` 是 👍）。表态失败通常是消息太旧或不在群里。
 

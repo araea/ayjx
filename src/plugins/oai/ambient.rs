@@ -85,6 +85,8 @@ pub(crate) struct AmbientConfig {
     pub max_messages: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
     pub max_actions: usize,
+    /// 每轮最多生成图片的张数；0 关闭绘图。绘图走 oai 的 GPT Image 2.5 图像接口。
+    pub draw_budget: usize,
     /// 打字速度（字/分钟）。调低更像在慢慢敲。
     pub typing_cpm: u32,
     /// 长句改用语音输入时的等效速度（字/分钟）。
@@ -119,6 +121,7 @@ impl Default for AmbientConfig {
             reply_on_mention: true,
             max_messages: 3,
             max_actions: 6,
+            draw_budget: 2,
             typing_cpm: 150,
             voice_cpm: 420,
             think_seconds: 3.0,

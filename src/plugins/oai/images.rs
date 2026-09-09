@@ -49,6 +49,16 @@ struct ApiError {
     message: String,
 }
 
+/// 一次绘图的结果：生成的图片链接、改写的标题与接口回显的模型名。
+///
+/// `urls` 里既可能是远程直链，也可能是内联的 `data:image/png;base64,...`。
+/// 供聊天补全结果包装与 ambient 绘图工具共同使用。
+pub(super) struct Generated {
+    pub(super) urls: Vec<String>,
+    pub(super) caption: String,
+    pub(super) model: Option<String>,
+}
+
 /// 模型是否走 `/v1/images/generations`。`keywords` 为空时视为不启用。
 pub(super) fn is_images_model(model: &str, keywords: &[String]) -> bool {
     let lower = model.trim().to_lowercase();
@@ -151,12 +161,57 @@ pub(super) async fn generate_reply(
         return Err(anyhow!("请输入绘图提示词，例如：画图 一只在窗台晒太阳的橘猫"));
     }
 
+    let generated = generate(
+        api_base,
+        api_key,
+        &agent.model,
+        &prompt,
+        images,
+        options.size.as_deref(),
+        options.quality.as_deref(),
+    )
+    .await?;
+
+    // 提示词里带换行（系统风格前缀 + 用户输入），压成一行后加粗标题才不会被拆开。
+    let caption = super::utils::truncate_str(&one_line(&generated.caption), 160);
+    let links: Vec<String> = generated
+        .urls
+        .iter()
+        .map(|url| format!("![image]({url})"))
+        .collect();
+
+    Ok(Reply {
+        text: format!("🎨 **{caption}**\n\n{}", links.join("\n")),
+        sources: Vec::new(),
+        trace: Vec::new(),
+        trace_overflow: 0,
+        model: Some(generated.model.unwrap_or_else(|| agent.model.clone())),
+    })
+}
+
+/// 直接发起一次绘图：给定模型、提示词、可选的尺寸/画质与垫图，调用生成或编辑接口。
+///
+/// 与聊天补全解耦，供普通智能体（`generate_reply`）与 ambient 绘图工具共用。
+/// 带垫图走 `/v1/images/edits`，纯文字走 `/v1/images/generations`；两者响应结构一致。
+pub(super) async fn generate(
+    api_base: &str,
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+    images: &[String],
+    size: Option<&str>,
+    quality: Option<&str>,
+) -> anyhow::Result<Generated> {
     let base = api_base.trim_end_matches('/');
-    // 带垫图走编辑接口，纯文字走生成接口；两者响应结构一致。
     let endpoint = if images.is_empty() {
         format!("{base}/images/generations")
     } else {
         format!("{base}/images/edits")
+    };
+    let options = Options {
+        prompt: prompt.to_string(),
+        size: size.map(str::to_string),
+        quality: quality.map(str::to_string),
     };
 
     let mut request = crate::http::client()
@@ -165,21 +220,21 @@ pub(super) async fn generate_reply(
         .timeout(REQUEST_TIMEOUT);
     if images.is_empty() {
         let mut body = json!({
-            "model": agent.model,
+            "model": model,
             "prompt": prompt,
             "n": 1,
             // URL 比 base64 短得多：base64 会被整段写进历史，撑大配置文件。
             "response_format": "url",
         });
-        if let Some(size) = &options.size {
+        if let Some(size) = size {
             body["size"] = json!(size);
         }
-        if let Some(quality) = &options.quality {
+        if let Some(quality) = quality {
             body["quality"] = json!(quality);
         }
         request = request.json(&body);
     } else {
-        request = request.multipart(edit_form(&agent.model, &prompt, &options, images).await?);
+        request = request.multipart(edit_form(model, prompt, &options, images).await?);
     }
 
     let response = request
@@ -191,7 +246,7 @@ pub(super) async fn generate_reply(
     let bytes = response.bytes().await.context("读取图像响应失败")?;
     let ImagesResponse {
         data,
-        model,
+        model: response_model,
         error,
     } = serde_json::from_slice(&bytes).unwrap_or_default();
 
@@ -203,13 +258,13 @@ pub(super) async fn generate_reply(
         return Err(anyhow!("图像接口返回 HTTP {}：{}", status.as_u16(), detail));
     }
 
-    let mut links = Vec::new();
+    let mut urls = Vec::new();
     let mut revised = None;
     for item in data.into_iter().take(MAX_IMAGES) {
         if let Some(url) = item.url.filter(|url| !url.trim().is_empty()) {
-            links.push(format!("![image]({})", url.trim()));
+            urls.push(url.trim().to_string());
         } else if let Some(b64) = item.b64_json.filter(|b64| !b64.trim().is_empty()) {
-            links.push(format!("![image](data:image/png;base64,{})", b64.trim()));
+            urls.push(format!("data:image/png;base64,{}", b64.trim()));
         }
         if revised.is_none() {
             revised = item
@@ -217,7 +272,7 @@ pub(super) async fn generate_reply(
                 .filter(|prompt| !prompt.trim().is_empty());
         }
     }
-    if links.is_empty() {
+    if urls.is_empty() {
         let detail = error
             .map(|error| error.message)
             .filter(|message| !message.trim().is_empty())
@@ -226,19 +281,12 @@ pub(super) async fn generate_reply(
     }
 
     let caption = revised
-        .or_else(|| {
-            (!options.prompt.trim().is_empty()).then(|| options.prompt.trim().to_string())
-        })
+        .or_else(|| (!prompt.trim().is_empty()).then(|| prompt.trim().to_string()))
         .unwrap_or_else(|| "绘图完成".to_string());
-    // 提示词里带换行（系统风格前缀 + 用户输入），压成一行后加粗标题才不会被拆开。
-    let caption = super::utils::truncate_str(&one_line(&caption), 160);
-
-    Ok(Reply {
-        text: format!("🎨 **{}**\n\n{}", caption, links.join("\n")),
-        sources: Vec::new(),
-        trace: Vec::new(),
-        trace_overflow: 0,
-        model: Some(model.unwrap_or_else(|| agent.model.clone())),
+    Ok(Generated {
+        urls,
+        caption,
+        model: response_model,
     })
 }
 
@@ -394,5 +442,54 @@ mod tests {
         let (mime, bytes) = fetch_image(data_url).await.unwrap();
         assert_eq!(mime, "image/png");
         assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    /// `generate` 直接走生成接口并解析结果（不依赖聊天历史与 Agent），供 ambient 绘图工具复用。
+    #[tokio::test]
+    async fn generate_hits_the_dedicated_endpoint_and_parses_urls() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (rx, mut writer) = stream.into_split();
+            let mut reader = BufReader::new(rx);
+            let mut first = String::new();
+            reader.read_line(&mut first).await.unwrap();
+            let mut size = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    size = value.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut payload = vec![0u8; size];
+            reader.read_exact(&mut payload).await.unwrap();
+            let body = r#"{"data":[{"url":"https://example.com/drawn.png"}],"model":"gpt-image-2.5-flare"}"#;
+            writer
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let base = format!("http://{address}");
+        let generated = generate(&base, "sk-test", "gpt-image-2.5-flare", "一只橘猫", &[], None, None)
+            .await
+            .unwrap();
+        assert_eq!(generated.urls, ["https://example.com/drawn.png"]);
+        // 没有 revised_prompt 时标题回退到提示词。
+        assert_eq!(generated.caption, "一只橘猫");
+        assert_eq!(generated.model.as_deref(), Some("gpt-image-2.5-flare"));
+        let _ = server.await.unwrap();
     }
 }
