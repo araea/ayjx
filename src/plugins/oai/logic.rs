@@ -398,14 +398,23 @@ async fn chat(
     // 中途不发任何「还在处理」提示：等待本身是隐式的，一条进度播报换不来更快的
     // 回复，只会在群里插进一段与上下文无关的噪音。
     let mut outcome = {
-        let work = respond(
-            &client,
-            &agent,
-            &hist,
-            &oai,
-            mgr.path.parent().unwrap_or(&mgr.path),
-            control.as_ref(),
-        );
+        // 图像模型走专用绘图接口，其余房间继续走聊天补全 / Pi。
+        let draw = super::images::is_images_model(&agent.model, &oai.image_models);
+        let work = async {
+            if draw {
+                super::images::generate_reply(&api_base, &api.1, &agent, &hist).await
+            } else {
+                respond(
+                    &client,
+                    &agent,
+                    &hist,
+                    &oai,
+                    mgr.path.parent().unwrap_or(&mgr.path),
+                    control.as_ref(),
+                )
+                .await
+            }
+        };
         let mut work = std::pin::pin!(work);
         let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
 
@@ -601,13 +610,13 @@ fn room_model_label(agent: &Agent) -> &str {
 }
 
 /// 一次成功回复的产物。
-struct Reply {
-    text: String,
-    sources: Vec<super::types::Source>,
-    trace: Vec<super::types::TraceStep>,
+pub(super) struct Reply {
+    pub(super) text: String,
+    pub(super) sources: Vec<super::types::Source>,
+    pub(super) trace: Vec<super::types::TraceStep>,
     /// 超出页脚保留上限、只计数的调用次数。
-    trace_overflow: usize,
-    model: Option<String>,
+    pub(super) trace_overflow: usize,
+    pub(super) model: Option<String>,
 }
 
 /// Pi 房间直接读取本机 Pi 配置，普通房间继续使用 OAI 配置。
@@ -1568,6 +1577,15 @@ pub async fn execute(
 | `mj-blend` | 发送/引用至少两张图进行融合（可写横图/竖图） |
 
 > 引用 `mj` 返回的四宫格，回复任意一个或多个 `1`–`4` 即可放大；已完成的放大直接读取缓存。
+
+## 图像生成房间 (gpt-image)
+| 房间模型 | 直接操作 |
+|------|------|
+| `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` | 输入提示词直接出图（`/v1/images/generations`） |
+
+> 例：`##画图 gpt-image-2.5-flare` 创建房间，然后 `画图 一只在窗台晒太阳的橘猫`。
+> 可选参数：`--size 1536x1024`（或 `-s auto`）、`--quality high`（或 `-q low/medium/high/auto`）。
+> 走图像接口的模型关键字由 `[oai].image_models` 配置，默认 `["gpt-image-2.5"]`。
 
 ## 历史管理
 | 指令 | 功能 |

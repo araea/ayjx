@@ -11,6 +11,7 @@ use toml::Value;
 
 pub(crate) mod ambient;
 pub mod data;
+pub mod images;
 pub mod logic;
 pub mod mj;
 pub mod parser;
@@ -40,6 +41,9 @@ pub(crate) struct OaiConfig {
     /// 模型列表过滤：中转站返回的上千个 id 里只留下当下值得用的那些。
     /// 站点上新或下架时改这里即可，`/%` 会按新规则重新拉取。
     pub(crate) model_filter: utils::ModelFilterConfig,
+    /// 走 `/v1/images/generations` 的图像模型关键字（不区分大小写、子串匹配）。
+    /// 命中的房间把提示词交给专用图像接口，其余房间仍走聊天补全。
+    pub(crate) image_models: Vec<String>,
     /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
     ambient: ambient::AmbientConfig,
 }
@@ -54,6 +58,10 @@ impl Default for OaiConfig {
             plain_text_max_chars: 120,
             show_trace_footer: true,
             model_filter: utils::ModelFilterConfig::default(),
+            image_models: images::DEFAULT_IMAGE_MODELS
+                .iter()
+                .map(|keyword| (*keyword).to_string())
+                .collect(),
             ambient: ambient::AmbientConfig::default(),
         }
     }
