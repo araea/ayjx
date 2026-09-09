@@ -1578,9 +1578,10 @@ pub async fn execute(
 ## 图像生成房间 (gpt-image)
 | 房间模型 | 直接操作 |
 |------|------|
-| `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` | 输入提示词直接出图（`/v1/images/generations`） |
+| `gpt-image-2.5-flare` / `gpt-image-2.5-sunburst` | 输入提示词直接出图；发图或引用图片则作为垫图编辑 |
 
 > 例：`##画图 gpt-image-2.5-flare` 创建房间，然后 `画图 一只在窗台晒太阳的橘猫`。
+> 垫图：直接发送图片或引用图片，再说修改要求，如「把背景改成星空」；最多 4 张。
 > 可选参数：`--size 1536x1024`（或 `-s auto`）、`--quality high`（或 `-q low/medium/high/auto`）。
 > 走图像接口的模型关键字由 `[oai].image_models` 配置，默认 `["gpt-image-2.5"]`。
 
