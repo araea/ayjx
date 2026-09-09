@@ -61,7 +61,7 @@
 //!   /ai实时模式 <精选|全部>      控制实时快报读取精选池还是全量池
 //!   /ai分类 <模型|产品|行业|论文|技巧|全部|默认>   设置当前目标
 //!   /ai静默 <HH:MM-HH:MM|关闭|默认>              设置当前目标
-//!   /设置 ai_news card_theme auto|light|dark   自动 / 白天 / 夜晚阅读主题
+//!   /ctl set ai_news card_theme auto|light|dark   自动 / 白天 / 夜晚阅读主题
 //!
 //! 使用边界：AIHOT 的匿名接口可用于个人非商业、公益非商业及组织内部使用；
 //! 面向外部的商业产品、数据转售、公开镜像等须先取得 AIHOT 书面授权
@@ -719,7 +719,7 @@ fn warn_on_schedule_conflicts(ctx: &Context, cfg: &AiNewsConfig) {
             warn!(
                 target: LOG_TARGET,
                 "[{}] 的推送时间 {} 与 [{}] 相同，两份图会挤在一起。\
-                 可修改配置 ai_news.{}（或用 /设置 ai_news {}）错开几分钟。",
+                 可修改配置 ai_news.{}（或用 /ctl set ai_news {}）错开几分钟。",
                 label, time, other, key, key
             );
         }
@@ -1289,7 +1289,7 @@ async fn handle_push_admin(
                     .unwrap_or_else(|| "/".into());
                 return format!(
                     "⚠️ 实时推送的总开关当前是关闭的。\
-                     可用 {}设置 ai_news realtime_enabled true 打开，目标随即生效。",
+                     可用 {}ctl set ai_news realtime_enabled true 打开，目标随即生效。",
                     prefix
                 );
             }

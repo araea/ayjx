@@ -128,14 +128,3 @@ ignore_domains = []
 [webshot.channel]
 white = []
 black = []
-
-# 网页控制台。首次启动会随机生成 token 写回本文件，日志里给出带密钥的完整地址；
-# 也可在私聊或本机控制台发送 /webui 取回。改动需要重启才生效。
-# bind 默认只监听本机；改成 0.0.0.0 等于把维护者权限交给整个局域网。
-[webui]
-enabled = true
-bind = "127.0.0.1"
-port = 6520
-token = ""
-# 走反向代理或要用局域网 IP 打开时填，留空则按 bind/port 拼。
-public_url = ""

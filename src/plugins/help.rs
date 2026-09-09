@@ -173,7 +173,7 @@ fn render_overview(ctx: &Context, groups: &[Group]) -> String {
 
     out.push_str(&format!("\n{}", DIVIDER));
     out.push_str(&format!(
-        "\n💡 看全部指令：{p}help <插件名>\n管理开关与配置：{p}ctl（聊天）/ {p}webui（网页面板）\n连接：Satori v1；状态为配置开关，初始化及排期修改需重启。",
+        "\n💡 看全部指令：{p}help <插件名>\n管理开关与配置：{p}ctl（聊天）\n连接：Satori v1；状态为配置开关，初始化及排期修改需重启。",
         p = prefix
     ));
     out
@@ -196,7 +196,7 @@ fn render_detail(ctx: &Context, entry: &Entry, cmds: &[Cmd]) -> String {
     if cmds.is_empty() {
         out.push_str("该插件在后台自动工作，没有需要手动触发的指令。");
         out.push_str(&format!(
-            "\n管理：{prefix}ctl show {}；{prefix}ctl on/off {}\n可视化改配置：{prefix}webui",
+            "\n管理：{prefix}ctl show {}；{prefix}ctl on/off {}",
             entry.name, entry.name
         ));
         return out;
@@ -216,7 +216,7 @@ fn render_detail(ctx: &Context, entry: &Entry, cmds: &[Cmd]) -> String {
         }
     }
     out.pop();
-    out.push_str(&format!("\n管理：{prefix}ctl show {}；{prefix}ctl on/off {}\n可视化改配置：{prefix}webui\n生命周期参数与首次初始化需重启；详见 {prefix}ctl list。", entry.name, entry.name));
+    out.push_str(&format!("\n管理：{prefix}ctl show {}；{prefix}ctl on/off {}\n生命周期参数与首次初始化需重启；详见 {prefix}ctl list。", entry.name, entry.name));
     out
 }
 

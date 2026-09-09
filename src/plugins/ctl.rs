@@ -228,8 +228,7 @@ fn constraints(value: &Value, path: &str) -> Result<(), String> {
 }
 /// 只能取固定几个值的配置项。
 ///
-/// 校验与面板读同一张表：`validate` 拿它拦下写错的值，网页面板拿它把输入框
-/// 变成下拉框。分成两处写迟早会对不上——那时用户会在面板上选到一个存不进去的值。
+/// `validate` 拿它拦下写错的值，避免用户把一个固定选项改成循环外的值。
 pub(crate) fn options(plugin: &str, path: &str) -> &'static [&'static str] {
     match (plugin, path) {
         ("ai_news", "mode" | "realtime_mode") => &["all", "selected"],
@@ -269,7 +268,7 @@ pub(crate) fn validate(p: &Plugin, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// Shared transaction for ctl and legacy settings. No in-memory changes on save failure.
+/// Shared transaction for ctl edits. No in-memory changes on save failure.
 pub async fn change<F>(ctx: &Context, edit: F) -> Result<String, String>
 where
     F: FnOnce(&mut AppConfig) -> Result<String, String>,

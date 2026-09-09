@@ -160,10 +160,6 @@ help 与 ctl 共用 `render/web.rs` 的结构化文档和 `res/cards/reading.css
 | --- | --- | --- |
 | 聊天 / 控制台 `/ctl` | 消息发起人，按 `ctl.admins` 判权 | `plugins/ctl.rs` |
 | pi 房间 `ayjx --ctl` | 一次性凭据换维护者身份 | `plugins/ctl/bridge.rs` |
-| 网页面板 | 密钥换维护者身份 | `plugins/webui/` |
-
-面板不重写任何校验，只是把默认配置翻译成表单（`webui/schema.rs`），
-再把表单结果送回同一条事务；详见 [WEBUI.md](WEBUI.md)。
 
 ## 新增一个插件
 

@@ -72,7 +72,7 @@ pub fn overview(groups: &[Group], prefix: &str) -> Card {
     blocks.push(Block::Callout {
         tone: Tone::Info,
         text: format!(
-            "Satori v1 · 管理开关与配置：{prefix}ctl（聊天）/ {prefix}webui（网页面板）\n状态为配置开关；首次初始化及定时排期修改需重启。"
+            "Satori v1 · 管理开关与配置：{prefix}ctl（聊天）\n状态为配置开关；首次初始化及定时排期修改需重启。"
         ),
     });
 
@@ -129,7 +129,7 @@ pub fn detail(entry: &Entry, cmds: &[Cmd], prefix: &str) -> Card {
     blocks.push(Block::Callout {
         tone: Tone::Info,
         text: format!(
-            "管理：{p}ctl show {n}\n开关：{p}ctl on/off {n}\n网页面板：{p}webui（表单化改配置，与 ctl 同一套校验）\n首次初始化及定时排期修改需重启；详见 {p}ctl list。",
+            "管理：{p}ctl show {n}\n开关：{p}ctl on/off {n}\n首次初始化及定时排期修改需重启；详见 {p}ctl list。",
             p = prefix,
             n = entry.name
         ),
