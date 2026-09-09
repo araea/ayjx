@@ -55,6 +55,16 @@
 骰子、猜拳、戳一戳、资料卡点赞、消息表态/取消表态、撤回自己的消息、合并转发。
 转发已有消息保留真实作者，新整理的内容署机器人自己；不让模型任意编造转发作者。
 
+两处平台侧的限制值得记住：
+
+- **骰子和猜拳在 QQ 里是两个魔法表情（358 / 359），没有独立的消息元素。**
+  以前它们被序列化成 `<dice/>`，而实现端的元素表里没有这个标签，整段元素在解析时
+  就被丢掉了——消息不报错，只是变成空的，发送方还以为发出去了。现在两边都按表情走。
+- **资料卡点赞被腾讯按 appid 限流**（oidb 319 `rule type not match appid`，
+  2026-08 起各家客户端都是如此），不是参数写错。这类「服务端明确拒绝、动作根本没有
+  到达聊天」的失败会退回本轮的动作额度并记下来，同一轮里不再重试：一轮只有几次动作，
+  不该耗在一个必然失败的按钮上。
+
 ### 读取合并转发
 
 合并转发在群聊记录里只是一个占位符，真正的正文要单独取回。QQ 给了两条路径，质量差得很远：
@@ -130,20 +140,22 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 本机控制台也支持。发言模型影响所有已启用搭话的群：
 
 ```text
-/ctl set oai ambient.reply_model apilio/claude-sonnet-5
+/ctl set oai ambient.reply_model deepseek/deepseek-v4-flash-vision-exp
 /ctl show oai ambient.reply_model
 ```
 
-`apilio` 是本机 Pi 中已配置的 provider 名；换其他模型时填写 Pi 能识别的 `provider/model`。
+`deepseek` 是本机 Pi 中已配置的 provider 名；换其他模型时填写 Pi 能识别的 `provider/model`。
 前置判定走 oai 的接口与密钥，单独切换，模型名不加 Pi 的 provider 前缀：
 
 ```text
-/ctl set oai ambient.gate_model gpt-5.6-luna
+/ctl set oai ambient.gate_model gemini-3.8-flash
 /ctl show oai ambient.gate_model
 ```
 
-默认判定用 GPT-5.6 Luna，发言用 Claude Sonnet 5——判定只做打分，便宜快就够；
-发言是要装成群友的，Claude 的中文口语更自然。发言端保留 `thinking = "low"`。
+默认判定用 Gemini 3.8 Flash，发言用 DeepSeek V4 Flash（官方直连）——两者都便宜、快、能看图。
+判定只做打分，用中转站上当前最划算的多模态档位即可；发言走 Pi 的 DeepSeek provider，
+按百万 token 计费比中转站的 Claude / GPT 档位低一个数量级，中文口语也够自然。
+发言端保留 `thinking = "low"`。
 指令保存到配置并在下一轮读取，无需重启；已经开始的请求仍可能使用旧模型。
 已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。
 这些设置只管理群聊搭话，与普通 oai 智能体及 Pi 房间的默认模型独立。
@@ -157,8 +169,8 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 | --- | --- | --- |
 | `enabled` | `false` | 总开关 |
 | `groups` | `[]` | 允许搭话的群号 |
-| `gate_model` | `gpt-5.6-luna` | 判定模型，复用 oai 接口与密钥 |
-| `reply_model` | `apilio/claude-sonnet-5` | pi 的发言模型 |
+| `gate_model` | `gemini-3.8-flash` | 判定模型，复用 oai 接口与密钥 |
+| `reply_model` | `deepseek/deepseek-v4-flash-vision-exp` | pi 的发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,bash,web_search,fetch_content,get_search_content` | 原有工具白名单；本轮自动附加三个 satori 工具 |
 | `score_threshold` | `45` | 普通开口意愿门槛，调高更沉默 |

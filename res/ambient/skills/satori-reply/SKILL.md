@@ -27,8 +27,8 @@ metadata:
 | --- | --- | --- |
 | send | parts，可选 reply_to | 一条消息；引用可选任何当前记录中的消息 |
 | poke | user_id | 戳一戳当前群成员 |
-| like | user_id，times=1..10 | QQ 资料卡点赞 |
-| react | message_id，emoji_id，可选 remove=true | 给一条消息表态，或取消自己的表态 |
+| like | user_id，times=1..10 | QQ 资料卡点赞。腾讯目前按账号限流，被拒绝时本轮不必再试 |
+| react | message_id，emoji_id，可选 remove=true | 给一条消息表态，或取消自己的表态；只有群聊能表态 |
 | recall | message_id | 撤回自己发出的消息；能否撤回仍取决于 QQ 时限 |
 | forward | message_ids 和/或 texts 数组 | 合并转发；前者保留真实作者，后者是你自己整理的内容，合计 1–12 节点 |
 
@@ -43,7 +43,11 @@ metadata:
 - `{"type":"image","source":"https://已确认的图片直链"}`：图片或 GIF 表情包。
 - `{"type":"file","source":"answer.txt","name":"排查步骤.txt"}`：发送本轮工作目录里的文件。
 - audio / video 同 image 的 source 字段。必须已有有效媒体，不假装听过未转录的语音。
-- `{"type":"dice"}` / `{"type":"rps"}`：QQ 骰子、猜拳，不编造随机结果。
+- `{"type":"dice"}` / `{"type":"rps"}`：QQ 骰子、猜拳。结果由 QQ 现摇，你事先不知道，
+  也不要在同一条消息里替它编一个点数。
+
+`react` 的 `emoji_id`：三位以内的数字是 QQ 小表情（`76` 赞、`14` 微笑），
+更长的数字按 Unicode 码点算（`128077` 是 👍）。表态失败通常是消息太旧或不在群里。
 
 可以把 at、text、face、image 组合在同一条消息。普通文字里的 XML 和 `[at:…]` 在工具中是文字，
 要互动就使用相应元素，不把旧标记塞进 text。

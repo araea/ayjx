@@ -102,8 +102,8 @@ impl Default for AmbientConfig {
         Self {
             enabled: false,
             groups: Vec::new(),
-            gate_model: "gpt-5.6-luna".to_string(),
-            reply_model: "apilio/claude-sonnet-5".to_string(),
+            gate_model: "gemini-3.8-flash".to_string(),
+            reply_model: "deepseek/deepseek-v4-flash-vision-exp".to_string(),
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
             score_threshold: 45,

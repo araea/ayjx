@@ -22,6 +22,18 @@ use std::{
 };
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
+/// 动作对应的平台能力键；同一能力被拒绝一次，本轮就不必再撞第二次。
+fn capability(action: &Action) -> &'static str {
+    match action {
+        Action::Send { .. } => "send",
+        Action::Poke { .. } => "poke",
+        Action::Like { .. } => "like",
+        Action::React { .. } => "react",
+        Action::Recall { .. } => "recall",
+        Action::Forward { .. } => "forward",
+    }
+}
+
 pub(crate) struct Lease {
     socket: PathBuf,
     token: String,
@@ -68,6 +80,8 @@ struct Session {
     started: Instant,
     receipts: HashMap<String, Value>,
     capabilities: Value,
+    /// 平台明确拒绝过的能力（动作名 → 给模型的解释）。见 [`Session::refused`]。
+    refusals: HashMap<&'static str, String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -103,6 +117,7 @@ pub(crate) async fn start(
         started: Instant::now(),
         receipts: HashMap::new(),
         capabilities: Value::Null,
+        refusals: HashMap::new(),
     };
     let expected = token.clone();
     let task = tokio::spawn(async move {
@@ -265,6 +280,11 @@ impl Session {
                 let action: Action = serde_json::from_value(request["request"].clone())?;
                 let turns = self.turns();
                 action.validate(&turns)?;
+                // 平台已经明确拒绝过的能力不再占额度：那一次尝试没有产生任何副作用，
+                // 让它把本轮仅有的几次动作耗在必然失败的按钮上只会换来一次沉默。
+                if let Some(reason) = self.refused(&action) {
+                    anyhow::bail!("{reason}");
+                }
                 ensure!(
                     self.writes < self.config.max_actions.clamp(1, 12),
                     "本轮动作额度已用完"
@@ -279,21 +299,52 @@ impl Session {
                 }
                 let result = self.perform(&action, &turns).await;
                 if let Err(ref error) = result {
-                    // 错误也进入下一轮上下文；网络超时可能已经成功，不自动重放。
-                    self.record(
-                        format!(
-                            "[动作未确认 {}：{}；勿盲目重复]",
-                            request["request"]["action"], error
-                        ),
-                        0,
-                        Message::new(),
-                        false,
-                    );
+                    if self.remember_refusal(&action, error) {
+                        // 服务端直接判定不允许，动作没有到达聊天：退回额度，别让它算作用掉一次。
+                        self.writes -= 1;
+                        if action.is_message() {
+                            self.messages -= 1;
+                        }
+                    } else {
+                        // 其余错误进入下一轮上下文；网络超时可能已经成功，不自动重放。
+                        self.record(
+                            format!(
+                                "[动作未确认 {}：{}；勿盲目重复]",
+                                request["request"]["action"], error
+                            ),
+                            0,
+                            Message::new(),
+                            false,
+                        );
+                    }
                 }
                 result
             }
             _ => anyhow::bail!("unknown operation"),
         }
+    }
+    /// 本轮已知不可用的能力；有值就直接回绝，不占动作额度。
+    fn refused(&self, action: &Action) -> Option<String> {
+        self.refusals.get(capability(action)).cloned()
+    }
+    /// 记录一次「服务端明确拒绝、动作从未到达聊天」的失败，并返回它是否属于这一类。
+    ///
+    /// 只认平台自己给出的判定语句。网络超时的结果是未知的，绝不能算进来——
+    /// 那会让一次可能已经送达的操作被当成没发生。
+    fn remember_refusal(&mut self, action: &Action, error: &anyhow::Error) -> bool {
+        let text = format!("{error:#}");
+        let refusal = match action {
+            // 资料卡点赞自 2026 年起被腾讯按 appid 限流，整段 oidb 被服务端驳回。
+            Action::Like { .. }
+                if text.contains("send_like failed") || text.contains("not match appid") =>
+            {
+                "QQ 拒绝了这个账号的资料卡点赞（平台限制，不是参数问题）。本轮别再试，换一种回应。"
+            }
+            _ => return false,
+        };
+        self.refusals
+            .insert(capability(action), format!("{refusal}原始回执：{text}"));
+        true
     }
     fn enabled(&self) -> bool {
         let c = crate::plugins::get_config_or_default::<super::super::OaiConfig>(&self.ctx, "oai");
@@ -549,6 +600,13 @@ mod tests {
                 let body =
                     serde_json::from_slice::<Value>(&bytes).unwrap_or(json!({"multipart":true}));
                 calls.lock().unwrap().push((method.clone(), body.clone()));
+                // 资料卡点赞在真机上被腾讯按 appid 限流，假服务照着回同一条拒绝。
+                if method == "internal/like" {
+                    let body = json!({"message":"send_like failed: sso=0, trpc=0/319, oidb=319, error=[oidb] rule type not match appid"}).to_string();
+                    let mut stream = reader.into_inner();
+                    stream.write_all(format!("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+                    continue;
+                }
                 let response = match method.as_str() {
                     "login.get" => json!({"features":["message.create","message.delete","reaction.create","reaction.delete","upload.create"]}),
                     "upload.create" => json!({"file":"internal:red/10000/_tmp/test"}),
@@ -776,7 +834,6 @@ mod tests {
         assert_eq!(sent, duplicate);
         for (id, args) in [
             ("poke", json!({"action":"poke","user_id":"42"})),
-            ("like", json!({"action":"like","user_id":"42","times":2})),
             (
                 "react",
                 json!({"action":"react","message_id":"123","emoji_id":"76"}),
@@ -835,6 +892,62 @@ mod tests {
         let path = lease.socket.clone();
         drop(lease);
         assert!(!path.exists());
+        server.abort();
+    }
+
+    /// 一轮只有几次动作。平台明确拒绝、动作根本没到达聊天的那一类失败，
+    /// 不该把额度也一起吃掉，更不该让模型在同一轮里反复去撞同一堵墙。
+    #[tokio::test]
+    async fn a_platform_refusal_gives_the_action_budget_back_and_is_not_retried() {
+        let group = -8_000_104;
+        let (ctx, writer, calls, server) = fixture(group).await;
+        let dir =
+            crate::plugins::oai::pi_agent::ScratchDir::under(&std::env::temp_dir(), "social-test")
+                .unwrap();
+        let config = crate::plugins::get_config_or_default::<OaiConfig>(&ctx, "oai").ambient;
+        let budget = config.max_actions;
+        let lease = start(&ctx, &writer, group, 1, &config, dir.path(), dir.path())
+            .await
+            .unwrap();
+
+        // 和人格的实际做法一致：动作之前先读一次上下文。
+        assert_eq!(
+            request(&lease, json!({"id":"start","op":"context"})).await["ok"],
+            true
+        );
+
+        let refused = action(&lease, "like", json!({"action":"like","user_id":"42"})).await;
+        assert_eq!(refused["ok"], false, "{refused}");
+        let first = refused["error"].as_str().unwrap();
+        assert!(first.contains("rule type not match appid"), "{first}");
+
+        let again = action(&lease, "like-again", json!({"action":"like","user_id":"42"})).await;
+        assert_eq!(again["ok"], false, "{again}");
+        let second = again["error"].as_str().unwrap();
+        assert!(second.contains("本轮别再试"), "{second}");
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(m, _)| m == "internal/like")
+                .count(),
+            1,
+            "第二次调用不该再打到平台"
+        );
+
+        // 两次失败都没有花掉额度，还剩下完整的动作预算。
+        let context = request(&lease, json!({"id":"ctx","op":"context"})).await;
+        assert_eq!(context["result"]["writes_remaining"], budget);
+        // 拒绝的动作也不该写进群聊窗口，否则下一轮会当成「我已经做过」。
+        assert_eq!(window::with_group(group, |s| s.spoken_last_hour()), 0);
+
+        // 其它动作照常可用。
+        assert_eq!(
+            action(&lease, "poke", json!({"action":"poke","user_id":"42"})).await["ok"],
+            true
+        );
+        drop(lease);
         server.abort();
     }
 
