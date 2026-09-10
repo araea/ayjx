@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
+const url = require('node:url');
 const {spawn} = require('node:child_process');
 (async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(),'ayjx-pi-tools-'));
@@ -31,23 +32,47 @@ export default function(pi) {
   const tools = pi.getAllTools().filter(t=>t.name.startsWith('satori_'));
   const receipt = await rpc({id:'test',op:'action',request:{action:'poke',user_id:'42'}});
   fs.writeFileSync(${JSON.stringify(output)},JSON.stringify({active:pi.getActiveTools(),tools,receipt}));
-  process.exit(tools.length===5?0:1);
+  process.exit(tools.length===7?0:1);
  });
 }`);
   try {
     let errors='';
-    const child=spawn(process.env.PI_COMMAND || 'pi',['--no-extensions','--no-skills','--no-context-files','--no-session','--tools','read,satori_context,satori_read,satori_action,satori_draw,satori_memo','--extension',extension,'--extension',checker,'-p','--mode','json','startup verification'],{
+    const child=spawn(process.env.PI_COMMAND || 'pi',['--no-extensions','--no-skills','--no-context-files','--no-session','--tools','read,satori_context,satori_read,satori_action,satori_draw,satori_history,satori_group,satori_memo','--extension',extension,'--extension',checker,'-p','--mode','json','startup verification'],{
       env:{...process.env,AYJX_CHAT_SOCKET:socket,AYJX_CHAT_TOKEN:'test-only'},stdio:['ignore','pipe','pipe']});
     child.stdout.resume(); child.stderr.on('data',data=>errors+=data);
     const timer=setTimeout(()=>child.kill('SIGKILL'),20000);
     const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve)});
     clearTimeout(timer); assert.equal(code,0,errors);
     const result=JSON.parse(fs.readFileSync(output,'utf8'));
-    for (const name of ['satori_context','satori_read','satori_action','satori_draw','satori_memo']) assert(result.active.includes(name),name);
+    for (const name of ['satori_context','satori_read','satori_action','satori_draw','satori_history','satori_group','satori_memo']) assert(result.active.includes(name),name);
     assert.equal(result.receipt.result.message_id,'7837409278651234567'); assert.equal(requests,1);
     assert(result.tools.find(t=>t.name==='satori_action').parameters.properties.request.anyOf.length>=6);
     const memo=result.tools.find(t=>t.name==='satori_memo').parameters.properties;
     for (const field of ['people','notes','forget_people','forget_notes']) assert(memo[field],field);
-    console.log('Pi extension: 5 active tools, structured schema and IPC receipt verified; no model or QQ requests.');
+    const history=result.tools.find(t=>t.name==='satori_history').parameters.properties;
+    for (const field of ['query','user_id','around','since_hours','before']) assert(history[field],field);
+    // 子操作不能叫 op：那个名字被 RPC 信封占了，两层同名会互相覆盖。
+    const group=result.tools.find(t=>t.name==='satori_group').parameters.properties;
+    assert(group.what,'what');
+    assert(!group.op,'子操作字段不能与 RPC 信封的 op 同名');
+    assert.equal(group.what.anyOf.length,7);
+    // 两份 skill 走 pi 自己的加载器：常驻上下文里只有它们的名字和描述，
+    // 正文要模型自己 read，所以拆成两份不会让每轮都变贵。
+    // 包只导出 ESM 的 import 条件，CJS 里 require.resolve 解不到；
+    // 从 pi 可执行文件（软链到包内 dist/bundle/cli.js）反推包根最稳。
+    const command = process.env.PI_COMMAND || 'pi';
+    const found = require('node:child_process')
+      .execFileSync('/bin/sh', ['-c', `command -v ${JSON.stringify(command)}`], {encoding:'utf8'})
+      .trim();
+    const entry = path.resolve(path.dirname(fs.realpathSync(found)), '../../dist/index.js');
+    const core = await import(url.pathToFileURL(entry).href);
+    const skillDir = name => path.resolve(__dirname, '../res/ambient/skills', name);
+    const loaded = core.loadSkills({cwd: process.cwd(), includeDefaults: false,
+      skillPaths: [skillDir('satori-reply'), skillDir('satori-lookup')]});
+    assert.deepEqual(loaded.diagnostics, [], JSON.stringify(loaded.diagnostics));
+    assert.deepEqual(loaded.skills.map(skill=>skill.name).sort(), ['satori-lookup','satori-reply']);
+    const resident = core.formatSkillsForPrompt(loaded.skills).length;
+    assert(resident < 4000, `常驻的 skill 描述不该这么长：${resident} 字节`);
+    console.log(`Pi extension: 7 active tools, structured schema and IPC receipt verified; 2 skills load clean (${resident} resident bytes); no model or QQ requests.`);
   } finally {server.close();fs.rmSync(tmp,{recursive:true,force:true});}
 })().catch(error=>{console.error(error);process.exitCode=1});

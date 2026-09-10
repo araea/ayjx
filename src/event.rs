@@ -189,6 +189,10 @@ pub struct SendPacket {
     /// Repeater cancellation, checked again after BeforeSend hooks.
     #[serde(skip)]
     pub repeat_guard: Option<crate::plugins::repeater::RepeatGuard>,
+    /// 可选的消息时效条件：群聊已经往前走了就干脆不发。见
+    /// [`crate::adapters::satori::Freshness`]。
+    #[serde(skip)]
+    pub freshness: Option<crate::adapters::satori::Freshness>,
     pub params: OwnedValue,
     /// 原始触发事件（不参与序列化发送给 Bot）
     #[serde(skip)]

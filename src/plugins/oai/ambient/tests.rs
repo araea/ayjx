@@ -179,7 +179,7 @@ async fn live_persona_and_gate_dialogue() {
         let raw = speak::compose(
             "pi",
             dir.path(),
-            &skill_dir(dir.path()),
+            &skill_dirs(dir.path()),
             PERSONA,
             &config,
             Some(Duration::from_secs(40)),

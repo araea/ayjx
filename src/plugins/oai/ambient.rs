@@ -12,7 +12,7 @@
 //! 判定与措辞分开，是因为它们的成本和失败方式都不一样：判定要便宜、要多、
 //! 要能看图；措辞要慢、要少、要有工具。合成一次调用就只能两头将就。
 
-use crate::adapters::satori::{LockedWriter, send_msg_id};
+use crate::adapters::satori::{LockedWriter, freshness_for, send_fresh_msg_id};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
 use chrono::Datelike as _;
@@ -46,8 +46,21 @@ const LOG_TARGET: &str = "Plugin/OAI";
 /// 内置人设。首次启动写进数据目录，之后以磁盘上那份为准——人设是要被反复
 /// 打磨的东西，改一句话不该等一次编译。
 const PERSONA: &str = include_str!("../../../res/ambient/persona.md");
-/// 描述 Satori 消息元素的 skill；随代码走，每次启动覆盖。
-const SKILL: &str = include_str!("../../../res/ambient/skills/satori-reply/SKILL.md");
+/// 随代码走的 skill：每次启动按目录名覆盖写入。
+///
+/// 分成两份是照 pi 的渐进披露来的——常在提示词里的只有 skill 的一行描述，
+/// 正文要模型自己去 `read`。所以「怎么在群里动手」和「怎么翻旧账」拆开各自成篇，
+/// 用得上哪篇才读哪篇，常驻开销仍然只是两行描述。
+const SKILLS: [(&str, &str); 2] = [
+    (
+        "satori-reply",
+        include_str!("../../../res/ambient/skills/satori-reply/SKILL.md"),
+    ),
+    (
+        "satori-lookup",
+        include_str!("../../../res/ambient/skills/satori-lookup/SKILL.md"),
+    ),
+];
 /// 判定用的「兴趣画像」。
 ///
 /// 判定的唯一任务是在每条消息到来时判断「这个人格会不会想接这句话」。
@@ -82,6 +95,12 @@ pub(crate) struct AmbientConfig {
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
     /// 发言时开放给 pi 的工具白名单，逗号分隔。
+    ///
+    /// 默认这几样各有用处：`read`/`write`/`bash` 让它能在本轮工作目录里整理材料
+    /// 再当文件发出去；`web_search` / `fetch_content` / `get_search_content` 是
+    /// 「不知道就去查」那条路（群友贴的链接也靠 fetch_content 才真读得到）；
+    /// `source_check` 用来给有争议的说法找带原文的出处。写进来的名字必须是 pi
+    /// 实际注册了的工具，否则只是被静默忽略。
     pub tools: String,
     /// 开口意愿分的门槛，0-100。调高更沉默。
     pub score_threshold: u8,
@@ -117,14 +136,22 @@ pub(crate) struct AmbientConfig {
     pub mood_enabled: bool,
     /// 每轮最多写几条记忆；0 关闭 `satori_memo`。
     pub memo_budget: usize,
+    /// 每轮最多查几次群聊旧账（`satori_history` / `satori_group`）；0 关闭这两个工具。
+    ///
+    /// 内存窗口只有几十条、且重启就空，但 QQ 自己存着完整历史与整份成员名册。
+    /// 开着它，人格才能想起「上周那个报错」和「这人上次是什么时候冒头的」。
+    pub lookup_budget: usize,
     /// 计价高峰时段的作息（见 [`peak`]）。DeepSeek 官方接口空闲时段半价，
     /// 而搭话是这里唯一无人触发的付费功能，最值得挑时段。
     pub peak: peak::PeakConfig,
+    /// 消息时效窗口（秒）：请求交给 satori-qq 之后，群里只要又有人说话就不再发
+    /// 出这一句。0 关闭。见 [`crate::adapters::satori::Freshness`]。
+    pub send_freshness_seconds: u64,
     /// 一次发言最多拆成几条消息。
     pub max_messages: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
     pub max_actions: usize,
-    /// 每轮最多生成图片的张数；0 关闭绘图。绘图走 oai 的 GPT Image 2.5 图像接口。
+    /// 每轮最多生成图片的张数；0 关闭绘图。绘图走 `[oai]` 配置的图像模型。
     pub draw_budget: usize,
     /// 打字速度（字/分钟）。调低更像在慢慢敲。
     pub typing_cpm: u32,
@@ -147,7 +174,8 @@ impl Default for AmbientConfig {
             gate_persona: GATE_PERSONA.to_string(),
             reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
-            tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
+            tools: "read,write,bash,web_search,source_check,fetch_content,get_search_content"
+                .to_string(),
             score_threshold: 50,
             silence_relief_per_10min: 0,
             silence_relief_cap: 0,
@@ -165,7 +193,9 @@ impl Default for AmbientConfig {
             memory_enabled: true,
             mood_enabled: true,
             memo_budget: 3,
+            lookup_budget: 4,
             peak: peak::PeakConfig::default(),
+            send_freshness_seconds: 25,
             max_messages: 3,
             max_actions: 6,
             draw_budget: 2,
@@ -197,6 +227,15 @@ impl AmbientConfig {
 
     pub(crate) fn reply_timeout(&self) -> Duration {
         Duration::from_secs(self.reply_timeout_seconds.clamp(30, 1_800))
+    }
+
+    /// 这一句还值得说多久。0 表示不带时效条件，与从前一样无条件发送。
+    pub(crate) fn freshness_window(&self) -> Duration {
+        Duration::from_secs(if self.send_freshness_seconds == 0 {
+            0
+        } else {
+            self.send_freshness_seconds.clamp(3, 300)
+        })
     }
 
     /// 可选的旧版沉默补偿；默认关闭，不为刷存在感降低人格的兴趣门槛。
@@ -234,6 +273,7 @@ impl AmbientConfig {
             context_turns: (self.context_turns / 2).max(6),
             max_messages: self.max_messages.min(2),
             draw_budget: 0,
+            lookup_budget: self.lookup_budget.min(1),
             ..self.clone()
         }
     }
@@ -343,8 +383,14 @@ fn persona_path(oai_data: &Path) -> PathBuf {
     base_dir(oai_data).join("persona.md")
 }
 
-fn skill_dir(oai_data: &Path) -> PathBuf {
-    base_dir(oai_data).join("skills/satori-reply")
+fn skills_root(oai_data: &Path) -> PathBuf {
+    base_dir(oai_data).join("skills")
+}
+
+/// 交给 pi 的 `--skill` 路径清单。
+fn skill_dirs(oai_data: &Path) -> Vec<PathBuf> {
+    let root = skills_root(oai_data);
+    SKILLS.iter().map(|(name, _)| root.join(name)).collect()
 }
 
 /// 铺开人设与 skill。
@@ -359,9 +405,11 @@ pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
     if !persona.exists() {
         tokio::fs::write(&persona, PERSONA).await?;
     }
-    let skill = skill_dir(oai_data);
-    tokio::fs::create_dir_all(&skill).await?;
-    tokio::fs::write(skill.join("SKILL.md"), SKILL).await?;
+    for (name, body) in SKILLS {
+        let dir = skills_root(oai_data).join(name);
+        tokio::fs::create_dir_all(&dir).await?;
+        tokio::fs::write(dir.join("SKILL.md"), body).await?;
+    }
     tokio::fs::write(
         base_dir(oai_data).join("satori-tools.ts"),
         include_str!("../../../res/ambient/satori-tools.ts"),
@@ -850,7 +898,7 @@ async fn speak_up(
     let raw = speak::compose(
         &oai.pi_command,
         &base,
-        &skill_dir(&data_dir),
+        &skill_dirs(&data_dir),
         persona,
         config,
         oai.pi_stall(),
@@ -965,10 +1013,19 @@ async fn speak_up(
         }
         message.0.extend(utterance.message.0.iter().cloned());
         let spoken = plain_text(&utterance.message);
-        let id = match send_msg_id(ctx, writer.clone(), Some(group), None, &message).await {
+        let id = match send_fresh_msg_id(
+            ctx,
+            writer.clone(),
+            Some(group),
+            None,
+            &message,
+            freshness_for(group, config.freshness_window()),
+        )
+        .await
+        {
             Ok(Some(id)) => id.parse::<i64>().unwrap_or_default(),
             Ok(None) => {
-                warn!(target: LOG_TARGET, "群 {group} 无消息回执，不计入成功发言");
+                info!(target: LOG_TARGET, "群 {group} 这句话没发出去：交给 QQ 之前群里又说了话");
                 break;
             }
             Err(error) => {
@@ -1092,6 +1149,33 @@ mod tests {
         assert_eq!(extreme.effective_threshold(None), extreme.score_threshold);
     }
 
+    /// 默认就带上时效条件：话说晚了不如不说。写 0 才回到从前的无条件发送。
+    #[test]
+    fn utterances_expire_by_default_and_the_window_stays_sane() {
+        let config = AmbientConfig::default();
+        assert_eq!(config.freshness_window(), Duration::from_secs(25));
+        let off = AmbientConfig {
+            send_freshness_seconds: 0,
+            ..AmbientConfig::default()
+        };
+        assert!(off.freshness_window().is_zero());
+        // 极端值被夹回可用区间，不会变成「一发出去就过期」或「永远有效」。
+        let silly = AmbientConfig {
+            send_freshness_seconds: 1,
+            ..AmbientConfig::default()
+        };
+        assert_eq!(silly.freshness_window(), Duration::from_secs(3));
+        let huge = AmbientConfig {
+            send_freshness_seconds: u64::MAX,
+            ..AmbientConfig::default()
+        };
+        assert_eq!(huge.freshness_window(), Duration::from_secs(300));
+        // 旧配置里没有这两个键也读得出来，取默认值。
+        let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
+        assert_eq!(legacy.send_freshness_seconds, config.send_freshness_seconds);
+        assert_eq!(legacy.lookup_budget, config.lookup_budget);
+    }
+
     #[test]
     fn the_longer_it_stays_quiet_the_lower_the_bar() {
         let config = AmbientConfig {
@@ -1123,12 +1207,13 @@ mod tests {
     fn peak_hours_default_to_dozing_through_deepseeks_expensive_window() {
         let config = AmbientConfig::default();
         assert_eq!(config.peak.mode, peak::Mode::Sleep);
-        // 醒来那一轮用最省的一份：不看图、上下文减半、少发一条、不绘图。
+        // 醒来那一轮用最省的一份：不看图、上下文减半、少发一条、不绘图、只查一次。
         let frugal = config.frugal();
         assert_eq!(frugal.context_images, 0);
         assert!(frugal.context_turns < config.context_turns);
         assert!(frugal.max_messages <= 2);
         assert_eq!(frugal.draw_budget, 0);
+        assert_eq!(frugal.lookup_budget, 1);
         // 其余设置原样带过去。
         assert_eq!(frugal.reply_model, config.reply_model);
         assert_eq!(frugal.groups, config.groups);

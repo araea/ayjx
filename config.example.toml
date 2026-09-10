@@ -84,9 +84,12 @@ gate_model = "deepseek/deepseek-flash"
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
 reply_model = "deepseek/deepseek-flash"
 thinking = "low"
-# 发言时开放的辅助工具白名单；每轮额外加载 satori 聊天与绘图工具。
-# 去掉 bash 可关闭本轮命令执行工具。
-tools = "read,bash,web_search,fetch_content,get_search_content"
+# 发言时开放的辅助工具白名单；每轮额外加载 satori 聊天、查询与绘图工具。
+# read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去；
+# web_search / fetch_content / get_search_content 是「不知道就去查」那条路
+# （群友贴的链接也靠 fetch_content 才真读得到）；source_check 给有争议的说法找出处。
+# 去掉 bash 可关闭本轮命令执行工具；名字必须是 pi 实际注册了的工具。
+tools = "read,write,bash,web_search,source_check,fetch_content,get_search_content"
 # 开口意愿分门槛，调高更沉默。实际门槛还会随「最近十分钟自己说了几轮」抬高
 # （每轮 +8，最多 +24），随关注中的续聊下调 15 分，见 docs/ambient.md。
 score_threshold = 50
@@ -96,8 +99,15 @@ focus_relief = 15
 # 每轮最多 3 条消息、6 个平台写动作（含消息、点赞、撤回和失败尝试）。
 max_messages = 3
 max_actions = 6
-# 每轮最多生成几张图（走 oai 的 GPT Image 2.5）；0 关闭绘图。
+# 每轮最多生成几张图（走 [oai] 配置的图像模型）；0 关闭绘图。
 draw_budget = 2
+# 每轮最多查几次群聊旧账（satori_history 翻 QQ 存的本群历史，satori_group 查
+# 群名片/活跃/抽人分队/群文件）；0 关闭这两个工具。内存窗口只有几十条且重启就空，
+# 开着它人格才能想起「上周那个报错」，而不是顺口编一段。
+lookup_budget = 4
+# 消息时效窗口（秒）：请求交给 satori-qq 之后还要排队，这段时间里群里只要又有人
+# 说话，这一句就整条不发——话说晚了不如不说。0 关闭这层条件。
+send_freshness_seconds = 25
 # 熟人记忆：落盘记住群里的人与旧事（data/oai/ambient/memory/），并开放 satori_memo。
 memory_enabled = true
 # 每轮最多写几条记忆；0 关闭 satori_memo。

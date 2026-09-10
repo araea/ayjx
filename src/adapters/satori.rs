@@ -25,6 +25,77 @@ pub mod message;
 pub type BotError = Box<dyn std::error::Error + Send + Sync>;
 pub type LockedWriter = Arc<SatoriClient>;
 
+/// `message.create` 的可选时效条件（satori-qq 扩展）。
+///
+/// 实现端在拿到出站队列的发送权、以及媒体转换与重试等待之后，才把消息交给 QQ
+/// 内核；这中间是 ayjx 完全看不见的一段时间。条件成立要求锚点消息仍是实现端
+/// 最近推送给本应用的该频道消息，条件不成立就整条跳过并返回 `[]`——不算发送
+/// 失败，也不触发熔断。用它，「话说晚了」就变成「这句话干脆没说」。
+#[derive(Debug, Clone)]
+pub struct Freshness {
+    /// 锚点消息 ID：发送前它必须仍是该频道最新的一条。
+    pub message_id: String,
+    /// Unix 毫秒截止时间。
+    pub expires_at: u64,
+}
+
+/// 每个群最近一条**入站**消息的 ID。
+///
+/// 时效条件的锚点必须和实现端的记账一致，而实现端记的是「推送给本应用的每一条
+/// 消息」——包括被指令消费掉、被过滤器拦掉、以及根本没走到某个插件的那些。所以
+/// 这笔账只能记在流水线之前的适配器层，不能由某个插件自己攒。
+fn latest_inbound() -> &'static std::sync::Mutex<std::collections::HashMap<i64, String>> {
+    static LATEST: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, String>>> =
+        std::sync::OnceLock::new();
+    LATEST.get_or_init(Default::default)
+}
+
+/// 记下一条入站群消息，供时效条件取锚点。自己发出的消息不会作为事件回来
+/// （实现端按出站 ID 去重），因此连着发几条不会把自己的条件顶掉。
+pub fn note_inbound(event: &Event) {
+    if event.get_str("satori_type") != Some("message-created") {
+        return;
+    }
+    let Some(group) = event.get_i64("group_id").filter(|id| *id != 0) else {
+        return;
+    };
+    let Some(id) = event
+        .get_str("message_id_str")
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let mut guard = latest_inbound()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // 群数量本来就有限，但配置改动和退群都可能留下条目，给个上限兜底。
+    if guard.len() > 512 {
+        guard.clear();
+    }
+    guard.insert(group, id);
+}
+
+/// 取一个群的时效锚点；从未收到过消息时没有可锚定的对象。
+pub fn freshness_for(group_id: i64, valid_for: Duration) -> Option<Freshness> {
+    if valid_for.is_zero() {
+        return None;
+    }
+    let message_id = latest_inbound()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&group_id)
+        .cloned()?;
+    Some(Freshness {
+        message_id,
+        expires_at: (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            + valid_for)
+            .as_millis() as u64,
+    })
+}
+
 /// Satori 的事件和 API 使用两条独立通道：WS 只收事件，HTTP 负责所有调用。
 pub struct SatoriClient {
     endpoint: String,
@@ -413,6 +484,8 @@ async fn listen(
                                 continue;
                             }
                         };
+                        // 时效锚点要和实现端的记账一致，必须先于插件流水线记下。
+                        note_inbound(&event);
                         let writer = writer.clone();
                         let config = global_config.clone();
                         let db = db.clone();
@@ -632,6 +705,30 @@ where
         .next())
 }
 
+/// 发送一条「群聊已经往前走了就不必再说」的消息，并返回实现端分配的消息 ID。
+///
+/// 搭话用它：模型思考加上模拟打字往往要十几秒，中间群里又说了话的话，这句就
+/// 不该再落地了。ayjx 自己已经在发送前查过一次窗口，但请求交给实现端之后还要
+/// 排队，那一段只有实现端看得见——所以把同一个判断也交给它。
+pub async fn send_fresh_msg_id<M>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+    freshness: Option<Freshness>,
+) -> Result<Option<String>, BotError>
+where
+    M: Serialize,
+{
+    Ok(
+        dispatch_send_with(ctx, writer, group_id, user_id, message, None, freshness)
+            .await?
+            .into_iter()
+            .next(),
+    )
+}
+
 /// A best-effort repeat may be dropped if the conversation advances while sending.
 pub async fn send_repeater_msg<M: Serialize>(
     ctx: &Context,
@@ -653,6 +750,22 @@ async fn dispatch_send<M>(
     user_id: Option<i64>,
     message: M,
     repeat_guard: Option<plugins::repeater::RepeatGuard>,
+) -> Result<Vec<String>, BotError>
+where
+    M: Serialize,
+{
+    dispatch_send_with(ctx, writer, group_id, user_id, message, repeat_guard, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_send_with<M>(
+    ctx: &Context,
+    writer: LockedWriter,
+    group_id: Option<i64>,
+    user_id: Option<i64>,
+    message: M,
+    repeat_guard: Option<plugins::repeater::RepeatGuard>,
+    freshness: Option<Freshness>,
 ) -> Result<Vec<String>, BotError>
 where
     M: Serialize,
@@ -679,6 +792,7 @@ where
     let packet = SendPacket {
         action: "message.create".to_string(),
         repeat_guard,
+        freshness,
         params,
         original_event,
         receipt_message_ids: receipt_message_ids.clone(),
@@ -723,17 +837,28 @@ pub async fn dispatch_packet(
         .map(message::to_content)
         .unwrap_or_default();
     let mut params = json!({"channel_id": channel_id, "content": content});
-    if let Some(guard) = &packet.repeat_guard {
-        if !guard.is_current() {
-            debug!(target: "Plugin/Repeater", "发送前丢弃过时复读");
-            return Ok(());
-        }
-        if ctx.bot.adapter == "satori-qq" {
-            params["satori_qq"] = json!({
-                "if_latest_message_id": guard.message_id,
-                "expires_at": guard.expires_at,
-            });
-        }
+    if let Some(guard) = &packet.repeat_guard
+        && !guard.is_current()
+    {
+        debug!(target: "Plugin/Repeater", "发送前丢弃过时复读");
+        return Ok(());
+    }
+    // 复读的接力条件本身就是一份时效条件；其余调用方（搭话）自己带一份来。
+    let freshness = packet
+        .repeat_guard
+        .as_ref()
+        .map(|guard| Freshness {
+            message_id: guard.message_id.clone(),
+            expires_at: guard.expires_at,
+        })
+        .or_else(|| packet.freshness.clone());
+    if let Some(freshness) = freshness
+        && ctx.bot.adapter == "satori-qq"
+    {
+        params["satori_qq"] = json!({
+            "if_latest_message_id": freshness.message_id,
+            "expires_at": freshness.expires_at,
+        });
     }
     let created: Vec<Value> = writer.call(ctx, "message.create", params).await?;
     if !created.is_empty() {
@@ -1078,6 +1203,55 @@ mod tests {
             .unwrap();
         assert_eq!(sent.try_recv().unwrap()["content"], "是吧还可以吧");
         server.abort();
+    }
+
+    /// 时效锚点必须和实现端的记账一致：它记的是「推送给本应用的每一条群消息」，
+    /// 包括被指令消费掉、被过滤器拦掉、根本没走到某个插件的那些。所以这笔账记在
+    /// 适配器层，任何插件都能取到同一个锚点。
+    #[test]
+    fn the_freshness_anchor_follows_every_inbound_group_message() {
+        let group = -9_300_001;
+        let inbound = |id: &str, kind: &str| {
+            simd_json::serde::to_owned_value(json!({
+                "satori_type": kind,
+                "group_id": group,
+                "message_id_str": id,
+            }))
+            .unwrap()
+        };
+        assert!(freshness_for(group, Duration::from_secs(20)).is_none());
+        note_inbound(&inbound("100", "message-created"));
+        note_inbound(&inbound("101", "message-created"));
+        let anchor = freshness_for(group, Duration::from_secs(20)).unwrap();
+        assert_eq!(anchor.message_id, "101");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        assert!(anchor.expires_at > now && anchor.expires_at <= now + 20_000);
+        // 撤回、戳一戳这类事件不是新消息，锚点不动。
+        note_inbound(&inbound("102", "message-deleted"));
+        assert_eq!(
+            freshness_for(group, Duration::from_secs(20))
+                .unwrap()
+                .message_id,
+            "101"
+        );
+        // 私聊没有群号，不参与这笔记账。
+        note_inbound(
+            &simd_json::serde::to_owned_value(
+                json!({"satori_type":"message-created","message_id_str":"103"}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            freshness_for(group, Duration::from_secs(20))
+                .unwrap()
+                .message_id,
+            "101"
+        );
+        // 窗口为 0 就是关掉这层条件，回到从前的无条件发送。
+        assert!(freshness_for(group, Duration::ZERO).is_none());
     }
 
     #[tokio::test]
