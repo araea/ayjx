@@ -144,3 +144,12 @@ ignore_domains = []
 [webshot.channel]
 white = []
 black = []
+
+[help]
+enabled = true
+# 只在私聊应答：帮助是自己翻手册，留在群里只会刷屏。
+# 打开后群里的 help 原样放行，不消耗事件；需要群内也能用时设为 false。
+private_only = false
+# 是否把帮助排版成卡片图；关掉或渲染失败时退回纯文本。
+image_enabled = true
+image_scale = 3.0

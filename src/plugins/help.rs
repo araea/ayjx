@@ -29,6 +29,10 @@ const LOG_TARGET: &str = "Plugin/Help";
 #[derive(Serialize, Deserialize, Clone)]
 struct Config {
     enabled: bool,
+    /// 仅在私聊应答。帮助属于「自己翻手册」，留在群里只会刷屏；
+    /// 打开后群里的 help 原样放行，不消耗事件。
+    #[serde(default)]
+    private_only: bool,
     /// 是否把帮助排版成卡片图；关掉或渲染失败时退回纯文本
     #[serde(default = "default_true")]
     image_enabled: bool,
@@ -49,6 +53,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            private_only: false,
             image_enabled: true,
             image_scale: default_image_scale(),
         }
@@ -285,6 +290,14 @@ fn build_reply(ctx: &Context, arg: &str) -> Reply {
     }
 }
 
+/// 这条消息该不该由帮助插件应答。
+///
+/// `private_only` 打开后只在私聊开口；群聊里的 help 是普通消息，原样放行给
+/// 后面的插件，而不是被静默吃掉。抽成纯函数是为了能不启浏览器就测这条门禁。
+fn answers(config: &Config, group_id: Option<i64>) -> bool {
+    !(config.private_only && group_id.is_some())
+}
+
 pub fn handle(
     ctx: Context,
     writer: LockedWriter,
@@ -294,10 +307,14 @@ pub fn handle(
             Some(m) => m,
             None => return Ok(Some(ctx)),
         };
+        let config = load_config(&ctx);
+        // 私聊专用时，群里的 help 当普通消息放行，交给后面的插件。
+        if !answers(&config, msg.group_id()) {
+            return Ok(Some(ctx));
+        }
 
         for trigger in TRIGGERS {
             if let Some(matched) = match_command(&ctx, trigger) {
-                let config = load_config(&ctx);
                 let arg = extract_text_arg(&matched.args);
                 let reply = build_reply(&ctx, &arg);
 
@@ -330,6 +347,19 @@ pub fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 私聊专用只在私聊开口；群里的 help 原样放行，交给后面的插件。
+    #[test]
+    fn private_only_answers_private_but_lets_group_pass_through() {
+        let private: Config = toml::from_str("enabled = true\nprivate_only = true").unwrap();
+        assert!(answers(&private, None), "私聊必须应答");
+        assert!(!answers(&private, Some(123456)), "群聊必须放行");
+
+        // 默认（不设 private_only）时群里也应答，保持历史行为。
+        let everywhere: Config = toml::from_str("enabled = true").unwrap();
+        assert!(answers(&everywhere, None));
+        assert!(answers(&everywhere, Some(123456)));
+    }
 
     /// 分区代号写错会静默落到「其他」，看图的人不会察觉——所以在这里拦下
     #[test]
@@ -389,6 +419,17 @@ mod tests {
                 .count();
         }
         assert_eq!(seen, get_plugins().len(), "分组前后插件数量对不上");
+    }
+
+    /// 私聊专用默认关闭（保持历史行为），显式打开也不影响其余字段。
+    #[test]
+    fn private_only_defaults_off_and_can_be_turned_on() {
+        // 老配置没有这个字段，必须能照常加载并保持「群里也应答」的旧行为。
+        let base: Config = toml::from_str("enabled = true").unwrap();
+        assert!(!base.private_only);
+        let private: Config = toml::from_str("enabled = true\nprivate_only = true").unwrap();
+        assert!(private.private_only);
+        assert!(private.image_enabled);
     }
 
     #[test]
