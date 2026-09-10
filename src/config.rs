@@ -130,6 +130,35 @@ impl Default for AppConfig {
 }
 
 /// 辅助函数：构建默认配置 Value，并确保包含 enabled 字段
+/// 把默认配置里缺的字段补进现有配置，逐层深入；只补空缺，从不覆盖已有取值。
+///
+/// 升级带来的新字段要能被 `/ctl` 看到和改到，而 `/ctl` 的路径解析走不进一个不存在的
+/// 键。只补最外层的话，`[oai.ambient]` 这种嵌套表里新增的开关就永远停在
+/// 「配置路径不存在」——运行时靠 serde 默认值照常工作，管理员却一辈子改不了它。
+///
+/// 返回是否真的补了东西，调用方据此决定要不要落盘。
+pub fn fill_missing(existing: &mut toml::value::Table, defaults: Value, label: &str) -> bool {
+    let Value::Table(defaults) = defaults else {
+        return false;
+    };
+    let mut changed = false;
+    for (key, value) in defaults {
+        match existing.get_mut(&key) {
+            None => {
+                crate::info!("配置补全：{label}.{key}");
+                existing.insert(key, value);
+                changed = true;
+            }
+            // 两边都是表才往下走；一边是表一边是标量，说明管理员改过类型，别动它。
+            Some(Value::Table(nested)) => {
+                changed |= fill_missing(nested, value, &format!("{label}.{key}"));
+            }
+            Some(_) => {}
+        }
+    }
+    changed
+}
+
 pub fn build_config<T: Serialize>(data: T) -> Value {
     let mut val = Value::try_from(data).unwrap_or(Value::Table(Default::default()));
     if let Value::Table(ref mut map) = val
@@ -138,4 +167,48 @@ pub fn build_config<T: Serialize>(data: T) -> Value {
         map.insert("enabled".to_string(), Value::Boolean(true));
     }
     val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upgrades_reach_fields_nested_inside_existing_tables() {
+        let mut stored = match toml::from_str::<Value>(
+            "enabled = true\n[ambient]\nscore_threshold = 60\n[ambient.peak]\nmode = \"pause\"",
+        )
+        .unwrap()
+        {
+            Value::Table(table) => table,
+            _ => unreachable!(),
+        };
+        let defaults: Value = toml::from_str(
+            "enabled = false\ntimeout = 30\n[ambient]\nscore_threshold = 45\nmood_enabled = true\n[ambient.peak]\nmode = \"sleep\"\nwindows = [\"09:00-12:00\"]",
+        )
+        .unwrap();
+
+        assert!(fill_missing(&mut stored, defaults.clone(), "test"));
+        // 管理员的取值一个都没被动过，深到第三层也一样。
+        assert_eq!(stored["enabled"].as_bool(), Some(true));
+        assert_eq!(stored["ambient"]["score_threshold"].as_integer(), Some(60));
+        assert_eq!(stored["ambient"]["peak"]["mode"].as_str(), Some("pause"));
+        // 新字段补齐了，每一层都补。
+        assert_eq!(stored["timeout"].as_integer(), Some(30));
+        assert_eq!(stored["ambient"]["mood_enabled"].as_bool(), Some(true));
+        assert!(stored["ambient"]["peak"]["windows"].is_array());
+        // 补过一次之后就没有改动了，不该每次启动都重写配置文件。
+        assert!(!fill_missing(&mut stored, defaults, "test"));
+    }
+
+    #[test]
+    fn a_field_whose_type_was_changed_by_hand_is_left_alone() {
+        let mut stored = match toml::from_str::<Value>("channel = \"all\"").unwrap() {
+            Value::Table(table) => table,
+            _ => unreachable!(),
+        };
+        let defaults: Value = toml::from_str("[channel]\nwhite = []").unwrap();
+        assert!(!fill_missing(&mut stored, defaults, "test"));
+        assert_eq!(stored["channel"].as_str(), Some("all"));
+    }
 }
