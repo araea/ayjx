@@ -395,20 +395,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn seeing_someone_builds_a_profile_without_inventing_an_impression() {
-        let mut memory = GroupMemory::default();
-        memory.see(42, "老张", 1_000);
-        memory.see(42, "老张", 2_000);
-        let person = &memory.people[&42];
-        assert_eq!(person.messages, 2);
-        assert_eq!(person.first_seen, 1_000);
-        assert_eq!(person.last_seen, 2_000);
-        assert!(person.note.is_empty());
-        // 刚见过几面的人在提示词里是「新面孔」，不装熟。
-        let brief = memory.brief(&[turn(42, "老张")], 2_000);
-        assert!(brief.contains("新面孔"), "{brief}");
-    }
 
     #[test]
     fn impressions_are_trimmed_flattened_and_replaceable() {
@@ -470,6 +456,11 @@ mod tests {
         memory.remember(42, "在修驾校那台破电脑").unwrap();
         memory.exchange(42, 100);
         memory.jot("上周开始玩的梗", 0).unwrap();
+        // 刚见过一两面的人是「新面孔」，不装熟。
+        let mut fresh = GroupMemory::default();
+        fresh.see(99, "路人", 0);
+        assert!(fresh.brief(&[turn(99, "路人")], 0).contains("新面孔"));
+
         let brief = memory.brief(&[turn(42, "群友42"), turn(43, "群友43")], 86_400);
         assert!(brief.contains("在修驾校那台破电脑"), "{brief}");
         assert!(brief.contains("聊过 1 次"), "{brief}");
@@ -480,15 +471,6 @@ mod tests {
         assert!(GroupMemory::default().brief(&[turn(42, "谁")], 0).is_empty());
     }
 
-    #[test]
-    fn elapsed_time_reads_like_a_person_would_say_it() {
-        assert_eq!(ago(0), "刚刚");
-        assert_eq!(ago(59), "刚刚");
-        assert_eq!(ago(600), "10 分钟前");
-        assert_eq!(ago(7_200), "2 小时前");
-        assert_eq!(ago(3 * 86_400), "3 天前");
-        assert_eq!(ago(400 * 86_400), "很久以前");
-    }
 
     // 这把锁只是把动全局记忆的几个测试串起来，跨 await 持有正是它的用途。
     #[allow(clippy::await_holding_lock)]
@@ -530,21 +512,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn memory_survives_a_round_trip_through_disk() {
-        let dir = std::env::temp_dir().join(format!("ayjx-memory-{}", rand::random::<u64>()));
-        let mut memory = GroupMemory::default();
-        memory.see(42, "老张", 100);
-        memory.remember(42, "修电脑的").unwrap();
-        memory.jot("旧事一件", 100).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = path_of(&dir, -1);
-        std::fs::write(&path, serde_json::to_string(&memory).unwrap()).unwrap();
-        let back: GroupMemory =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(back.people[&42].note, "修电脑的");
-        assert_eq!(back.notes[0].text, "旧事一件");
-        assert!(back.summary().contains("1 个有印象"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

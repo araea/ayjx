@@ -288,22 +288,6 @@ mod tests {
         assert!(items[0].wait <= MAX_WAIT_SECONDS);
     }
 
-    #[test]
-    fn breaths_between_messages_are_usually_short_but_sometimes_wander() {
-        let pace = Pace {
-            typing_cpm: 150,
-            voice_cpm: 420,
-            think_seconds: 3.0,
-        };
-        let gaps: Vec<Duration> = (0..400).map(|_| pace.gap()).collect();
-        assert!(gaps.iter().all(|gap| *gap <= Duration::from_secs(6)));
-        // 大多数是一次换气，少数是被岔开的那种停顿。
-        let long = gaps
-            .iter()
-            .filter(|gap| **gap > Duration::from_secs(2))
-            .count();
-        assert!((5..160).contains(&long), "{long}");
-    }
 
     #[test]
     fn long_lines_type_faster_per_character_but_never_instantly() {

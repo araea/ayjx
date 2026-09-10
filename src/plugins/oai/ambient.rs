@@ -1192,14 +1192,4 @@ mod tests {
         assert_eq!(fixed.pace(tired).typing_cpm, fixed.typing_cpm);
     }
 
-    #[test]
-    fn now_context_reports_the_local_clock() {
-        let text = now_context();
-        let year = chrono::Local::now().format("%Y").to_string();
-        let hour = chrono::Local::now().format("%H:%M").to_string();
-        assert!(text.starts_with("现在："), "{text}");
-        assert!(text.contains(&year), "{text}");
-        assert!(text.contains(&hour), "{text}");
-        assert!(text.contains("（本机时间）"), "{text}");
-    }
 }

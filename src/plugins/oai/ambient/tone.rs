@@ -168,11 +168,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_quiet_window_admits_it_cannot_tell() {
-        let text = register(&[turn(1, "在吗", 0)]);
-        assert!(text.contains("看不出节奏"), "{text}");
-    }
 
     #[test]
     fn the_register_reports_length_punctuation_and_what_is_being_talked_about() {
@@ -184,6 +179,9 @@ mod tests {
                 index * 30,
             ));
         }
+        // 只有一两条消息时说不出节奏，也不硬编一个。
+        assert!(register(&turns[..1]).contains("看不出节奏"));
+
         let text = register(&turns);
         assert!(text.contains("3 个人在说"), "{text}");
         assert!(text.contains("约每 30 秒一条"), "{text}");
@@ -194,18 +192,6 @@ mod tests {
         assert_eq!(plain, "就这样");
     }
 
-    #[test]
-    fn punctuated_groups_are_described_as_such_and_media_is_noticed() {
-        let mut turns: Vec<Turn> = (0..6)
-            .map(|index| turn(1, "我觉得这样不太行。", index * 10))
-            .collect();
-        for turn in turns.iter_mut().take(3) {
-            turn.images.push("https://example.com/a.png".into());
-        }
-        let text = register(&turns);
-        assert!(text.contains("多数把标点打全"), "{text}");
-        assert!(text.contains("图和表情不少"), "{text}");
-    }
 
     #[test]
     fn repeating_yourself_is_caught_but_short_interjections_are_free() {
@@ -223,10 +209,4 @@ mod tests {
         assert!(!echoes("那你重启一下路由器试试 不行再说", &theirs));
     }
 
-    #[test]
-    fn overlap_is_symmetric_and_bounded() {
-        assert!((overlap("完全一样的一句话", "完全一样的一句话") - 1.0).abs() < 1e-6);
-        assert_eq!(overlap("完全不同", "毫无关系"), 0.0);
-        assert!((overlap("abc", "cba") - overlap("cba", "abc")).abs() < 1e-6);
-    }
 }

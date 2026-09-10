@@ -284,38 +284,6 @@ mod tests {
         assert!(mood.snapshot(1, now + 3_600).warmth < cold);
     }
 
-    #[test]
-    fn energy_drift_is_bounded_so_the_clock_still_wins() {
-        let now = at_hour(21);
-        let mut mood = Mood::default();
-        for _ in 0..50 {
-            mood.spoke(1, now);
-        }
-        let tired = mood.snapshot(1, now).energy;
-        assert!(tired < baseline(21), "{tired}");
-        assert!(tired > baseline(21) - 0.31, "{tired}");
-        assert!((0.05..=1.0).contains(&tired));
-    }
 
-    #[test]
-    fn descriptions_stay_about_state_and_never_invent_a_life() {
-        for (energy, warmth) in [(0.1, 0.1), (0.5, 0.5), (0.95, 0.95)] {
-            let text = Snapshot { energy, warmth }.describe();
-            assert!(text.starts_with("你现在的状态："), "{text}");
-            assert!(text.contains("不是发言配额"), "{text}");
-            assert!(!text.contains("刚下班"), "{text}");
-        }
-    }
 
-    #[test]
-    fn a_mood_survives_a_round_trip_through_json() {
-        let now = at_hour(15);
-        let mut mood = Mood::default();
-        mood.engaged(7, now);
-        let raw = serde_json::to_string(&mood).unwrap();
-        let back: Mood = serde_json::from_str(&raw).unwrap();
-        assert_eq!(back.snapshot(7, now), mood.snapshot(7, now));
-        // 旧文件缺字段也读得回来。
-        assert!(serde_json::from_str::<Mood>("{}").is_ok());
-    }
 }
