@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::Instant;
 
 /// 每个群最多记住多少人；超出时先忘掉没有印象、最久没露面的那些。
 const MAX_PEOPLE: usize = 120;
@@ -26,6 +27,9 @@ pub(crate) const MAX_NOTE_CHARS: usize = 60;
 const BRIEF_PEOPLE: usize = 8;
 /// 一次注入提示词的旧事条数上限。
 const BRIEF_NOTES: usize = 6;
+/// 两次落盘之间至少隔多久。露面统计每条消息都在变，值不上一次写盘；
+/// 人格自己写下的印象走 [`flush_now`]，不受这个节流影响。
+const WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 对一个人的记忆。
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -266,6 +270,7 @@ struct Store {
     dir: Option<PathBuf>,
     groups: HashMap<i64, GroupMemory>,
     dirty: HashSet<i64>,
+    written: HashMap<i64, Instant>,
 }
 
 fn store() -> &'static Mutex<Store> {
@@ -287,6 +292,7 @@ pub(crate) fn attach(base: &Path) {
     store.dir = Some(base.join("memory"));
     store.groups.clear();
     store.dirty.clear();
+    store.written.clear();
 }
 
 /// 取出某个群的记忆做一次修改。闭包里不要 await——锁是同步的。
@@ -311,13 +317,32 @@ pub(crate) fn edit<T>(group: i64, action: impl FnOnce(&mut GroupMemory) -> T) ->
     result
 }
 
-/// 把待落盘的改动写出去。没有改动时不碰磁盘。
+/// 把待落盘的改动写出去，最多每 [`WRITE_INTERVAL`] 一次。没有改动时不碰磁盘。
 pub(crate) async fn flush(group: i64) {
+    write(group, false).await
+}
+
+/// 立刻落盘，不受节流限制：人格刚写下的印象值得马上留住。
+pub(crate) async fn flush_now(group: i64) {
+    write(group, true).await
+}
+
+async fn write(group: i64, force: bool) {
     let payload = {
         let mut store = lock();
-        if !store.dirty.remove(&group) {
+        if !store.dirty.contains(&group) {
             return;
         }
+        if !force
+            && store
+                .written
+                .get(&group)
+                .is_some_and(|at| at.elapsed() < WRITE_INTERVAL)
+        {
+            return;
+        }
+        store.dirty.remove(&group);
+        store.written.insert(group, Instant::now());
         let Some(dir) = store.dir.clone() else {
             return;
         };
@@ -341,6 +366,15 @@ pub(crate) async fn flush(group: i64) {
     if let Err(error) = tokio::fs::write(&path, json).await {
         warn!(target: "Plugin/OAI", "写入群 {group} 的搭话记忆失败：{error}");
     }
+}
+
+/// 全局记忆是进程级的，几个测试都要动它；用一把锁把它们串起来。
+#[cfg(test)]
+pub(crate) fn exclusive() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 #[cfg(test)]
@@ -454,6 +488,44 @@ mod tests {
         assert_eq!(ago(7_200), "2 小时前");
         assert_eq!(ago(3 * 86_400), "3 天前");
         assert_eq!(ago(400 * 86_400), "很久以前");
+    }
+
+    #[tokio::test]
+    async fn attaching_a_directory_makes_the_memory_outlive_the_process() {
+        let _guard = exclusive();
+        let base = std::env::temp_dir().join(format!("ayjx-memory-{}", rand::random::<u64>()));
+        attach(&base);
+        let now = chrono::Local::now().timestamp();
+        edit(7, |memory| {
+            memory.see(42, "老张", now);
+            memory.remember(42, "在修驾校那台破电脑").unwrap();
+        });
+        flush(7).await;
+        let path = path_of(&base.join("memory"), 7);
+        assert!(path.exists(), "{path:?}");
+
+        // 刚写过就再改，普通 flush 让位给节流；人格自己写下的印象立刻落盘。
+        edit(7, |memory| memory.jot("刚起的梗", now).unwrap());
+        flush(7).await;
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("刚起的梗"));
+        flush_now(7).await;
+        assert!(std::fs::read_to_string(&path).unwrap().contains("刚起的梗"));
+
+        // 没有改动就不碰磁盘。
+        let stamp = std::fs::metadata(&path).unwrap().modified().unwrap();
+        flush_now(7).await;
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), stamp);
+
+        // 重新 attach 等于重启一次：还认得这个人，也记得那个梗。
+        attach(&base);
+        assert_eq!(
+            with_group(7, |memory| memory.people[&42].note.clone()),
+            "在修驾校那台破电脑"
+        );
+        assert_eq!(with_group(7, |memory| memory.notes[0].text.clone()), "刚起的梗");
+
+        attach(&std::env::temp_dir().join("ayjx-memory-detached"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

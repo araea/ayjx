@@ -405,7 +405,7 @@ impl Session {
                     }
                 }
                 ensure!(!done.is_empty(), "没有可写入的记忆内容");
-                memory::flush(self.group).await;
+                memory::flush_now(self.group).await;
                 Ok(json!({
                     "applied": done,
                     "summary": memory::with_group(self.group, |memory| memory.summary()),

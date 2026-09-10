@@ -642,6 +642,9 @@ async fn consider(
         {
             warn!(target: LOG_TARGET, "群 {group} 搭话失败：{error:#}");
         }
+        // 记性和状态每批都落盘：绝大多数批次以沉默收场，只在开口时保存等于几乎不保存。
+        memory::flush(group).await;
+        mood::flush().await;
         if !window::with_group(group, |state| state.finish_batch(seq)) {
             worker.armed = false;
             return Ok(());
@@ -738,13 +741,10 @@ async fn consider_batch(
         return Ok(());
     }
     let scene = Scene::build(group, config, &latest, rhythm);
-    let result = speak_up(
+    speak_up(
         ctx, writer, mgr, group, config, &latest, mentioned, &persona, &scene, seq,
     )
-    .await;
-    memory::flush(group).await;
-    mood::flush().await;
-    result
+    .await
 }
 
 /// 停用配置或群聊推进后，放弃尚未发送的内容，交回 worker 读取新上下文。
@@ -1127,6 +1127,7 @@ mod tests {
 
     #[test]
     fn the_scene_carries_every_local_anchor_and_drops_the_ones_turned_off() {
+        let _guard = memory::exclusive();
         let group = -9_100_001;
         let turns: Vec<Turn> = (0..6)
             .map(|index| Turn {
