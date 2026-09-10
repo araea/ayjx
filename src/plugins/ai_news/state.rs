@@ -8,7 +8,7 @@ use super::render::Rendered;
 use crate::plugins::get_data_dir;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -65,6 +65,9 @@ pub struct ExtractionRecord {
     pub message_id: String,
     pub created_ts: i64,
     pub rendered: Rendered,
+    /// 已经按卡片序号提取过的下标（0-based），避免同一内容被反复提取
+    #[serde(default)]
+    pub extracted: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -396,6 +399,7 @@ pub async fn remember_extraction(target_id: i64, message_id: String, rendered: R
             message_id,
             created_ts: now,
             rendered,
+            extracted: Vec::new(),
         });
     })
     .await
@@ -416,6 +420,68 @@ pub async fn extraction(target_id: i64, message_id: &str) -> Option<Rendered> {
             .map(|record| record.rendered.clone())
     })
     .await
+}
+
+/// 一次「引用卡片 + 直接回复序号」的原子提取结果。
+#[derive(Debug)]
+pub enum ExtractionOutcome {
+    /// 卡片存在，返回 (完整渲染, 本次新提取的 0-based 下标)
+    Ready(Rendered, Vec<usize>),
+    /// 未找到这张卡片的提取记录（可能已过期）
+    Missing,
+    /// 请求的条目此前均已提取过
+    AlreadyExtracted,
+}
+
+/// 原子地挑选并标记一批条目为已提取，避免同一内容被反复提取。
+///
+/// `wanted` 为 0-based 下标。已在 `extracted` 中的条目会被跳过，
+/// 只返回仍可提取的下标，并把它们并入已提取集合；全部被跳过时返回
+/// [`ExtractionOutcome::AlreadyExtracted`]。
+pub async fn extract_entries(
+    target_id: i64,
+    message_id: &str,
+    wanted: &[usize],
+) -> ExtractionOutcome {
+    let message_id = message_id.to_string();
+    let wanted: BTreeSet<usize> = wanted.iter().copied().collect();
+    let cutoff = Utc::now().timestamp() - EXTRACTION_RETAIN_DAYS * 86_400;
+    with_state(move |state| apply_extraction(state, target_id, &message_id, &wanted, cutoff))
+        .await
+}
+
+/// `extract_entries` 的纯逻辑部分，便于测试；不触碰全局状态与磁盘。
+fn apply_extraction(
+    state: &mut State,
+    target_id: i64,
+    message_id: &str,
+    wanted: &BTreeSet<usize>,
+    cutoff: i64,
+) -> ExtractionOutcome {
+    state.extractions.retain(|record| record.created_ts >= cutoff);
+    let Some(record) = state
+        .extractions
+        .iter_mut()
+        .find(|record| record.target_id == target_id && record.message_id == message_id)
+    else {
+        return ExtractionOutcome::Missing;
+    };
+
+    let already: HashSet<usize> = record.extracted.iter().copied().collect();
+    let fresh: Vec<usize> = wanted
+        .iter()
+        .copied()
+        .filter(|index| !already.contains(index))
+        .collect();
+    if fresh.is_empty() {
+        return ExtractionOutcome::AlreadyExtracted;
+    }
+
+    record.extracted.extend(wanted.iter().copied());
+    record.extracted.sort_unstable();
+    record.extracted.dedup();
+
+    ExtractionOutcome::Ready(record.rendered.clone(), fresh)
 }
 
 #[cfg(test)]
@@ -485,6 +551,7 @@ mod tests {
                     footer: "AIHOT".into(),
                     links: Vec::new(),
                 },
+                extracted: Vec::new(),
             }],
             ..Default::default()
         };
@@ -495,6 +562,57 @@ mod tests {
 
         let legacy = parse_state(r#"{"groups":{}}"#).unwrap();
         assert!(legacy.extractions.is_empty());
+    }
+
+    #[test]
+    fn extraction_tracks_already_used_indices_and_skips_them() {
+        let mut state = State {
+            extractions: vec![ExtractionRecord {
+                target_id: 42,
+                message_id: "m1".into(),
+                created_ts: 100,
+                rendered: Rendered {
+                    header: "AI 资讯".into(),
+                    entries: vec!["1. a".into(), "2. b".into(), "3. c".into()],
+                    footer: "AIHOT".into(),
+                    links: Vec::new(),
+                },
+                // 第 2 条（1-based）之前已提取
+                extracted: vec![1],
+            }],
+            ..Default::default()
+        };
+
+        // 请求 1,2：其中 2 已提取，只返回 1-based 第 1 条
+        let wanted: BTreeSet<usize> = [0usize, 1].into_iter().collect();
+        match apply_extraction(&mut state, 42, "m1", &wanted, 0) {
+            ExtractionOutcome::Ready(_, fresh) => assert_eq!(fresh, vec![0]),
+            _ => panic!("应返回 Ready"),
+        }
+
+        // 已提取下标并入记录，且顺序稳定
+        assert_eq!(state.extractions[0].extracted, vec![0, 1]);
+
+        // 再次请求同样的下标：全部已提取
+        let wanted2: BTreeSet<usize> = [0usize, 1].into_iter().collect();
+        assert!(matches!(
+            apply_extraction(&mut state, 42, "m1", &wanted2, 0),
+            ExtractionOutcome::AlreadyExtracted
+        ));
+
+        // 请求未知下标的新条目仍可提取
+        let wanted3: BTreeSet<usize> = [2usize].into_iter().collect();
+        assert!(matches!(
+            apply_extraction(&mut state, 42, "m1", &wanted3, 0),
+            ExtractionOutcome::Ready(_, _)
+        ));
+
+        // 未找到卡片
+        let missing: BTreeSet<usize> = [0usize].into_iter().collect();
+        assert!(matches!(
+            apply_extraction(&mut state, 42, "nope", &missing, 0),
+            ExtractionOutcome::Missing
+        ));
     }
 
     #[test]

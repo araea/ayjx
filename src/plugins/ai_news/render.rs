@@ -10,7 +10,7 @@
 //! 渲染结果统一用 [`Rendered`] 表示，拆成「头 / 逐条 / 尾」三段：
 //! 内容短时合成一条纯文本发送；超过阈值时按条目打包成合并转发的节点，
 //! 群里只占一个折叠卡片，不会刷屏。每条正文同时保留结构化的标题与关键链接
-//! （[`Rendered::links`]），供 `/ai提取` 只回链接、不再复述图片上的正文。
+//! （[`Rendered::links`]），供引用卡片后回复序号只回链接、不再复述图片上的正文。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{self, Board};
@@ -31,7 +31,7 @@ pub struct EntryLink {
 
 /// 与某一条正文对应的可提取信息：标题 + 关键链接。
 ///
-/// `/ai提取` 只回这些内容，不再复述图片上的正文，避免刷屏。
+/// 引用卡片后回复序号只回这些内容，不再复述图片上的正文，避免刷屏。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryLinks {
     /// 条目标题（不含序号）
@@ -56,7 +56,7 @@ pub struct Rendered {
     pub entries: Vec<String>,
     /// 落款（数据来源等）
     pub footer: String,
-    /// 与 `entries` 同序的标题与关键链接，供 `/ai提取` 只回链接。
+    /// 与 `entries` 同序的标题与关键链接，供引用卡片后回复序号只回链接。
     /// 升级前落盘的旧记录没有该字段，读取时会回退到从正文里解析。
     #[serde(default)]
     pub links: Vec<EntryLinks>,
@@ -77,7 +77,7 @@ impl Rendered {
             .unwrap_or_default()
     }
 
-    /// 这批内容是否带有可提取的链接（决定 `/ai提取` 走链接视图还是正文视图）
+    /// 这批内容是否带有可提取的链接（决定提取走链接视图还是正文视图）
     pub fn has_links(&self) -> bool {
         (0..self.entries.len()).any(|index| self.entry_links(index).has_link())
     }

@@ -42,10 +42,12 @@
 //! 不会所有群在同一秒收到同一张图。
 //!
 //! 呈现方式：定时推送与指令回复共用一套投递逻辑。一级内容只发一张排版好的
-//! 卡片图（见 `card.rs`），负责好看、好读、好转发；用户引用图片执行
-//! `/ai提取 <序号|全部>` 后，只回该条目的标题与关键链接（AIHOT 网页 + 原文），
-//! 不再把图片上的正文重发一遍。多个序号与范围可一次批量提取。
-//! 卡片渲染或消息关联失败时自动退回纯文本，不影响阅读。
+//! 卡片图（见 `card.rs`），负责好看、好读、好转发。用户**引用该图并直接回复
+//! 序号**即可按需取链接：回 `2` 提取第 2 条，`1,3-5` 批量提取，回 `0`（或
+//! 全部）提取整批；只回该条目的标题与关键链接（AIHOT 网页 + 原文），不再把
+//! 图片上的正文重发一遍。每条只允许提取一次，重复提取会提示已提取，避免刷屏；
+//! 多条批量提取会自动转成合并转发，群里只占一个折叠卡片。卡片渲染或消息关联
+//! 失败时自动退回纯文本，不影响阅读。
 //!
 //! 指令：
 //!   /ai资讯 · /ai新闻   立刻查看最近精选
@@ -53,7 +55,7 @@
 //!   /ai日报             最新一期 AI 日报
 //!   /ai模型榜           AIHOT 大模型排行榜（共识分 Top N）
 //!   /ai搜索 <关键词>     按关键词检索
-//!   /ai提取 <序号|全部>  引用资讯图片后只取标题与链接；支持 1,3-5
+//!   （提取无需指令：引用资讯图片后直接回复 `0` 全部 / `2` / `1,3-5` 即可）
 //!   /ai推送添加 <群|私聊> <ID> · /ai推送删除 <群|私聊> <ID>
 //!   /ai推送开启 · /ai推送关闭   不带参数时管理当前会话
 //!   /ai推送列表 · /ai推送状态 · /ai推送重置
@@ -77,6 +79,7 @@ use crate::plugins::{PluginError, get_config, update_config};
 use futures_util::future::BoxFuture;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
+use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -757,52 +760,51 @@ pub fn handle(
         let Some(msg) = ctx.as_message() else {
             return Ok(Some(ctx));
         };
-        // 快速预判：本插件的指令要么含 "ai"，要么含"模型"（模型榜的免前缀别名），
-        // 绝大多数群聊消息可在此直接放行，免去逐条指令重复取前缀、遍历消息段的开销
-        let text = msg.text();
-        if !text.contains("ai") && !text.contains("模型") {
-            return Ok(Some(ctx));
-        }
 
         let group_id = msg.group_id();
         let user_id = msg.user_id();
         let message_id = msg.message_id();
         let current_target = PushTarget::current(group_id, user_id);
 
-        // 链接按需提取：必须引用本插件此前发出的资讯图片，消息 ID 才能精确
-        // 对上当时那批内容。空参数等同“全部”，也支持多个序号与范围。
-        for trigger in ["ai提取", "ai链接"] {
-            let Some(matched) = match_command(&ctx, trigger) else {
-                continue;
-            };
-            let config = load_config(&ctx);
-            let reply = match (current_target, matched.reply_id.as_deref()) {
-                (Some(target), Some(quoted_id)) => {
-                    match state::extraction(target.state_id(), quoted_id).await {
-                        Some(rendered) => {
-                            let arg = extract_text_arg(&matched.args);
-                            match select_extraction(&rendered, &arg) {
-                                Ok(selected) => pusher::build_message(
-                                    &ctx,
-                                    &config,
-                                    &selected,
-                                    Some(message_id),
-                                    false,
-                                ),
-                                Err(message) => Message::new().reply(message_id).text(message),
-                            }
+        // 引用卡片 + 直接回复数字即可提取，无需指令前缀。
+        // 必须先于下方按 "ai"/"模型" 的快速预判，因为裸数字不包含这些关键字。
+        if let Some(target) = current_target {
+            if let Some(reply_id) = message_reply_id(&ctx) {
+                // 只有引用的是本插件推送过的资讯卡片，并且回复文本像一条序号请求时
+                // 才拦截；否则放行给其它插件，避免把普通数字消息误当提取。
+                if let Some(rendered) = state::extraction(target.state_id(), &reply_id).await {
+                    match parse_extraction_wanted(msg.text(), rendered.entries.len()) {
+                        Some(Ok(wanted)) => {
+                            let config = load_config(&ctx);
+                            let reply = handle_extraction_reply(
+                                &ctx,
+                                &config,
+                                target,
+                                &reply_id,
+                                &wanted,
+                                message_id,
+                            )
+                            .await;
+                            send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
+                            return Ok(None);
                         }
-                        None => Message::new().reply(message_id).text(
-                            "没有找到这张卡片对应的资讯。请确认引用的是本插件近 30 天发送的 AI 资讯图片。",
-                        ),
+                        Some(Err(message)) => {
+                            // 看起来是序号请求但非法（如越界），给一条提示
+                            let body = Message::new().reply(message_id).text(message);
+                            send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
+                            return Ok(None);
+                        }
+                        None => {}
                     }
                 }
-                _ => Message::new().reply(message_id).text(
-                    "请先引用一张 AI 资讯卡片，再发送 /ai提取 <序号|全部>。例如：/ai提取 2 或 /ai提取 1,3-5。",
-                ),
-            };
-            send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
-            return Ok(None);
+            }
+        }
+
+        // 快速预判：本插件的指令要么含 "ai"，要么含"模型"（模型榜的免前缀别名），
+        // 绝大多数群聊消息可在此直接放行，免去逐条指令重复取前缀、遍历消息段的开销
+        let text = msg.text();
+        if !text.contains("ai") && !text.contains("模型") {
+            return Ok(Some(ctx));
         }
 
         // 先匹配更长的「推送管理」类指令，避免与查询指令混淆
@@ -877,12 +879,106 @@ pub fn handle(
     })
 }
 
-/// 从已保存的卡片内容中选出用户需要的条目。序号从 1 开始，支持逗号、空格
-/// 和闭区间（如 `1,3-5`）；空参数与“全部”都返回整批。
+/// 执行一次「引用卡片 + 直接回复序号」的按需提取。
 ///
-/// 条目带有链接时只回「标题 + 链接」，不复述图片上的正文——一级推送已经把
-/// 正文画在卡片里，提取再发一遍只会刷屏。只有模型榜这类没有逐条链接的内容
-/// 才退回原来的正文视图。
+/// 命中时交给 `state::extract_entries` 原子地标记为已提取：同一卡片同一内容
+/// 只允许提取一次，避免重复刷屏。单条用纯文本回复；多条/整批自动转成合并转发，
+/// 群里只占一个折叠卡片。
+async fn handle_extraction_reply(
+    ctx: &Context,
+    config: &AiNewsConfig,
+    target: PushTarget,
+    reply_id: &str,
+    wanted: &[usize],
+    message_id: i64,
+) -> Message {
+    match state::extract_entries(target.state_id(), reply_id, wanted).await {
+        state::ExtractionOutcome::Missing => Message::new().reply(message_id).text(
+            "没有找到这张卡片对应的资讯。请确认引用的是本插件近 30 天发送的 AI 资讯图片。",
+        ),
+        state::ExtractionOutcome::AlreadyExtracted => Message::new().reply(message_id).text(
+            "这些条目刚才已经提取过了，无需重复提取。",
+        ),
+        state::ExtractionOutcome::Ready(rendered, fresh) => {
+            let selected = build_extraction_view(&rendered, &fresh);
+            pusher::build_message(ctx, config, &selected, Some(message_id), fresh.len() > 1)
+        }
+    }
+}
+
+/// 提取消息里的引用回复 ID（reply 段的 id），与指令匹配共用同一套解析。
+fn message_reply_id(ctx: &Context) -> Option<String> {
+    let arr = ctx.as_message()?.0.get_array("message")?;
+    for segment in arr.iter() {
+        if segment.get_str("type") != Some("reply") {
+            continue;
+        }
+        let data = segment.get("data")?;
+        return data
+            .get_str("id")
+            .map(String::from)
+            .or_else(|| data.get_i64("id").map(|v| v.to_string()))
+            .or_else(|| data.get_u64("id").map(|v| v.to_string()));
+    }
+    None
+}
+
+/// 判断引用卡片后回复的文本是否是一条「序号提取请求」。
+///
+/// 返回 `None` 表示不像请求（交给其它插件处理，不拦截）；
+/// `Some(Err(msg))` 是像请求但格式非法（如序号越界），给用户提示；
+/// `Some(Ok(indices))` 是一串按卡片序号命中的 0-based 下标。
+fn parse_extraction_wanted(input: &str, total: usize) -> Option<Result<Vec<usize>, String>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    if total == 0 {
+        return Some(Err("这张卡片没有可提取的资讯条目。".to_string()));
+    }
+    if matches!(input.to_ascii_lowercase().as_str(), "0" | "全部" | "所有" | "all") {
+        return Some(Ok((0..total).collect()));
+    }
+    // 只放行纯数字、序号分隔符与空白；否则视为普通消息，交给其它插件。
+    let looks_numeric = input.chars().all(|c| {
+        c.is_ascii_digit()
+            || matches!(c, ',' | '-' | '，' | '、' | '—' | '–' | '～' | '~')
+            || c.is_whitespace()
+    });
+    if !looks_numeric {
+        return None;
+    }
+    Some(parse_extraction_indices(input, total))
+}
+
+/// 按一组 0-based 下标从卡片内容里构建提取视图。
+///
+/// 条目带链接时只回「标题 + 链接」，不复述图片上的正文——一级推送已经把正文
+/// 画在卡片里，提取再发一遍只会刷屏。只有模型榜这类没有逐条链接的内容才退回
+/// 原来的正文视图。
+fn build_extraction_view(rendered: &Rendered, indices: &[usize]) -> Rendered {
+    if rendered.has_links() {
+        return link_extraction(rendered, indices);
+    }
+    Rendered {
+        header: rendered.header.clone(),
+        entries: indices
+            .iter()
+            .map(|index| rendered.entries[*index].clone())
+            .collect(),
+        footer: format!(
+            "{}\n已提取 {} / {} 条",
+            rendered.footer,
+            indices.len(),
+            rendered.entries.len()
+        ),
+        links: Vec::new(),
+    }
+}
+
+/// 从已保存的卡片内容中选出用户需要的条目（测试用）。序号从 1 开始，支持逗号、
+/// 空格和闭区间（如 `1,3-5`）；空参数、“全部”与“0”都返回整批。
+#[cfg(test)]
 fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, String> {
     let total = rendered.entries.len();
     if total == 0 {
@@ -890,26 +986,15 @@ fn select_extraction(rendered: &Rendered, input: &str) -> Result<Rendered, Strin
     }
 
     let input = input.trim();
-    let all = input.is_empty() || matches!(input.to_ascii_lowercase().as_str(), "all" | "全部" | "所有");
+    let all = input.is_empty()
+        || matches!(input.to_ascii_lowercase().as_str(), "all" | "全部" | "所有" | "0");
     let indices: Vec<usize> = if all {
         (0..total).collect()
     } else {
         parse_extraction_indices(input, total)?
     };
 
-    if rendered.has_links() {
-        return Ok(link_extraction(rendered, &indices));
-    }
-
-    Ok(Rendered {
-        header: rendered.header.clone(),
-        entries: indices
-            .iter()
-            .map(|index| rendered.entries[*index].clone())
-            .collect(),
-        footer: format!("{}\n已提取 {} / {} 条", rendered.footer, indices.len(), total),
-        links: Vec::new(),
-    })
+    Ok(build_extraction_view(rendered, &indices))
 }
 
 /// 只含标题与链接的提取视图：`🔗 AIHOT` + `📄 原文`，序号沿用卡片上的序号。
@@ -989,7 +1074,7 @@ fn parse_extraction_indices(input: &str, total: usize) -> Result<Vec<usize>, Str
     }
 
     if selected.is_empty() {
-        return Err("请输入要提取的序号，例如 /ai提取 2、/ai提取 1,3-5，或 /ai提取 全部。".to_string());
+        return Err("请输入要提取的序号，例如 2、1,3-5，或 0（提取全部）。".to_string());
     }
     Ok(selected.into_iter().map(|index| index - 1).collect())
 }
@@ -1689,7 +1774,7 @@ fn render_status(
     }
     out.push('\n');
     out.push_str(&format!(
-        "⌨️ {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai推送添加/删除 <群|私聊> <ID>\n   {p}ai推送列表 · {p}ai实时开启/关闭 · {p}ai实时模式 精选|全部\n   {p}ai分类 · {p}ai静默\n",
+        "⌨️ 引用卡片回复 0全部/序号 提取\n   {p}ai资讯 · {p}ai热点 · {p}ai日报\n   {p}ai模型榜 · {p}ai搜索 <关键词>\n   {p}ai推送添加/删除 <群|私聊> <ID>\n   {p}ai推送列表 · {p}ai实时开启/关闭 · {p}ai实时模式 精选|全部\n   {p}ai分类 · {p}ai静默\n",
         p = prefix
     ));
     out.push_str(api::ATTRIBUTION);
@@ -1752,9 +1837,109 @@ mod tests {
 
         assert_eq!(select_extraction(&rendered, "").unwrap().entries.len(), 6);
         assert_eq!(select_extraction(&rendered, "ALL").unwrap().entries.len(), 6);
-        assert!(select_extraction(&rendered, "0").is_err());
+        // 0 表示提取全部
+        assert_eq!(select_extraction(&rendered, "0").unwrap().entries.len(), 6);
         assert!(select_extraction(&rendered, "3-2").is_err());
         assert!(select_extraction(&rendered, "7").is_err());
+    }
+
+    #[test]
+    fn extraction_wanted_parses_numbers_all_and_non_requests() {
+        // 纯文本（含普通词）不是提取请求，应返回 None
+        assert!(parse_extraction_wanted("hello", 6).is_none());
+        assert!(parse_extraction_wanted("你好", 6).is_none());
+        assert!(parse_extraction_wanted("", 6).is_none());
+
+        // 序号、范围与 0/全部
+        assert_eq!(parse_extraction_wanted("2", 6).unwrap().unwrap(), vec![1]);
+        assert_eq!(
+            parse_extraction_wanted("1,3-5", 6).unwrap().unwrap(),
+            vec![0, 2, 3, 4]
+        );
+        assert_eq!(parse_extraction_wanted("0", 6).unwrap().unwrap(), (0..6).collect::<Vec<_>>());
+        assert_eq!(parse_extraction_wanted("全部", 6).unwrap().unwrap(), (0..6).collect::<Vec<_>>());
+        assert_eq!(parse_extraction_wanted("all", 6).unwrap().unwrap(), (0..6).collect::<Vec<_>>());
+
+        // 越界是「像请求但非法」
+        assert!(parse_extraction_wanted("7", 6).unwrap().is_err());
+
+        // 卡片无条目时给出明确错误
+        assert!(parse_extraction_wanted("0", 0).unwrap().is_err());
+    }
+
+    #[test]
+    fn reply_extraction_builds_view_for_indices() {
+        let rendered = Rendered {
+            header: "AI 资讯".into(),
+            entries: (1..=3).map(|index| format!("{}. 资讯", index)).collect(),
+            footer: "AIHOT · 共 3 条".into(),
+            links: Vec::new(),
+        };
+        let view = build_extraction_view(&rendered, &[0, 2]);
+        assert_eq!(view.entries, vec!["1. 资讯", "3. 资讯"]);
+        assert!(view.footer.contains("已提取 2 / 3 条"));
+    }
+
+    #[tokio::test]
+    async fn message_reply_id_reads_the_reply_segment() {
+        use crate::config::AppConfig;
+        use crate::event::{BotStatus, EventType, LoginUser};
+        use crate::matcher::Matcher;
+        use crate::scheduler::Scheduler;
+        use sea_orm::Database;
+        use std::sync::{Arc, RwLock};
+        use tokio::sync::Mutex as AsyncMutex;
+
+        let event = simd_json::serde::to_owned_value(serde_json::json!({
+            "post_type": "message",
+            "satori_type": "message-created",
+            "message_type": "group",
+            "group_id": 175131947,
+            "user_id": 42,
+            "message_id": 100,
+            "raw_message": "2",
+            "message": [
+                {"type": "reply", "data": {"id": "7756981543013817625"}},
+                {"type": "text", "data": {"text": "2"}},
+            ],
+        }))
+        .unwrap();
+        let ctx = Context {
+            event: EventType::Satori(event),
+            config: Arc::new(RwLock::new(AppConfig::default())),
+            config_save_lock: Arc::new(AsyncMutex::new(())),
+            db: Database::connect("sqlite::memory:").await.unwrap(),
+            scheduler: Arc::new(Scheduler::new()),
+            matcher: Arc::new(Matcher::new()),
+            config_path: Arc::from("unused-message-reply-test.toml"),
+            bot: Arc::new(BotStatus {
+                adapter: "satori-qq".into(),
+                platform: "red".into(),
+                login_user: LoginUser {
+                    id: "3373167460".into(),
+                    ..Default::default()
+                },
+            }),
+        };
+
+        assert_eq!(message_reply_id(&ctx).as_deref(), Some("7756981543013817625"));
+
+        // 没有引用段时返回 None
+        let no_reply = simd_json::serde::to_owned_value(serde_json::json!({
+            "post_type": "message",
+            "message_type": "group",
+            "group_id": 175131947,
+            "user_id": 42,
+            "message_id": 100,
+            "raw_message": "2",
+            "message": [{"type": "text", "data": {"text": "2"}}],
+        }))
+        .unwrap();
+        let ctx2 = Context {
+            event: EventType::Satori(no_reply),
+            ..ctx
+        };
+        assert!(message_reply_id(&ctx2).is_none());
     }
 
     #[test]

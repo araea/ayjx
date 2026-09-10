@@ -13,7 +13,7 @@
 //!   - 一条一格，格与格之间用 26px 上下留白而非重分割线。
 //!
 //! 图片只承载「读」的部分：链接一概不画进图里。需要查看全文时，用户引用
-//! 卡片执行提取指令，再按需取得正文与链接。
+//! 卡片后直接回复序号，再按需取得正文与链接。
 
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{Board, Trend};
@@ -276,8 +276,8 @@ fn shell(
     )
 }
 
-/// 一级推送只发图；用户引用图片后按序号或批量提取链接。
-const FOOT_LINKS: &str = "引用本图 /ai提取 1｜全部 取链接";
+/// 一级推送只发图；用户引用图片后直接回复序号提取链接（0 表示全部）。
+const FOOT_LINKS: &str = "引用本图回复 0全部｜序号 取链接";
 
 /// 一条资讯的元信息行：来源 · 分类 · 时间
 fn meta_html(item: &Item) -> String {
@@ -852,7 +852,7 @@ mod tests {
         assert!(html.contains("某模型发布"));
         assert!(html.contains("官方博客"));
         assert!(html.contains("08-21 09:00"), "时间应换算为北京时间");
-        assert!(html.contains("/ai提取 1"));
+        assert!(html.contains("0全部") && html.contains("取链接"));
         // 链接只走文本消息，不画进图里
         assert!(!html.contains("aihot.virxact.com/i/1"));
     }
