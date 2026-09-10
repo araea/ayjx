@@ -33,6 +33,7 @@ mod integration_tests;
 mod memory;
 mod mood;
 mod pace;
+mod peak;
 mod speak;
 mod tone;
 mod vision;
@@ -109,6 +110,9 @@ pub(crate) struct AmbientConfig {
     pub mood_enabled: bool,
     /// 每轮最多写几条记忆；0 关闭 `satori_memo`。
     pub memo_budget: usize,
+    /// 计价高峰时段的作息（见 [`peak`]）。DeepSeek 官方接口空闲时段半价，
+    /// 而搭话是这里唯一无人触发的付费功能，最值得挑时段。
+    pub peak: peak::PeakConfig,
     /// 一次发言最多拆成几条消息。
     pub max_messages: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
@@ -151,6 +155,7 @@ impl Default for AmbientConfig {
             memory_enabled: true,
             mood_enabled: true,
             memo_budget: 3,
+            peak: peak::PeakConfig::default(),
             max_messages: 3,
             max_actions: 6,
             draw_budget: 2,
@@ -206,6 +211,20 @@ impl AmbientConfig {
             typing_cpm: ((self.typing_cpm as f32) * typing).round().max(20.0) as u32,
             voice_cpm: ((self.voice_cpm as f32) * typing).round().max(20.0) as u32,
             think_seconds: self.think_seconds * think,
+        }
+    }
+
+    /// 高峰时段被点名唤醒时用的一份「省着来」的配置。
+    ///
+    /// 输入里最贵的是图片，其次是上下文长度；输出里最贵的是多发几条和顺手画张图。
+    /// 醒过来回一句仍然算数，只是这一句用最少的钱说完。
+    fn frugal(&self) -> Self {
+        Self {
+            context_images: 0,
+            context_turns: (self.context_turns / 2).max(6),
+            max_messages: self.max_messages.min(2),
+            draw_budget: 0,
+            ..self.clone()
         }
     }
 
@@ -702,6 +721,28 @@ async fn consider_batch(
     let persona = tokio::fs::read_to_string(persona_path(data_dir))
         .await
         .unwrap_or_else(|_| PERSONA.to_string());
+    // 计价高峰时段：要么彻底不出声，要么睡着——不再主动判定（判定是最频繁的那次
+    // 调用），只有被点名才醒一次，并且换上最省的一份上下文。
+    let stance = config.peak.stance();
+    let frugal;
+    let config = match stance {
+        peak::Stance::Asleep => {
+            debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，本轮不出声");
+            return Ok(());
+        }
+        peak::Stance::Dozing if !mentioned => {
+            debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，睡着，没被点名就不判定");
+            return Ok(());
+        }
+        peak::Stance::Dozing => {
+            info!(target: LOG_TARGET, "群 {group} 在计价高峰时段被点名，省着回一句");
+            frugal = config.frugal();
+            &frugal
+        }
+        peak::Stance::Awake => config,
+    };
+    let turns = &turns[turns.len().saturating_sub(config.context_turns.clamp(1, 80))..];
+
     // 上一次开口是被接住了还是掉在地上，只在这里结算一次。
     if config.mood_enabled
         && let Some(gap) = window::with_group(group, |state| state.take_feedback())
@@ -1047,6 +1088,24 @@ mod tests {
             config.effective_threshold(None),
             config.score_threshold - config.silence_relief_cap
         );
+    }
+
+    #[test]
+    fn peak_hours_default_to_dozing_through_deepseeks_expensive_window() {
+        let config = AmbientConfig::default();
+        assert_eq!(config.peak.mode, peak::Mode::Sleep);
+        // 醒来那一轮用最省的一份：不看图、上下文减半、少发一条、不绘图。
+        let frugal = config.frugal();
+        assert_eq!(frugal.context_images, 0);
+        assert!(frugal.context_turns < config.context_turns);
+        assert!(frugal.max_messages <= 2);
+        assert_eq!(frugal.draw_budget, 0);
+        // 其余设置原样带过去。
+        assert_eq!(frugal.reply_model, config.reply_model);
+        assert_eq!(frugal.groups, config.groups);
+        // 旧配置里没有这张表也能读出来。
+        let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
+        assert_eq!(legacy.peak.windows, config.peak.windows);
     }
 
     #[test]

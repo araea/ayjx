@@ -41,6 +41,11 @@ process.stdin.on('end', () => {{
             groups: vec![group],
             debounce_seconds: 1,
             context_images: 0,
+            // 调度回归与计价时段无关；钉死它，免得这个测试在工作日上午换一种行为。
+            peak: super::peak::PeakConfig {
+                mode: super::peak::Mode::Normal,
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()

@@ -59,12 +59,48 @@ pub fn strip_prefix<'a>(ctx: &Context, text: &'a str) -> Option<&'a str> {
         .find_map(|p| text.strip_prefix(p.as_str()).map(|rest| rest.trim_start()))
 }
 
-/// 提取文本中第一个 http(s) URL（自动排除中文粘连）
+/// 提取文本中第一个 http(s) URL。
+///
+/// 群聊里的链接几乎从不独占一行：前后粘着中文，后面跟着全角逗号、句号、引号或者
+/// 一对括号。「避雷这个中转站https://platform.deepseek.com，pro 模型路由到 flash」
+/// 里真正的地址到 `.com` 为止，之前只排除汉字的写法会把「，pro」也算进去。
+///
+/// 所以这里只认 RFC 3986 允许的那些 ASCII 字符——中文、全角标点、书名号、引号
+/// 都不在其中，自然断开；再把结尾那几个几乎不可能属于地址的半角标点剥掉，
+/// 包括与地址内部不成对的那半个括号（`(https://example.com)` 里的右括号是外面的）。
 pub fn find_url(text: &str) -> Option<String> {
     static URL_REGEX: OnceLock<Regex> = OnceLock::new();
-    let re = URL_REGEX
-        .get_or_init(|| Regex::new(r"https?://[^\s\u4e00-\u9fa5]+").expect("Invalid Regex"));
-    re.find(text).map(|m| m.as_str().to_string())
+    let re = URL_REGEX.get_or_init(|| {
+        Regex::new(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+").expect("Invalid Regex")
+    });
+    let url = trim_tail(re.find(text)?.as_str());
+    // 剥完之后至少还得剩个主机名，`见 https://。` 这种不算链接。
+    let host = url.split_once("//").map(|(_, rest)| rest).unwrap_or("");
+    (!host.is_empty()).then(|| url.to_string())
+}
+
+/// 去掉结尾那些属于句子而不属于地址的标点。
+fn trim_tail(url: &str) -> &str {
+    let mut end = url.len();
+    while end > 0 {
+        let keep = match url.as_bytes()[end - 1] {
+            b'.' | b',' | b';' | b':' | b'!' | b'?' | b'\'' | b'"' => false,
+            b')' => balanced(&url[..end], b'(', b')'),
+            b']' => balanced(&url[..end], b'[', b']'),
+            _ => true,
+        };
+        if keep {
+            break;
+        }
+        end -= 1;
+    }
+    &url[..end]
+}
+
+/// 括号在这段地址里是否配平——不配平就说明右括号是外面那对的。
+fn balanced(url: &str, open: u8, close: u8) -> bool {
+    let count = |target: u8| url.bytes().filter(|byte| *byte == target).count();
+    count(open) >= count(close)
 }
 
 /// 从指令参数或引用回复中提取第一张图片的 URL
@@ -197,4 +233,67 @@ fn match_command_inner(ctx: &Context, command_name: &str, strict: bool) -> Optio
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_url;
+
+    #[test]
+    fn urls_stop_where_the_sentence_resumes() {
+        // 群里最常见的形态：中文、全角标点直接粘在地址后面。
+        assert_eq!(
+            find_url(
+                "避雷这个中转站https://platform.deepseek.com，pro模型路由到flash，真的是脸都不要了"
+            )
+            .as_deref(),
+            Some("https://platform.deepseek.com")
+        );
+        assert_eq!(
+            find_url("看这个 https://example.com/a/b?x=1&y=2。然后呢").as_deref(),
+            Some("https://example.com/a/b?x=1&y=2")
+        );
+        assert_eq!(
+            find_url("链接是「https://example.com/路径」").as_deref(),
+            Some("https://example.com/")
+        );
+        // 半角句尾标点同样不属于地址。
+        assert_eq!(
+            find_url("see https://example.com, and more").as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(
+            find_url("go to https://example.com/docs.").as_deref(),
+            Some("https://example.com/docs")
+        );
+    }
+
+    #[test]
+    fn brackets_are_kept_only_when_they_belong_to_the_url() {
+        assert_eq!(
+            find_url("(https://example.com/a)").as_deref(),
+            Some("https://example.com/a")
+        );
+        // 维基百科那种地址里本来就带括号，配平的就留着。
+        assert_eq!(
+            find_url("https://en.wikipedia.org/wiki/Rust_(programming_language) 挺好").as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(programming_language)")
+        );
+    }
+
+    #[test]
+    fn only_real_links_come_back() {
+        assert_eq!(
+            find_url("先 http://127.0.0.1:6520/panel#tab 再说").as_deref(),
+            Some("http://127.0.0.1:6520/panel#tab")
+        );
+        // 百分号编码的中文路径是完整的地址，不能在编码处断开。
+        assert_eq!(
+            find_url("https://zh.wikipedia.org/wiki/%E4%B8%AD%E6%96%87 这个").as_deref(),
+            Some("https://zh.wikipedia.org/wiki/%E4%B8%AD%E6%96%87")
+        );
+        assert_eq!(find_url("没有链接的一句话"), None);
+        assert_eq!(find_url("裸域名 example.com 不算"), None);
+        assert_eq!(find_url("https://。"), None);
+    }
 }

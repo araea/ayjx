@@ -101,6 +101,7 @@ memo_budget = 3
 # 按作息与互动起伏的内部状态（data/oai/ambient/mood.json）：影响开口门槛、打字快慢
 # 和提示词里那句「你现在的状态」。关掉则任何时刻都一个样。
 mood_enabled = true
+
 # 默认不因沉默而强行降低门槛。
 silence_relief_per_10min = 0
 silence_relief_cap = 0
@@ -113,6 +114,15 @@ debounce_seconds = 3
 max_wait_seconds = 12
 # 打字速度（字/分钟），调低更像在慢慢敲。
 typing_cpm = 150
+
+# 跟着 DeepSeek 的计价时段作息：官方接口空闲时段半价，高峰是北京时间周一至周五
+# 9:00-12:00、14:00-18:00。搭话是这里唯一无人触发的付费功能，最值得挑时段。
+# mode：sleep 睡着（不主动判定，只有被 @ 才醒一次，且用最省的上下文）
+#       pause 高峰时段完全不出声 / normal 不理会时段
+[oai.ambient.peak]
+mode = "sleep"
+windows = ["09:00-12:00", "14:00-18:00"]
+weekdays = [1, 2, 3, 4, 5]
 
 # 全局插件控制：空列表仅允许本机控制台管理。
 [ctl]
