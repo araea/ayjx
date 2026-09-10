@@ -87,8 +87,12 @@ thinking = "low"
 # 发言时开放的辅助工具白名单；每轮额外加载 satori 聊天与绘图工具。
 # 去掉 bash 可关闭本轮命令执行工具。
 tools = "read,bash,web_search,fetch_content,get_search_content"
-# 开口意愿分门槛，调高更沉默；关注中的自然续聊另行判断，见 docs/ambient.md。
-score_threshold = 45
+# 开口意愿分门槛，调高更沉默。实际门槛还会随「最近十分钟自己说了几轮」抬高
+# （每轮 +8，最多 +24），随关注中的续聊下调 15 分，见 docs/ambient.md。
+score_threshold = 50
+speech_penalty_per_turn = 8
+speech_penalty_cap = 24
+focus_relief = 15
 # 每轮最多 3 条消息、6 个平台写动作（含消息、点赞、撤回和失败尝试）。
 max_messages = 3
 max_actions = 6

@@ -14,6 +14,10 @@ use super::attention::Focus;
 /// 好让配置调大时不必等窗口重新攒满。
 const WINDOW_CAPACITY: usize = 80;
 
+/// 「刚才说了几轮」的观察窗口。群聊的节奏以十分钟为单位看正合适：
+/// 再短看不出是不是一直在接话，再长又会把半小时前的事算到现在头上。
+pub(crate) const RECENT_SPEECH: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// 群聊上下文里的一条消息。
 #[derive(Clone, Debug)]
 pub(crate) struct Turn {
@@ -140,6 +144,7 @@ impl GroupState {
 
     pub(crate) fn rhythm(&mut self) -> String {
         let count = self.spoken_last_hour();
+        let recent = self.spoken_within(RECENT_SPEECH);
         let since = self.last_spoke.map_or("尚未发言".to_string(), |at| {
             format!("{} 秒前发过言", at.elapsed().as_secs())
         });
@@ -156,8 +161,14 @@ impl GroupState {
                         .as_secs()
                 )
             });
+        let crowding = match recent {
+            0 => "",
+            1 => "刚接过一轮，别急着再接。",
+            _ => "最近这十分钟已经由你说了好几轮，这会儿更该看着。",
+        };
         format!(
-            "你{since}，近一小时发言 {count} 轮。当前关注：{focus}。关注不等于必须回复；只接有新意且还在继续的对话。"
+            "你{since}，最近十分钟发言 {recent} 轮，近一小时 {count} 轮。{crowding}\
+             当前关注：{focus}。关注不等于必须回复；只接有新意且还在继续的对话。"
         )
     }
 
@@ -188,6 +199,15 @@ impl GroupState {
     pub(crate) fn spoken_last_hour(&mut self) -> usize {
         self.prune(Instant::now());
         self.spoken.len()
+    }
+
+    /// 最近这段时间里说了几轮。刚说过好几句的人本来就该消停一会儿。
+    pub(crate) fn spoken_within(&self, window: std::time::Duration) -> usize {
+        let now = Instant::now();
+        self.spoken
+            .iter()
+            .filter(|at| now.duration_since(**at) < window)
+            .count()
     }
 
     fn prune(&mut self, now: Instant) {
@@ -370,9 +390,16 @@ mod tests {
     fn hourly_counter_tracks_recent_speech() {
         let mut state = GroupState::default();
         assert_eq!(state.spoken_last_hour(), 0);
+        assert_eq!(state.spoken_within(RECENT_SPEECH), 0);
         state.mark_spoke();
         state.mark_spoke();
         assert_eq!(state.spoken_last_hour(), 2);
+        // 刚说的两轮当然落在最近十分钟里，节奏描述也要让模型看见这件事。
+        assert_eq!(state.spoken_within(RECENT_SPEECH), 2);
+        assert_eq!(state.spoken_within(Duration::ZERO), 0);
+        let rhythm = state.rhythm();
+        assert!(rhythm.contains("最近十分钟发言 2 轮"), "{rhythm}");
+        assert!(rhythm.contains("更该看着"), "{rhythm}");
         assert!(state.last_spoke.is_some());
     }
 }

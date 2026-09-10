@@ -30,9 +30,15 @@ pub(crate) struct Verdict {
 }
 
 impl Verdict {
+    /// 过不过线。
+    ///
+    /// 正在关注的话题被接住时门槛下调 `focus_relief` 分，而不是直接放行——
+    /// 「聊得投机可以连着聊几轮」和「他每说一句我都接」之间只隔着这一点：
+    /// 一旦绕过门槛，热闹的群里 continuation 会一直为真，人格就再也停不下来了。
     pub(crate) fn wants_composition(
         &self,
         threshold: u8,
+        focus_relief: u8,
         focused: bool,
         silent_for: Option<std::time::Duration>,
         cooldown: std::time::Duration,
@@ -44,7 +50,12 @@ impl Verdict {
         if !continuing && silent_for.is_some_and(|elapsed| elapsed < cooldown) {
             return false;
         }
-        continuing || self.score >= threshold
+        let bar = if continuing {
+            threshold.saturating_sub(focus_relief).max(1)
+        } else {
+            threshold
+        };
+        self.score >= bar
     }
 }
 
@@ -58,7 +69,8 @@ const RUBRIC: &str = "\
 - 45-70：人格确实感兴趣的日常、一个能接的梗、想补充的观点；不必深刻，不必挑错。
 - 75-100：在回应他刚说的话、与他聊得投机、直接叫他、有他真正在意的新进展。
 群友常常不带句末标点，用碎句、缩写和表情接话；不要把这些当作内容不完整。
-不要因为很久没说话就觉得必须刷存在感；也不要因为刚刚说过话就压低自然续聊的分数。
+不要因为很久没说话就觉得必须刷存在感。刚由他说过几轮的时候更该让别人说：
+除非新消息确实是冲着他来的（叫他、回应他刚说的话），否则往低了给。
 
 「你记得的人」是真的打过的交道：熟人随口一句也可能值得接，陌生人的日常则未必。
 「你现在的状态」是此刻的精神头，困的时候本来就懒得接话，不必勉强。
@@ -256,22 +268,29 @@ mod tests {
     }
 
     #[test]
-    fn continuing_interest_bypasses_optional_cooldown_but_never_forces_a_zero_score() {
+    fn continuing_interest_lowers_the_bar_without_removing_it() {
         use std::time::Duration;
-        let verdict = parse_verdict(r#"{"score":30,"continuation":true}"#).unwrap();
-        assert!(verdict.wants_composition(45, true, Some(Duration::ZERO), Duration::from_secs(90)));
-        assert!(!verdict.wants_composition(
-            45,
-            false,
+        let verdict = parse_verdict(r#"{"score":35,"continuation":true}"#).unwrap();
+        // 关注中的续聊少 15 分，35 够得着 50-15，够不着 60-15。
+        assert!(verdict.wants_composition(50, 15, true, Some(Duration::ZERO), Duration::ZERO));
+        assert!(!verdict.wants_composition(60, 15, true, Some(Duration::ZERO), Duration::ZERO));
+        // 没在关注就是原价。
+        assert!(!verdict.wants_composition(50, 15, false, Some(Duration::ZERO), Duration::ZERO));
+        // 续聊仍然绕过可选的硬冷却。
+        assert!(verdict.wants_composition(
+            50,
+            15,
+            true,
             Some(Duration::ZERO),
             Duration::from_secs(90)
         ));
         let zero = parse_verdict(r#"{"score":0,"continuation":true}"#).unwrap();
-        assert!(!zero.wants_composition(0, true, None, Duration::ZERO));
+        assert!(!zero.wants_composition(0, 99, true, None, Duration::ZERO));
         let ordinary = parse_verdict(r#"{"score":60}"#).unwrap();
-        assert!(ordinary.wants_composition(45, false, Some(Duration::ZERO), Duration::ZERO));
+        assert!(ordinary.wants_composition(50, 15, false, Some(Duration::ZERO), Duration::ZERO));
         assert!(!ordinary.wants_composition(
-            45,
+            50,
+            15,
             false,
             Some(Duration::ZERO),
             Duration::from_secs(90)

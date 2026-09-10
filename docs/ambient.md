@@ -15,6 +15,22 @@
 人格始终有最后决定权，**包括被 @ 时也可以只输出 `[silent]`**。
 没有兴趣、话题结束、别人已经答过时可以旁观；不因很久没说话而强行刷存在感。
 默认不设硬冷却和每小时发言配额，也不随沉默时长降低门槛。
+
+门槛不是一个固定数，每轮由四笔加减算出来：
+
+| 来源 | 方向 | 默认 |
+| --- | --- | --- |
+| `score_threshold` | 底价 | 50 |
+| 「最近十分钟已经说了几轮」 | **每轮 +8，最多 +24** | `speech_penalty_per_turn` / `speech_penalty_cap` |
+| 当下的精神头与兴致 | ±10 以内 | 见[状态](#记性状态与语感) |
+| 正在关注的话题被接住（`continuation`） | −15 | `focus_relief` |
+| 可选的沉默补偿 | 负 | 默认关闭 |
+
+自己说得越多门槛越高，是防刷屏的主力：热闹的群里人格会一路收住，而不是靠某个
+固定的每小时配额一刀切。关注中的续聊是**降门槛**而不是放行——两者只隔着这一点，
+一旦绕过门槛，热闹的群里 `continuation` 会一直为真，人格就再也停不下来。
+想更安静就抬 `score_threshold` 或 `speech_penalty_per_turn`，想更黏人就调低
+后者、抬高 `focus_relief`。
 管理员仍可显式开启这些旧参数，既有配置里的非零值会保留。
 默认人设按接话反馈、是否重复以及自己是否占了太多话头决定收住，不规定聊几轮必须停。
 聊得投机可以继续；没人接、别人转向互聊或明确嫌烦时旁观，不靠追问、表情或戳一戳续场。
@@ -250,7 +266,10 @@ message_id、user_id、原始 elements）、`images`（转发内图片直链）�
 | `reply_model` | `deepseek/deepseek-flash` | pi 的发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,bash,web_search,fetch_content,get_search_content` | 原有工具白名单；本轮自动附加三个 satori 工具 |
-| `score_threshold` | `45` | 普通开口意愿门槛，调高更沉默 |
+| `score_threshold` | `50` | 普通开口意愿门槛，调高更沉默 |
+| `speech_penalty_per_turn` | `8` | 最近十分钟里每说过一轮，门槛上调的分数；0 关闭 |
+| `speech_penalty_cap` | `24` | 上面那笔加价的上限 |
+| `focus_relief` | `15` | 关注中的话题被接住时门槛下调的分数 |
 | `focus_max_seconds` | `300` | 每次关注期限上限，最多 600 秒；0 关闭 |
 | `silence_relief_per_10min` | `0` | 可选：每沉默 10 分钟降低的门槛分数 |
 | `silence_relief_cap` | `0` | 可选：门槛降低上限 |

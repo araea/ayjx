@@ -88,6 +88,12 @@ pub(crate) struct AmbientConfig {
     pub silence_relief_per_10min: u8,
     /// 沉默补偿的上限，防止久不发言之后见什么接什么。
     pub silence_relief_cap: u8,
+    /// 最近十分钟里每说过一轮，门槛上调的分数：刚接了几句的人本来就该消停一会儿。
+    pub speech_penalty_per_turn: u8,
+    /// 上面那笔加价的上限，免得说过几轮之后彻底哑掉。
+    pub speech_penalty_cap: u8,
+    /// 正在关注的话题被接住时，门槛下调的分数。取代从前的「直接放行」。
+    pub focus_relief: u8,
     /// 送进模型的最近消息条数。
     pub context_turns: usize,
     /// 随上下文送进模型的最新图片张数；置 0 关闭图片判读。
@@ -141,9 +147,12 @@ impl Default for AmbientConfig {
             reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
-            score_threshold: 45,
+            score_threshold: 50,
             silence_relief_per_10min: 0,
             silence_relief_cap: 0,
+            speech_penalty_per_turn: 8,
+            speech_penalty_cap: 24,
+            focus_relief: 15,
             context_turns: 20,
             context_images: 2,
             debounce_seconds: 3,
@@ -228,15 +237,27 @@ impl AmbientConfig {
         }
     }
 
-    /// 这一轮实际要跨过的门槛：配置的分数，加上沉默补偿与当下状态的微调。
-    fn threshold(&self, silent_for: Option<Duration>, state: mood::Snapshot) -> u8 {
+    /// 这一轮实际要跨过的门槛。
+    ///
+    /// 三笔加减：可选的沉默补偿、当下状态的微调，以及「刚才已经说了几轮」的加价。
+    /// 最后这一笔是防止刷屏的主力——门槛随自己的发言次数一路抬高，人格在热闹的
+    /// 群里会自然收住，而不是靠某个固定的每小时配额一刀切。
+    fn threshold(
+        &self,
+        silent_for: Option<Duration>,
+        state: mood::Snapshot,
+        recent_turns: usize,
+    ) -> u8 {
         let base = i16::from(self.effective_threshold(silent_for));
         let shift = if self.mood_enabled {
             state.threshold_shift()
         } else {
             0
         };
-        (base + shift).clamp(1, 100) as u8
+        let crowding = (recent_turns as i16)
+            .saturating_mul(i16::from(self.speech_penalty_per_turn))
+            .min(i16::from(self.speech_penalty_cap));
+        (base + shift + crowding).clamp(1, 100) as u8
     }
 }
 
@@ -756,11 +777,18 @@ async fn consider_batch(
     let scene = Scene::build(group, config, turns, rhythm.to_string());
     if !mentioned {
         let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
-        let threshold = config.threshold(silent_for, mood::snapshot(group));
+        let recent = window::with_group(group, |state| state.spoken_within(window::RECENT_SPEECH));
+        let threshold = config.threshold(silent_for, mood::snapshot(group), recent);
         let verdict =
             gate::judge(&api_base, &api_key, &gate_model, config, turns, &persona, &scene, None)
                 .await?;
-        if !verdict.wants_composition(threshold, focused, silent_for, config.cooldown()) {
+        if !verdict.wants_composition(
+            threshold,
+            config.focus_relief,
+            focused,
+            silent_for,
+            config.cooldown(),
+        ) {
             debug!(target: LOG_TARGET, "群 {group} 保持沉默（{}/{}，{}）", verdict.score, threshold, verdict.reason);
             return Ok(());
         }
@@ -1238,17 +1266,43 @@ mod tests {
             energy: 0.9,
             warmth: 0.9,
         };
-        assert!(config.threshold(None, tired) > config.threshold(None, lively));
+        assert!(config.threshold(None, tired, 0) > config.threshold(None, lively, 0));
         assert!(config.pace(tired).typing_cpm < config.pace(lively).typing_cpm);
         assert!(config.pace(tired).think_seconds > config.pace(lively).think_seconds);
         // 门槛仍留在有效区间里，不会被状态推到 0 或爆表。
-        assert!((1..=100).contains(&config.threshold(None, tired)));
+        assert!((1..=100).contains(&config.threshold(None, tired, 0)));
         let fixed = AmbientConfig {
             mood_enabled: false,
             ..AmbientConfig::default()
         };
-        assert_eq!(fixed.threshold(None, tired), fixed.threshold(None, lively));
+        assert_eq!(fixed.threshold(None, tired, 0), fixed.threshold(None, lively, 0));
         assert_eq!(fixed.pace(tired).typing_cpm, fixed.typing_cpm);
+    }
+
+    #[test]
+    fn the_more_it_just_said_the_higher_the_bar_gets() {
+        let config = AmbientConfig::default();
+        let calm = mood::Snapshot {
+            energy: 0.55,
+            warmth: 0.35,
+        };
+        let quiet = config.threshold(None, calm, 0);
+        assert_eq!(quiet, config.score_threshold);
+        // 说过的每一轮都在抬价，但抬到封顶就不再往上。
+        assert_eq!(
+            config.threshold(None, calm, 1),
+            quiet + config.speech_penalty_per_turn
+        );
+        assert_eq!(
+            config.threshold(None, calm, 9),
+            quiet + config.speech_penalty_cap
+        );
+        // 关掉这笔加价就回到从前的行为。
+        let loose = AmbientConfig {
+            speech_penalty_per_turn: 0,
+            ..AmbientConfig::default()
+        };
+        assert_eq!(loose.threshold(None, calm, 5), quiet);
     }
 
 }
