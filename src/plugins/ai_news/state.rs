@@ -615,6 +615,59 @@ mod tests {
         ));
     }
 
+    /// 同一份内容推到多个群，各群的卡片是独立的提取记录：
+    /// 某群提取后被标记的序号不会殃及另群的卡片，各群仍可各自提取。
+    #[test]
+    fn extraction_records_are_isolated_per_target() {
+        let mut state = State {
+            extractions: vec![
+                ExtractionRecord {
+                    target_id: 111,
+                    message_id: "m_a".into(),
+                    created_ts: 100,
+                    rendered: Rendered {
+                        header: "群A".into(),
+                        entries: vec!["1. a".into(), "2. b".into()],
+                        footer: "AIHOT".into(),
+                        links: Vec::new(),
+                    },
+                    extracted: Vec::new(),
+                },
+                ExtractionRecord {
+                    target_id: 222,
+                    message_id: "m_b".into(),
+                    created_ts: 100,
+                    rendered: Rendered {
+                        header: "群B".into(),
+                        entries: vec!["1. x".into(), "2. y".into()],
+                        footer: "AIHOT".into(),
+                        links: Vec::new(),
+                    },
+                    extracted: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // 群 A 提取第 2 条
+        let wanted_a: BTreeSet<usize> = [1usize].into_iter().collect();
+        assert!(matches!(
+            apply_extraction(&mut state, 111, "m_a", &wanted_a, 0),
+            ExtractionOutcome::Ready(_, _)
+        ));
+        // A 已标记，B 不受影响
+        assert_eq!(state.extractions[0].extracted, vec![1]);
+        assert!(state.extractions[1].extracted.is_empty());
+
+        // 群 B 仍可提取自己的第 2 条（序号互不干扰）
+        let wanted_b: BTreeSet<usize> = [1usize].into_iter().collect();
+        assert!(matches!(
+            apply_extraction(&mut state, 222, "m_b", &wanted_b, 0),
+            ExtractionOutcome::Ready(_, _)
+        ));
+        assert_eq!(state.extractions[1].extracted, vec![1]);
+    }
+
     #[test]
     fn realtime_and_brief_histories_are_independent() {
         let mut group = GroupState::default();
