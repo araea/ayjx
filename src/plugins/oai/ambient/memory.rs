@@ -490,6 +490,8 @@ mod tests {
         assert_eq!(ago(400 * 86_400), "很久以前");
     }
 
+    // 这把锁只是把动全局记忆的几个测试串起来，跨 await 持有正是它的用途。
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn attaching_a_directory_makes_the_memory_outlive_the_process() {
         let _guard = exclusive();
