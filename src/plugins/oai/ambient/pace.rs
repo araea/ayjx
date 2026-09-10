@@ -186,7 +186,13 @@ impl Pace {
     }
 
     /// 两条消息之间的换气。
+    ///
+    /// 偶尔会长出一截：手机上打着字被别的事岔开一下，是群聊里最常见的停顿，
+    /// 而每条都精确地隔一秒才是机器的样子。
     pub(crate) fn gap(&self) -> Duration {
+        if rand::random::<f32>() < 0.15 {
+            return seconds(jitter(3.2, 0.6));
+        }
         seconds(jitter(0.9, 0.5))
     }
 
@@ -280,6 +286,23 @@ mod tests {
     fn waits_are_capped() {
         let items = say("[wait:9999]\n算了");
         assert!(items[0].wait <= MAX_WAIT_SECONDS);
+    }
+
+    #[test]
+    fn breaths_between_messages_are_usually_short_but_sometimes_wander() {
+        let pace = Pace {
+            typing_cpm: 150,
+            voice_cpm: 420,
+            think_seconds: 3.0,
+        };
+        let gaps: Vec<Duration> = (0..400).map(|_| pace.gap()).collect();
+        assert!(gaps.iter().all(|gap| *gap <= Duration::from_secs(6)));
+        // 大多数是一次换气，少数是被岔开的那种停顿。
+        let long = gaps
+            .iter()
+            .filter(|gap| **gap > Duration::from_secs(2))
+            .count();
+        assert!((5..160).contains(&long), "{long}");
     }
 
     #[test]

@@ -46,6 +46,10 @@ pub(crate) struct GroupState {
     pub focus: Option<Focus>,
     /// 最近一次发言时刻。
     pub last_spoke: Option<Instant>,
+    /// 自己上次开口的墙上时刻（Unix 秒），等着看多久有人接。
+    spoke_at: Option<i64>,
+    /// 一次性的反馈：上次开口之后隔了多少秒才有人再说话。
+    feedback: Option<i64>,
     /// 近期发言时刻，用于每小时上限。
     spoken: VecDeque<Instant>,
 }
@@ -87,6 +91,10 @@ impl GroupState {
         if incoming {
             self.seq += 1;
             self.unread_mention |= turn.mentions_me;
+            // 说完之后第一个开口的人，决定这次发言是被接住了还是掉地上了。
+            if let Some(spoke_at) = self.spoke_at.take() {
+                self.feedback = Some((turn.at - spoke_at).max(0));
+            }
         }
         self.push(turn);
         if !incoming || self.running {
@@ -161,10 +169,17 @@ impl GroupState {
                 .any(|turn| turn.from_me && turn.message_id == id)
     }
 
+    /// 取走「上次开口多久才有人接」，只取一次。
+    pub(crate) fn take_feedback(&mut self) -> Option<i64> {
+        self.feedback.take()
+    }
+
     /// 记一次发言，同时淘汰一小时之前的记录。
     pub(crate) fn mark_spoke(&mut self) {
         let now = Instant::now();
         self.last_spoke = Some(now);
+        self.spoke_at = Some(chrono::Local::now().timestamp());
+        self.feedback = None;
         self.spoken.push_back(now);
         self.prune(now);
     }
@@ -330,6 +345,25 @@ mod tests {
         assert!(t.elements.0.is_empty());
         assert!(!state.is_own_message(1));
         assert_eq!(t.message_id, 0);
+    }
+
+    #[test]
+    fn how_long_the_room_took_to_answer_is_reported_exactly_once() {
+        let mut state = GroupState::default();
+        assert_eq!(state.take_feedback(), None);
+        state.mark_spoke();
+        let spoke_at = state.spoke_at.unwrap();
+        let mut reply = turn("哦", false);
+        reply.message_id = 9;
+        reply.at = spoke_at + 12;
+        state.receive(reply);
+        assert_eq!(state.take_feedback(), Some(12));
+        // 反馈只算一次，后面的消息不再反复给同一次发言打分。
+        let mut later = turn("再说一句", false);
+        later.message_id = 10;
+        later.at = spoke_at + 600;
+        state.receive(later);
+        assert_eq!(state.take_feedback(), None);
     }
 
     #[test]

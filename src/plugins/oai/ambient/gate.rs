@@ -5,8 +5,8 @@
 //! 分数过线才轮到人格模型去想说什么。判定与措辞分开，既省钱也让「沉默」这件事
 //! 有一个可以被调参、被复盘的量。
 
-use super::AmbientConfig;
 use super::vision;
+use super::{AmbientConfig, Scene};
 use super::window::{Turn, transcript};
 use async_openai::{
     Client,
@@ -60,6 +60,9 @@ const RUBRIC: &str = "\
 群友常常不带句末标点，用碎句、缩写和表情接话；不要把这些当作内容不完整。
 不要因为很久没说话就觉得必须刷存在感；也不要因为刚刚说过话就压低自然续聊的分数。
 
+「你记得的人」是真的打过的交道：熟人随口一句也可能值得接，陌生人的日常则未必。
+「你现在的状态」是此刻的精神头，困的时候本来就懒得接话，不必勉强。
+
 continuation 仅在当前关注仍有效、且最新消息确实延续那个话题或互动时为 true。
 同一个人聊了无关话题不算延续；新群友接上正在聊的话题则算。别人不接或话题结束就 false。
 即使 continuation 为 true，没什么可说仍可以给 0；这个判断只让人格看看，绝不强迫发言。
@@ -75,7 +78,7 @@ pub(crate) async fn judge(
     config: &AmbientConfig,
     turns: &[Turn],
     persona: &str,
-    rhythm: &str,
+    scene: &Scene,
     draft: Option<&str>,
 ) -> anyhow::Result<Verdict> {
     let client = Client::with_config(
@@ -109,9 +112,8 @@ pub(crate) async fn judge(
     let mut parts = vec![
         ChatCompletionRequestMessageContentPartTextArgs::default()
             .text(format!(
-                "{}\n当前参与状态：{}\n最近的群聊：\n{}",
-                super::now_context(),
-                rhythm,
+                "{}最近的群聊：\n{}",
+                scene.brief(),
                 transcript(turns)
             ))
             .build()?

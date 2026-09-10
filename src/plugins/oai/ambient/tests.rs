@@ -122,6 +122,19 @@ async fn live_persona_and_gate_dialogue() {
         reply_timeout_seconds: 120,
         ..Default::default()
     };
+    // 判定模型写成「供应商/模型」时，线上由 [oai.providers] 取接口；这里没有 Context，
+    // 就用环境变量补上那一段，否则带前缀的模型名会被原样发给 oai 的默认接口。
+    let (provider, gate_model) = super::super::utils::split_provider(&config.gate_model);
+    let gate_base = std::env::var("AYJX_AMBIENT_LIVE_GATE_BASE")
+        .unwrap_or_else(|_| credentials.api_base.clone());
+    let gate_key = std::env::var("AYJX_AMBIENT_LIVE_GATE_KEY")
+        .unwrap_or_else(|_| credentials.api_key.clone());
+    assert!(
+        provider.is_none() || std::env::var("AYJX_AMBIENT_LIVE_GATE_BASE").is_ok(),
+        "判定模型 {} 带供应商前缀，请设置 AYJX_AMBIENT_LIVE_GATE_BASE / _KEY",
+        config.gate_model
+    );
+    let group = -8_000_002;
     let mut turns = Vec::new();
     let mut state = window::GroupState::default();
     for (index, text) in [
@@ -144,15 +157,15 @@ async fn live_persona_and_gate_dialogue() {
             from_me: false,
             at: chrono::Local::now().timestamp(),
         });
-        let rhythm = state.rhythm();
+        let scene = Scene::build(group, &config, &turns, state.rhythm());
         let verdict = gate::judge(
-            &credentials.api_base,
-            &credentials.api_key,
-            &config.gate_model,
+            &gate_base,
+            &gate_key,
+            &gate_model,
             &config,
             &turns,
             PERSONA,
-            &rhythm,
+            &scene,
             None,
         )
         .await
@@ -168,7 +181,7 @@ async fn live_persona_and_gate_dialogue() {
             &turns,
             &[],
             false,
-            &rhythm,
+            &scene,
             None,
         )
         .await
@@ -227,13 +240,13 @@ async fn live_persona_and_gate_dialogue() {
             at: chrono::Local::now().timestamp(),
         }];
         let verdict = gate::judge(
-            &credentials.api_base,
-            &credentials.api_key,
-            &config.gate_model,
+            &gate_base,
+            &gate_key,
+            &gate_model,
             &config,
             &latest,
             PERSONA,
-            &state.rhythm(),
+            &Scene::build(group, &config, &latest, state.rhythm()),
             Some(draft),
         )
         .await

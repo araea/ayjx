@@ -94,6 +94,13 @@ max_messages = 3
 max_actions = 6
 # 每轮最多生成几张图（走 oai 的 GPT Image 2.5）；0 关闭绘图。
 draw_budget = 2
+# 熟人记忆：落盘记住群里的人与旧事（data/oai/ambient/memory/），并开放 satori_memo。
+memory_enabled = true
+# 每轮最多写几条记忆；0 关闭 satori_memo。
+memo_budget = 3
+# 按作息与互动起伏的内部状态（data/oai/ambient/mood.json）：影响开口门槛、打字快慢
+# 和提示词里那句「你现在的状态」。关掉则任何时刻都一个样。
+mood_enabled = true
 # 默认不因沉默而强行降低门槛。
 silence_relief_per_10min = 0
 silence_relief_cap = 0

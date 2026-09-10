@@ -2,6 +2,7 @@
 use super::{
     AmbientConfig,
     actions::{self, Action, Part},
+    memory, mood,
     window::{self, Turn},
 };
 use crate::{
@@ -77,6 +78,7 @@ struct Session {
     writes: usize,
     messages: usize,
     draws: usize,
+    memos: usize,
     spoke: bool,
     started: Instant,
     receipts: HashMap<String, Value>,
@@ -115,6 +117,7 @@ pub(crate) async fn start(
         writes: 0,
         messages: 0,
         draws: 0,
+        memos: 0,
         spoke: false,
         started: Instant::now(),
         receipts: HashMap::new(),
@@ -206,6 +209,7 @@ impl Session {
                     )
                 });
                 self.seq.store(seq, Ordering::SeqCst);
+                let scene = super::Scene::build(self.group, &self.config, &turns, rhythm.clone());
                 let turns: Vec<Value> = turns.iter().map(|t| json!({
                     "message_id":t.message_id.to_string(),"user_id":t.user_id.to_string(),"name":t.name,
                     "text":t.text,"from_me":t.from_me,"time":t.at,"elements":t.elements,
@@ -223,7 +227,7 @@ impl Session {
                 }
                 Ok(
                     json!({"revision":seq,"group_id":self.group.to_string(),"self_id":self.ctx.bot.login_user.id,
-                    "now":super::now_context(),
+                    "now":super::now_context(),"register":scene.register,"state":scene.state,"remember":scene.memory,
                     "capabilities":self.capabilities,"rhythm":rhythm,"messages":turns,"media":media,
                     "writes_remaining":self.config.max_actions.clamp(1,12).saturating_sub(self.writes),
                     "messages_remaining":self.config.max_messages.clamp(1,5).saturating_sub(self.messages),
@@ -352,6 +356,60 @@ impl Session {
                     "caption": generated.caption,
                     "model": generated.model,
                     "draws_remaining": budget.saturating_sub(self.draws),
+                }))
+            }
+            "memo" => {
+                ensure!(self.enabled(), "该群的搭话功能已停用");
+                ensure!(self.config.memory_enabled, "本群已关闭记忆");
+                let budget = self.config.memo_budget.clamp(0, 8);
+                ensure!(budget > 0, "本群已关闭记忆写入（[oai.ambient] memo_budget = 0）");
+                ensure!(self.memos < budget, "本轮记忆额度已用完");
+                self.memos += 1;
+                let turns = self.turns();
+                let now = chrono::Local::now().timestamp();
+                let mut done = Vec::new();
+                if let Some(people) = request["people"].as_array() {
+                    for entry in people.iter().take(8) {
+                        let raw = entry["user_id"].as_str().unwrap_or("");
+                        let id = actions::user(&turns, raw)?;
+                        let note = entry["note"].as_str().unwrap_or("");
+                        let name = turns
+                            .iter()
+                            .find(|turn| turn.user_id == id)
+                            .map(|turn| turn.name.clone())
+                            .unwrap_or_default();
+                        memory::edit(self.group, |memory| {
+                            memory.see(id, &name, now);
+                            memory.remember(id, note)
+                        })?;
+                        done.push(format!("记住 {id}"));
+                    }
+                }
+                if let Some(notes) = request["notes"].as_array() {
+                    for note in notes.iter().take(8) {
+                        let text = note.as_str().unwrap_or("");
+                        memory::edit(self.group, |memory| memory.jot(text, now))?;
+                        done.push("记下一件事".to_string());
+                    }
+                }
+                for entry in request["forget_people"].as_array().into_iter().flatten() {
+                    let id = actions::id(entry.as_str().unwrap_or(""))?;
+                    if memory::edit(self.group, |memory| memory.forget(id)) {
+                        done.push(format!("忘掉 {id}"));
+                    }
+                }
+                for entry in request["forget_notes"].as_array().into_iter().flatten() {
+                    let text = entry.as_str().unwrap_or("");
+                    if memory::edit(self.group, |memory| memory.drop_note(text)) {
+                        done.push("忘掉一件事".to_string());
+                    }
+                }
+                ensure!(!done.is_empty(), "没有可写入的记忆内容");
+                memory::flush(self.group).await;
+                Ok(json!({
+                    "applied": done,
+                    "summary": memory::with_group(self.group, |memory| memory.summary()),
+                    "memos_remaining": budget.saturating_sub(self.memos),
                 }))
             }
             "action" => {
@@ -582,7 +640,7 @@ impl Session {
     }
     async fn send(&mut self, message: Message) -> Result<Value> {
         let spoken = super::plain_text(&message);
-        let pace = self.config.pace();
+        let pace = self.config.pace(mood::snapshot(self.group));
         let typing = pace.typing_delay(spoken.chars().count());
         let delay = if self.spoke {
             pace.gap() + typing
@@ -613,6 +671,25 @@ impl Session {
     fn record(&mut self, text: String, message_id: i64, elements: Message, success: bool) {
         let me = self.ctx.bot.login_user.id.parse().unwrap_or(0);
         info!(target: "Plugin/OAI", "群 {} 动作：{}", self.group, text);
+        if success && !self.spoke {
+            // 锁不可重入：记忆与状态都在 window 的锁外面更新。
+            let target = window::with_group(self.group, |s| {
+                s.recent(20)
+                    .iter()
+                    .rev()
+                    .find(|turn| !turn.from_me)
+                    .map(|turn| turn.user_id)
+            });
+            if self.config.mood_enabled {
+                mood::nudge(|mood, now| mood.spoke(self.group, now));
+            }
+            if self.config.memory_enabled
+                && let Some(id) = target
+            {
+                let now = chrono::Local::now().timestamp();
+                memory::edit(self.group, |memory| memory.exchange(id, now));
+            }
+        }
         window::with_group(self.group, |s| {
             if success && !self.spoke {
                 s.mark_spoke();
@@ -1161,7 +1238,7 @@ mod tests {
             &turns,
             &[],
             true,
-            "群友刚刚在与你正常交流",
+            &super::super::Scene::build(group, &config, &turns, "群友刚刚在与你正常交流".into()),
             Some((&ctx, &writer, group, &mut seq)),
         )
         .await

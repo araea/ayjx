@@ -5,10 +5,13 @@
 //! 换掉 pi 默认的编码助手系统提示词、限定工具、并挂上描述 Satori 消息元素的
 //! skill——让「能说什么」随 skill 生长，而不是随这个文件生长。
 
-use super::AmbientConfig;
 use super::window::{Turn, transcript};
+use super::{AmbientConfig, Scene};
 use crate::plugins::oai::pi_agent::{self, PiRun};
 use std::path::Path;
+
+/// 有记忆工具时追加的一段守则。
+const MEMO_RULES: &str = "\n你还有 satori_memo：把以后还想记得的事写下来——对某个人的一句印象、群里刚起的梗、谁在忙什么。只记会改变你以后怎么对待这个人或这个话题的那一句，一句话就够，不是聊天记录备份，也不记流水账。记岔了可以改写或删掉。它不占发送额度，也不必告诉群友你记了什么。";
 
 /// 发言时的行为守则。人设负责「他是谁」，这里只负责「群聊怎么说话」。
 fn house_rules(max_messages: usize, focus_max_seconds: u64) -> String {
@@ -33,6 +36,14 @@ fn house_rules(max_messages: usize, focus_max_seconds: u64) -> String {
   无感、懒得接、对方已得到答案、玩笑已结束时只输出 [silent]，不要为了证明在线而说话。
 - 与某个人或话题聊得投机时可以接连参与几轮，不必刻意装冷淡，也不垄断对话。
   没人接话、对方敷衍或转移话题时自然停下，不追着人问。
+
+只有你看得到的几样东西：
+- 「本群此刻」是刚统计出来的本群说话方式：长度、标点、节奏、反复出现的词。往那个劲儿上靠，
+  别在一屋子七八字的碎句里端出完整段落，也别硬凑他们的词。
+- 「你现在的状态」是此刻的精神头和兴致，只体现在你愿意说多少、说得多快，不要演出来，
+  更不要把它当台词念（不说「我今天有点困」这种交代）。
+- 「你记得的人」「这个群的旧事」是真的打过的交道，可以自然地用上；但只有这里写着的才算数，
+  没写的就是不记得，不要顺口编一段共同经历。想不起来就当普通群友对待。
 
 想继续关注时：
 - 可在正文前独占一行写 [focus:{{\"users\":[QQ号],\"topic\":\"当前具体话题\",\"seconds\":180}}]。
@@ -69,7 +80,7 @@ pub(crate) async fn compose(
     turns: &[Turn],
     images: &[String],
     mentioned: bool,
-    rhythm: &str,
+    scene: &Scene,
     live: Option<(
         &crate::event::Context,
         &crate::adapters::satori::LockedWriter,
@@ -89,8 +100,16 @@ pub(crate) async fn compose(
     } else {
         vec![]
     };
+    let memo = bridge.is_some() && config.memory_enabled && config.memo_budget > 0;
     let tools = if bridge.is_some() {
-        format!("{},satori_context,satori_read,satori_action,satori_draw", config.tools)
+        let mut tools = format!(
+            "{},satori_context,satori_read,satori_action,satori_draw",
+            config.tools
+        );
+        if memo {
+            tools.push_str(",satori_memo");
+        }
+        tools
     } else {
         config.tools.clone()
     };
@@ -100,18 +119,18 @@ pub(crate) async fn compose(
         ""
     };
     let system = format!(
-        "{}\n\n---\n\n{}{}",
+        "{}\n\n---\n\n{}{}{}",
         persona.trim(),
         house_rules(
             config.max_messages.clamp(1, 5),
             config.focus_max_seconds.min(600)
         ),
-        tool_rules
+        tool_rules,
+        if memo { MEMO_RULES } else { "" }
     );
     let prompt = format!(
-        "{}\n当前参与状态：{}\n最近的群聊记录：\n{}\n{}",
-        super::now_context(),
-        rhythm,
+        "{}最近的群聊记录：\n{}\n{}",
+        scene.brief(),
         transcript(turns),
         closing(mentioned)
     );

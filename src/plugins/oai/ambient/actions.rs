@@ -138,6 +138,19 @@ impl Action {
                     chars <= 4000,
                     "一条消息正文最多 4000 字；长材料请整理为文件或合并转发"
                 );
+                // 复读不占额度也不该发出去：这里拦下来，模型还有机会换一句。
+                let body: String = parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        Part::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                ensure!(
+                    !super::tone::echoes(&body, turns),
+                    "这句话你刚说过，换一句或者干脆别说"
+                );
             }
             Self::Poke { user_id } => {
                 user(turns, user_id)?;
@@ -239,6 +252,32 @@ mod tests {
             .is_err()
         );
     }
+    #[test]
+    fn saying_the_same_thing_twice_is_rejected_before_it_costs_a_write() {
+        let mut turns = turns();
+        turns.push(Turn {
+            user_id: 10_000,
+            name: "我".into(),
+            text: "那你重启一下路由器试试 不行再说".into(),
+            images: vec![],
+            elements: Message::new(),
+            message_id: 124,
+            from_me: true,
+            mentions_me: false,
+            at: 0,
+        });
+        let echo: Action = serde_json::from_str(
+            r#"{"action":"send","parts":[{"type":"text","text":"那你重启一下路由器试试，不行再说"}]}"#,
+        )
+        .unwrap();
+        assert!(echo.validate(&turns).is_err());
+        let fresh: Action = serde_json::from_str(
+            r#"{"action":"send","parts":[{"type":"text","text":"那是驱动的问题 跟路由器无关"}]}"#,
+        )
+        .unwrap();
+        fresh.validate(&turns).unwrap();
+    }
+
     #[test]
     fn ids_keep_qq_precision_and_stickers_keep_resources() {
         assert_eq!(id("7837409278651234567").unwrap(), 7837409278651234567);

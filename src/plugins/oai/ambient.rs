@@ -30,8 +30,11 @@ mod gate;
 #[cfg(test)]
 #[path = "ambient/tests.rs"]
 mod integration_tests;
+mod memory;
+mod mood;
 mod pace;
 mod speak;
+mod tone;
 mod vision;
 mod window;
 
@@ -100,6 +103,12 @@ pub(crate) struct AmbientConfig {
     pub hourly_limit: usize,
     /// 被 @ 或被引用时跳过判定直接开口。
     pub reply_on_mention: bool,
+    /// 记住群里的人和旧事（落盘，跨重启）。关掉就只剩眼前这几十条消息。
+    pub memory_enabled: bool,
+    /// 按作息与互动起伏的内部状态：影响开口门槛、打字快慢和提示词里的一句状态。
+    pub mood_enabled: bool,
+    /// 每轮最多写几条记忆；0 关闭 `satori_memo`。
+    pub memo_budget: usize,
     /// 一次发言最多拆成几条消息。
     pub max_messages: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
@@ -139,6 +148,9 @@ impl Default for AmbientConfig {
             focus_max_seconds: 300,
             hourly_limit: 0,
             reply_on_mention: true,
+            memory_enabled: true,
+            mood_enabled: true,
+            memo_budget: 3,
             max_messages: 3,
             max_actions: 6,
             draw_budget: 2,
@@ -183,12 +195,79 @@ impl AmbientConfig {
         self.score_threshold.saturating_sub(relief as u8)
     }
 
-    fn pace(&self) -> pace::Pace {
+    /// 发言节奏。精神头好就敲得快、想得短，困了反过来。
+    fn pace(&self, state: mood::Snapshot) -> pace::Pace {
+        let (typing, think) = if self.mood_enabled {
+            (state.typing_scale(), state.think_scale())
+        } else {
+            (1.0, 1.0)
+        };
         pace::Pace {
-            typing_cpm: self.typing_cpm,
-            voice_cpm: self.voice_cpm,
-            think_seconds: self.think_seconds,
+            typing_cpm: ((self.typing_cpm as f32) * typing).round().max(20.0) as u32,
+            voice_cpm: ((self.voice_cpm as f32) * typing).round().max(20.0) as u32,
+            think_seconds: self.think_seconds * think,
         }
+    }
+
+    /// 这一轮实际要跨过的门槛：配置的分数，加上沉默补偿与当下状态的微调。
+    fn threshold(&self, silent_for: Option<Duration>, state: mood::Snapshot) -> u8 {
+        let base = i16::from(self.effective_threshold(silent_for));
+        let shift = if self.mood_enabled {
+            state.threshold_shift()
+        } else {
+            0
+        };
+        (base + shift).clamp(1, 100) as u8
+    }
+}
+
+/// 一轮判定与发言共用的「现场」。
+///
+/// 全部由本地数据算出，不额外调用模型：群里此刻的语感、自己的精神头、参与节奏、
+/// 以及记得的人和旧事。小模型对这种具体锚点的反应，比再加十条抽象规则好得多。
+pub(crate) struct Scene {
+    /// 自己的发言节奏与当前关注。
+    pub rhythm: String,
+    /// 本群此刻的说话方式。
+    pub register: String,
+    /// 精神头与兴致；关闭状态时为空。
+    pub state: String,
+    /// 记得的人与旧事；关闭记忆时为空。
+    pub memory: String,
+}
+
+impl Scene {
+    fn build(group: i64, config: &AmbientConfig, turns: &[Turn], rhythm: String) -> Self {
+        Self {
+            rhythm,
+            register: tone::register(turns),
+            state: if config.mood_enabled {
+                mood::snapshot(group).describe()
+            } else {
+                String::new()
+            },
+            memory: if config.memory_enabled {
+                memory::with_group(group, |memory| {
+                    memory.brief(turns, chrono::Local::now().timestamp())
+                })
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    /// 现场 → 注入提示词的一段话。
+    pub(crate) fn brief(&self) -> String {
+        let mut out = format!("{}\n{}\n", now_context(), self.register);
+        if !self.state.is_empty() {
+            out.push_str(&self.state);
+            out.push('\n');
+        }
+        out.push_str("当前参与状态：");
+        out.push_str(&self.rhythm);
+        out.push('\n');
+        out.push_str(&self.memory);
+        out
     }
 }
 
@@ -248,6 +327,9 @@ pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
     )
     .await?;
     tokio::fs::create_dir_all(base_dir(oai_data).join("media")).await?;
+    tokio::fs::create_dir_all(base_dir(oai_data).join("memory")).await?;
+    memory::attach(&base_dir(oai_data));
+    mood::attach(&base_dir(oai_data));
     Ok(())
 }
 
@@ -291,6 +373,13 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     if is_command || (turn.text.is_empty() && turn.images.is_empty()) {
         return;
     }
+    if config.memory_enabled && !turn.from_me {
+        let (id, name, at) = (turn.user_id, turn.name.clone(), turn.at);
+        memory::edit(group, |memory| memory.see(id, &name, at));
+    }
+    if config.mood_enabled && turn.mentions_me && !turn.from_me {
+        mood::nudge(|mood, now| mood.engaged(group, now));
+    }
     let start = window::with_group(group, |state| state.receive(turn));
     if !start {
         return;
@@ -326,6 +415,9 @@ async fn observe_notice(
     else {
         return;
     };
+    if config.mood_enabled && turn.mentions_me {
+        mood::nudge(|mood, now| mood.engaged(group, now));
+    }
     let start = window::with_group(group, |state| {
         if let Some(id) = recalled {
             state.recall(id);
@@ -607,11 +699,22 @@ async fn consider_batch(
     let persona = tokio::fs::read_to_string(persona_path(data_dir))
         .await
         .unwrap_or_else(|_| PERSONA.to_string());
+    // 上一次开口是被接住了还是掉在地上，只在这里结算一次。
+    if config.mood_enabled
+        && let Some(gap) = window::with_group(group, |state| state.take_feedback())
+    {
+        mood::nudge(|mood, now| match gap {
+            ..=90 => mood.engaged(group, now),
+            300.. => mood.ignored(group, now),
+            _ => {}
+        });
+    }
+    let scene = Scene::build(group, config, turns, rhythm.to_string());
     if !mentioned {
         let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
-        let threshold = config.effective_threshold(silent_for);
+        let threshold = config.threshold(silent_for, mood::snapshot(group));
         let verdict =
-            gate::judge(&api_base, &api_key, &gate_model, config, turns, &persona, rhythm, None)
+            gate::judge(&api_base, &api_key, &gate_model, config, turns, &persona, &scene, None)
                 .await?;
         if !verdict.wants_composition(threshold, focused, silent_for, config.cooldown()) {
             debug!(target: LOG_TARGET, "群 {group} 保持沉默（{}/{}，{}）", verdict.score, threshold, verdict.reason);
@@ -634,10 +737,14 @@ async fn consider_batch(
     if !current(ctx, group, *seq) {
         return Ok(());
     }
-    speak_up(
-        ctx, writer, mgr, group, config, &latest, mentioned, &persona, &rhythm, seq,
+    let scene = Scene::build(group, config, &latest, rhythm);
+    let result = speak_up(
+        ctx, writer, mgr, group, config, &latest, mentioned, &persona, &scene, seq,
     )
-    .await
+    .await;
+    memory::flush(group).await;
+    mood::flush().await;
+    result
 }
 
 /// 停用配置或群聊推进后，放弃尚未发送的内容，交回 worker 读取新上下文。
@@ -660,7 +767,7 @@ async fn speak_up(
     turns: &[Turn],
     mentioned: bool,
     persona: &str,
-    rhythm: &str,
+    scene: &Scene,
     seq: &mut u64,
 ) -> anyhow::Result<()> {
     let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
@@ -680,7 +787,7 @@ async fn speak_up(
         turns,
         &images,
         mentioned,
-        rhythm,
+        scene,
         Some((ctx, writer, group, seq)),
     )
     .await?;
@@ -703,6 +810,7 @@ async fn speak_up(
             return Ok(());
         }
         let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
+        let fresh = Scene::build(group, config, &latest, rhythm);
         let verdict = gate::judge(
             &api_base,
             &api_key,
@@ -710,7 +818,7 @@ async fn speak_up(
             config,
             &latest,
             persona,
-            &rhythm,
+            &fresh,
             Some(&raw),
         )
         .await?;
@@ -729,20 +837,33 @@ async fn speak_up(
     if let Some(focus) = focus {
         window::with_group(group, |state| state.focus = focus);
     }
-    let utterances = match pace::parse(&raw, config.max_messages.clamp(1, 5)) {
+    let mut utterances = match pace::parse(&raw, config.max_messages.clamp(1, 5)) {
         pace::Speech::Silent => {
             info!(target: LOG_TARGET, "群 {group} 想了想，还是没说话");
             return Ok(());
         }
         pace::Speech::Say(items) => items,
     };
+    // 人不会把刚说过的话换个标点再说一遍；小模型在同一段上下文里被反复唤起时会。
+    let history = window::with_group(group, |state| state.recent(40));
+    utterances.retain(|utterance| {
+        let text = plain_text(&utterance.message);
+        if tone::echoes(&text, &history) {
+            info!(target: LOG_TARGET, "群 {group} 咽回一句复读：{text}");
+            return false;
+        }
+        true
+    });
+    if utterances.is_empty() {
+        return Ok(());
+    }
 
     let reply_to = turns
         .iter()
         .rev()
         .find(|turn| !turn.from_me)
         .map(|turn| turn.message_id);
-    let pace = config.pace();
+    let pace = config.pace(mood::snapshot(group));
     tokio::time::sleep(pace.think_delay(started.elapsed())).await;
 
     let me = ctx.bot.login_user.id.parse::<i64>().unwrap_or_default();
@@ -806,6 +927,17 @@ async fn speak_up(
             });
         });
         sent = true;
+    }
+    if sent {
+        if config.mood_enabled {
+            mood::nudge(|mood, now| mood.spoke(group, now));
+        }
+        if config.memory_enabled
+            && let Some(target) = turns.iter().rev().find(|turn| !turn.from_me)
+        {
+            let (id, at) = (target.user_id, chrono::Local::now().timestamp());
+            memory::edit(group, |memory| memory.exchange(id, at));
+        }
     }
     Ok(())
 }
@@ -991,6 +1123,72 @@ mod tests {
     fn spoken_messages_are_written_back_as_readable_text() {
         let message = Message::new().at(114_514).text("这步缺前提").face(178);
         assert_eq!(plain_text(&message), "@114514 这步缺前提[表情]");
+    }
+
+    #[test]
+    fn the_scene_carries_every_local_anchor_and_drops_the_ones_turned_off() {
+        let group = -9_100_001;
+        let turns: Vec<Turn> = (0..6)
+            .map(|index| Turn {
+                user_id: 42,
+                name: "老张".into(),
+                text: "这破依赖装了半天".into(),
+                images: vec![],
+                elements: Message::new(),
+                message_id: index + 1,
+                mentions_me: false,
+                from_me: false,
+                at: chrono::Local::now().timestamp() + index * 20,
+            })
+            .collect();
+        memory::edit(group, |memory| {
+            for _ in 0..10 {
+                memory.see(42, "老张", chrono::Local::now().timestamp() - 86_400);
+            }
+            memory.remember(42, "在修驾校那台破电脑").unwrap();
+        });
+        let config = AmbientConfig::default();
+        let brief = Scene::build(group, &config, &turns, "尚未发言".into()).brief();
+        assert!(brief.starts_with("现在："), "{brief}");
+        assert!(brief.contains("本群此刻："), "{brief}");
+        assert!(brief.contains("你现在的状态："), "{brief}");
+        assert!(brief.contains("当前参与状态：尚未发言"), "{brief}");
+        assert!(brief.contains("在修驾校那台破电脑"), "{brief}");
+
+        // 两个开关各自关掉自己那段，别的照旧。
+        let quiet = AmbientConfig {
+            memory_enabled: false,
+            mood_enabled: false,
+            ..AmbientConfig::default()
+        };
+        let brief = Scene::build(group, &quiet, &turns, "尚未发言".into()).brief();
+        assert!(brief.contains("本群此刻："), "{brief}");
+        assert!(!brief.contains("你现在的状态："), "{brief}");
+        assert!(!brief.contains("在修驾校那台破电脑"), "{brief}");
+    }
+
+    #[test]
+    fn state_moves_the_bar_and_the_keyboard_only_while_it_is_enabled() {
+        let config = AmbientConfig::default();
+        let tired = mood::Snapshot {
+            energy: 0.15,
+            warmth: 0.1,
+        };
+        let lively = mood::Snapshot {
+            energy: 0.9,
+            warmth: 0.9,
+        };
+        assert!(config.threshold(None, tired) > config.threshold(None, lively));
+        assert!(config.pace(tired).typing_cpm < config.pace(lively).typing_cpm);
+        assert!(config.pace(tired).think_seconds > config.pace(lively).think_seconds);
+        // 门槛仍留在有效区间里，不会被状态推到 0 或爆表。
+        assert!((1..=100).contains(&config.threshold(None, tired)));
+        let fixed = AmbientConfig {
+            mood_enabled: false,
+            ..AmbientConfig::default()
+        };
+        assert_eq!(fixed.threshold(None, tired), fixed.threshold(None, lively));
+        assert_eq!(fixed.pace(tired).typing_cpm, fixed.typing_cpm);
     }
 
     #[test]
