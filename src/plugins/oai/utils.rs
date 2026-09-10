@@ -113,6 +113,34 @@ pub fn openai_api_base(configured: &str) -> String {
     parsed.to_string().trim_end_matches('/').to_string()
 }
 
+/// 拆出模型尾部的 `:强度` 后缀。
+///
+/// 只在后缀确实是合法档位时才认它，避免把模型 id 里偶然出现的冒号（如
+/// `foo:bar`）当成思考强度。返回 `(去掉后缀的模型, 强度)`。
+pub fn split_thinking(model: &str) -> (String, Option<String>) {
+    let trimmed = model.trim();
+    match trimmed.rsplit_once(':') {
+        Some((head, tail)) => match super::types::normalize_thinking(tail) {
+            Some(level) => (head.trim().to_string(), Some(level)),
+            None => (trimmed.to_string(), None),
+        },
+        None => (trimmed.to_string(), None),
+    }
+}
+
+/// 拆出 `供应商/模型` 里的供应商前缀。
+///
+/// 只在第一个 `/` 两侧都非空时才认，裸模型 id 与以 `/` 结尾的写法都原样返回。
+pub fn split_provider(model: &str) -> (Option<String>, String) {
+    let trimmed = model.trim();
+    match trimmed.split_once('/') {
+        Some((provider, rest)) if !provider.is_empty() && !rest.is_empty() => {
+            (Some(provider.to_string()), rest.to_string())
+        }
+        _ => (None, trimmed.to_string()),
+    }
+}
+
 pub fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| match c {
@@ -614,7 +642,40 @@ pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelFilterConfig, model_vendor, openai_api_base};
+    use super::{
+        ModelFilterConfig, model_vendor, openai_api_base, split_provider, split_thinking,
+    };
+
+    #[test]
+    fn thinking_suffix_is_only_stripped_when_it_names_a_real_level() {
+        assert_eq!(
+            split_thinking("deepseek/deepseek-flash:high"),
+            ("deepseek/deepseek-flash".into(), Some("high".into()))
+        );
+        // 大小写与空白不敏感，档位归一化。
+        assert_eq!(
+            split_thinking("  deepseek-flash:LOW  "),
+            ("deepseek-flash".into(), Some("low".into()))
+        );
+        // 冒号后面不是档位时，整个串都是模型名，不能误切。
+        assert_eq!(
+            split_thinking("foo:bar"),
+            ("foo:bar".into(), None)
+        );
+        assert_eq!(split_thinking("gpt-5.6-luna"), ("gpt-5.6-luna".into(), None));
+    }
+
+    #[test]
+    fn provider_prefix_is_only_taken_from_a_complete_pair() {
+        assert_eq!(
+            split_provider("deepseek/deepseek-flash"),
+            (Some("deepseek".into()), "deepseek-flash".into())
+        );
+        // 裸 id 与残缺写法都原样保留，交给默认接口。
+        assert_eq!(split_provider("gpt-5.6-luna"), (None, "gpt-5.6-luna".into()));
+        assert_eq!(split_provider("/gpt-5.6"), (None, "/gpt-5.6".into()));
+        assert_eq!(split_provider("deepseek/"), (None, "deepseek/".into()));
+    }
 
     #[test]
     fn middle_truncation_keeps_both_ends() {

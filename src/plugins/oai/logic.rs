@@ -13,7 +13,7 @@ use async_openai::{
         ChatCompletionRequestMessageContentPartImageArgs,
         ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessageArgs,
         ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequest,
-        CreateChatCompletionRequestArgs, ImageUrlArgs,
+        CreateChatCompletionRequestArgs, ImageUrlArgs, ReasoningEffort,
     },
 };
 use regex::Regex;
@@ -225,25 +225,44 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
     }
 }
 
+/// 把房间的思考强度映射成 Chat Completions 的 `reasoning_effort`。
+///
+/// 档位沿用 Pi 的 `--thinking` 写法；`off` 是「不思考」，等价于 OpenAI 的 `none`。
+fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
+    Some(match level {
+        "off" | "none" => ReasoningEffort::None,
+        "minimal" => ReasoningEffort::Minimal,
+        "low" => ReasoningEffort::Low,
+        "medium" => ReasoningEffort::Medium,
+        "high" => ReasoningEffort::High,
+        "xhigh" => ReasoningEffort::Xhigh,
+        _ => return None,
+    })
+}
+
 /// 普通房间直接使用 Chat Completions；Pi 房间由本机 CLI 管理工具。
 fn build_chat_request(
     model: &str,
     messages: Vec<ChatCompletionRequestMessage>,
+    thinking: Option<&str>,
 ) -> anyhow::Result<CreateChatCompletionRequest> {
-    Ok(CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(messages)
-        .build()?)
+    let mut builder = CreateChatCompletionRequestArgs::default();
+    builder.model(model).messages(messages);
+    if let Some(effort) = thinking.and_then(reasoning_effort) {
+        builder.reasoning_effort(effort);
+    }
+    Ok(builder.build()?)
 }
 
 pub(crate) async fn complete(
     client: &Client<OpenAIConfig>,
     model: &str,
     messages: Vec<ChatCompletionRequestMessage>,
+    thinking: Option<&str>,
 ) -> anyhow::Result<String> {
     let response = client
         .chat()
-        .create(build_chat_request(model, messages)?)
+        .create(build_chat_request(model, messages, thinking)?)
         .await?;
     let choice = response
         .choices
@@ -310,11 +329,45 @@ async fn chat(
     };
 
     let use_pi = agent.uses_pi();
-    if !use_pi && super::mj::is_mj_model(&agent.model) {
+    let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+    // 普通房间的模型可以写成 `供应商/模型`；剥掉前缀后才是真正发给接口的 id，
+    // 前缀决定用哪个供应商的接口。Pi 房间原样交给 Pi（它自己认 provider/model）。
+    let (provider, chat_model) = if use_pi {
+        (None, agent.model.clone())
+    } else {
+        super::utils::split_provider(&agent.model)
+    };
+    // 按剥掉供应商前缀后的名字判家族，与后面的图像模型判断保持一致。
+    if !use_pi && super::mj::is_mj_model(&chat_model) {
         // MJ 房间天生是无历史任务流；引用文字也不应混入绘图提示词。
         super::mj::handle_agent(&agent, &cmd.args, imgs, ctx, writer, mgr).await;
         return;
     }
+    let (api_base, api_key) = if use_pi {
+        (api.0.clone(), api.1.clone())
+    } else {
+        match super::resolve_endpoint(
+            &oai.providers,
+            &api.0,
+            &api.1,
+            provider.as_deref(),
+        ) {
+            Some(endpoint) => endpoint,
+            None => {
+                reply_text(
+                    ctx,
+                    writer,
+                    &event,
+                    format!(
+                        "❌ 未知供应商：{}（在 [oai.providers] 里配置，或用默认接口）",
+                        provider.as_deref().unwrap_or_default()
+                    ),
+                )
+                .await;
+                return;
+            }
+        }
+    };
 
     let is_priv_ctx = cmd.private_reply;
     let uid = event.user_id().to_string();
@@ -334,7 +387,7 @@ async fn chat(
         }
     }
 
-    if !use_pi && (api.0.is_empty() || api.1.is_empty()) {
+    if !use_pi && (api_base.is_empty() || api_key.is_empty()) {
         reply_text(ctx, writer, &event, "❌ API 未配置。").await;
         return;
     }
@@ -368,15 +421,14 @@ async fn chat(
         (hist, id)
     };
 
-    let api_base = super::utils::openai_api_base(&api.0);
+    let base = super::utils::openai_api_base(&api_base);
     let client = Client::with_config(
         OpenAIConfig::new()
-            .with_api_base(api_base.clone())
-            .with_api_key(api.1.clone()),
+            .with_api_base(base.clone())
+            .with_api_key(api_key.clone()),
     )
     .with_http_client(crate::http::client());
 
-    let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
     let annotate = !event.is_manual_self();
     if annotate {
         let _ = api::set_msg_emoji_like(ctx, writer.clone(), event.message_id(), 124, true).await;
@@ -400,14 +452,17 @@ async fn chat(
     let mut outcome = {
         // 图像模型走专用绘图接口，其余房间继续走聊天补全 / Pi。
         // Pi 房间的模型是交给 Pi 解析的，不能拿它去撞中转站的绘图模型关键字。
-        let draw = !use_pi && super::images::is_images_model(&agent.model, &oai.image_models);
+        let draw = !use_pi && super::images::is_images_model(&chat_model, &oai.image_models);
         let work = async {
             if draw {
-                super::images::generate_reply(&api_base, &api.1, &agent, &hist).await
+                let mut draw_agent = agent.clone();
+                draw_agent.model = chat_model.clone();
+                super::images::generate_reply(&base, &api_key, &draw_agent, &hist).await
             } else {
                 respond(
                     &client,
                     &agent,
+                    &chat_model,
                     &hist,
                     &oai,
                     mgr.path.parent().unwrap_or(&mgr.path),
@@ -602,15 +657,19 @@ async fn chat(
     }
 }
 
-/// 房间列表和回执里显示的模型：Pi 房间前面挂上引擎，一眼能看出这间屋子谁在跑。
+/// 房间列表和回执里显示的模型：Pi 房间前面挂上引擎，一眼能看出这间屋子谁在跑；
+/// 设了思考强度就一并标出。
 fn room_model_label(agent: &Agent) -> String {
-    if !agent.uses_pi() {
-        return agent.model.clone();
-    }
-    if super::pi_agent::follows_pi_config(&agent.model) {
+    let base = if !agent.uses_pi() {
+        agent.model.clone()
+    } else if super::pi_agent::follows_pi_config(&agent.model) {
         "Pi · 本机配置".to_string()
     } else {
         format!("Pi · {}", agent.model)
+    };
+    match agent.effective_thinking() {
+        Some(level) => format!("{base} · 思考:{level}"),
+        None => base,
     }
 }
 
@@ -625,20 +684,26 @@ pub(super) struct Reply {
 }
 
 /// Pi 房间直接读取本机 Pi 配置，普通房间继续使用 OAI 配置。
+///
+/// `chat_model` 是普通房间真正要发给接口的模型 id（已剥掉 `供应商/` 前缀）；
+/// Pi 房间不看它——Pi 需要带前缀的 `provider/model`。
 async fn respond(
     client: &Client<OpenAIConfig>,
     agent: &Agent,
+    chat_model: &str,
     hist: &[ChatMessage],
     oai: &super::OaiConfig,
     data_dir: &std::path::Path,
     control: Option<&crate::plugins::ctl::bridge::Lease>,
 ) -> anyhow::Result<Reply> {
+    let thinking = agent.effective_thinking();
     if agent.uses_pi() {
         let result = super::pi_agent::conversation(
             &oai.pi_command,
             data_dir,
             &agent.system_prompt,
             &agent.model,
+            thinking.as_deref(),
             oai.pi_stall(),
             hist,
             control,
@@ -654,11 +719,11 @@ async fn respond(
     }
     let msgs = build_chat_messages(agent, hist).await;
     Ok(Reply {
-        text: complete(client, &agent.model, msgs).await?,
+        text: complete(client, chat_model, msgs, thinking.as_deref()).await?,
         sources: Vec::new(),
         trace: Vec::new(),
         trace_overflow: 0,
-        model: Some(agent.model.clone()),
+        model: Some(chat_model.to_string()),
     })
 }
 
@@ -993,12 +1058,23 @@ pub async fn execute(
             }
             let mut c = mgr.config.write().await;
             let models = c.models.clone();
-            let pi_model = super::pi_agent::parse_pi_spec(&cmd.args);
+            // 模型串支持 `:强度` 后缀；先摘掉它，剩下的再判 Pi 写法 / 供应商前缀。
+            let (spec, thinking) = super::utils::split_thinking(&cmd.args);
+            let pi_model = super::pi_agent::parse_pi_spec(&spec);
             let resolved = match &pi_model {
-                Some(model) => Some(model.clone()),
-                None => mgr.resolve_model(&cmd.args, &models),
+                Some(model) => Some((super::types::ENGINE_PI, model.clone())),
+                None => {
+                    let (provider, bare) = super::utils::split_provider(&spec);
+                    match provider {
+                        // 带供应商前缀时不做中转站模型匹配，原样保留前缀交给路由。
+                        Some(_) => Some((super::types::ENGINE_CHAT, spec.clone())),
+                        None => mgr
+                            .resolve_model(&bare, &models)
+                            .map(|model| (super::types::ENGINE_CHAT, model)),
+                    }
+                }
             };
-            let Some(model) = resolved else {
+            let Some((engine, model)) = resolved else {
                 reply_text(
                     ctx,
                     writer,
@@ -1013,14 +1089,11 @@ pub async fn execute(
                 return;
             };
             let old = room_model_label(a);
-            a.set_engine(
-                if pi_model.is_some() {
-                    super::types::ENGINE_PI
-                } else {
-                    super::types::ENGINE_CHAT
-                },
-                &model,
-            );
+            a.set_engine(engine, &model);
+            // 没写 `:强度` 就保留房间原来的档位，只换模型时不必重报思考强度。
+            if let Some(level) = thinking {
+                a.thinking = level;
+            }
             let new = room_model_label(a);
             mgr.save(&c);
             reply_text(
@@ -1567,10 +1640,15 @@ pub async fn execute(
 | 指令 | 功能 | 示例 |
 |------|------|------|
 | `智能体%模型` | 修改模型/引擎 | `助手%gpt-5.6-luna` |
+| `智能体%供应商/模型` | 指定供应商 | `助手%deepseek/deepseek-flash` |
+| `智能体%模型:强度` | 顺带设思考强度 | `助手%deepseek-flash:high` |
 | `智能体$提示词` | 修改提示词 | `助手$你是...` |
 | `智能体$` | 清空提示词 | `助手$` |
 | `智能体/$` | 查看提示词 | `助手/$` |
 | `/%` | 模型列表 | `/%` |
+
+> 普通房间的模型可写 `供应商/模型`，按 `[oai.providers]` 选接口；不带前缀走默认接口。
+> 思考强度 `off`/`minimal`/`low`/`medium`/`high`，模型后的 `:强度` 优先于房间设置。
 
 ## 对话控制
 | 指令 | 功能 |
@@ -1594,7 +1672,8 @@ pub async fn execute(
 > 房间名可以随便取，中文也行；决定引擎的是这条指令，不是名字。旧的 `pi` / `pi-*`
 > 房间已自动带上 Pi 引擎，行为不变。
 > 模型写 `provider/id`（如 `apilio/claude-opus-5`）或裸 id，由本机 Pi 解析；
-> 只写 `pi` 则沿用 Pi 自己的默认模型。`/#` 里显示为 `Pi · 模型`。
+> 可加 `:强度`（如 `deepseek/deepseek-flash:high`），或在房间上单独设思考强度；
+> 只写 `pi` 则沿用 Pi 自己的默认模型。`/#` 里显示为 `Pi · 模型 · 思考:强度`。
 > 公有、`&` 私有和 `~` 临时模式均使用 Pi，历史按原模式隔离。
 > 房间提示词追加到 Pi 系统提示词；支持图片、历史编辑/删除/清空/重新生成；
 > 长回复卡片显示实际应答模型、耗时和工具轨迹。
@@ -1766,18 +1845,20 @@ pub async fn handle_create(
     };
     let mut c = mgr.config.write().await;
     let models = c.models.clone();
-    // 建房时的模型位同样认 Pi 写法：`##研究 pi` 或 `##研究 pi/apilio/claude-opus-5`。
-    let pi_model = super::pi_agent::parse_pi_spec(model);
-    let engine = if pi_model.is_some() {
-        super::types::ENGINE_PI
-    } else {
-        super::types::ENGINE_CHAT
-    };
-    let model = match pi_model {
-        Some(model) => model,
-        None => mgr
-            .resolve_model(model, &models)
-            .unwrap_or_else(|| model.to_string()),
+    // 建房时的模型位同样认 Pi 写法与供应商前缀：
+    // `##研究 pi`、`##研究 pi/apilio/claude-opus-5`、`##研究 deepseek/deepseek-flash:high`。
+    let (spec, thinking) = super::utils::split_thinking(model);
+    let pi_model = super::pi_agent::parse_pi_spec(&spec);
+    let (engine, model) = match pi_model {
+        Some(model) => (super::types::ENGINE_PI, model),
+        None => match super::utils::split_provider(&spec) {
+            // 带供应商前缀时保留原样，交给请求路由按供应商选接口。
+            (Some(_), _) => (super::types::ENGINE_CHAT, spec.clone()),
+            (None, bare) => (
+                super::types::ENGINE_CHAT,
+                mgr.resolve_model(&bare, &models).unwrap_or(bare),
+            ),
+        },
     };
     // 不再默认填充「你是一个有帮助的助手」：没写提示词就留空，让模型用裸提示词。
     // 生图房间尤其不该被一句通用预设污染提示词；普通房间也保持中立（MJ 同样留空）。
@@ -1787,6 +1868,9 @@ pub async fn handle_create(
         // 省略模型位时只改提示词和描述，保留这个房间原来的引擎。
         if !model.is_empty() || engine == super::types::ENGINE_PI {
             a.set_engine(engine, &model);
+        }
+        if let Some(level) = &thinking {
+            a.thinking = level.clone();
         }
         a.system_prompt = prompt;
         if !desc.is_empty() {
@@ -1809,6 +1893,9 @@ pub async fn handle_create(
         };
         let mut agent = Agent::new(name, &model, &prompt, &description);
         agent.set_engine(engine, &model);
+        if let Some(level) = thinking {
+            agent.thinking = level;
+        }
         let label = room_model_label(&agent);
         c.agents.push(agent);
         mgr.save(&c);
@@ -1948,10 +2035,36 @@ mod tests {
                     .unwrap()
                     .into(),
             ],
+            None,
         )
         .unwrap();
         let serialized = serde_json::to_value(request).unwrap();
         assert!(serialized.get("tools").is_none());
+        assert!(serialized.get("reasoning_effort").is_none());
+    }
+
+    /// 房间设了思考强度时，普通房间把它转成 `reasoning_effort` 发给接口。
+    #[test]
+    fn rooms_with_a_thinking_level_send_reasoning_effort() {
+        let messages = || {
+            vec![
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content("test")
+                    .build()
+                    .unwrap()
+                    .into(),
+            ]
+        };
+        let request = build_chat_request("example-model", messages(), Some("high")).unwrap();
+        let serialized = serde_json::to_value(request).unwrap();
+        assert_eq!(serialized["reasoning_effort"], "high");
+        // `off` 映射成「不思考」。
+        let request = build_chat_request("example-model", messages(), Some("off")).unwrap();
+        let serialized = serde_json::to_value(request).unwrap();
+        assert_eq!(serialized["reasoning_effort"], "none");
+        // 非法档位不写入参数，保持请求干净。
+        let request = build_chat_request("example-model", messages(), Some("nonsense")).unwrap();
+        let serialized = serde_json::to_value(request).unwrap();
         assert!(serialized.get("reasoning_effort").is_none());
     }
 
@@ -1991,7 +2104,7 @@ mod tests {
         for name in ["pi", "PI-test"] {
             let agent = Agent::new(name, "mj", "", "");
             let history = vec![ChatMessage::new("user", "test", vec![])];
-            let result = respond(&client, &agent, &history, &config, &dir, None).await;
+            let result = respond(&client, &agent, "mj", &history, &config, &dir, None).await;
             assert!(result.err().unwrap().to_string().contains("无法启动 pi"));
         }
         std::fs::remove_dir_all(dir).unwrap();

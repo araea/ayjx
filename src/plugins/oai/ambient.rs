@@ -66,12 +66,13 @@ pub(crate) struct AmbientConfig {
     pub enabled: bool,
     /// 开启搭话的群号；空列表等于不开启。
     pub groups: Vec<i64>,
-    /// 判定模型：便宜、快、能看图。
+    /// 判定模型：便宜、快、能看图。写 `供应商/模型` 时按 `[oai.providers]` 取接口，
+    /// 默认走 DeepSeek 官方接口。
     pub gate_model: String,
     /// 判定用的浓缩人设画像（见 [`GATE_PERSONA`]）。判定只需知道对什么感兴趣、
     /// 避开什么、怎么接话，不需要完整写作人设；留空则回退用完整人设（更贵）。
     pub gate_persona: String,
-    /// 发言模型，交给 pi 的 `provider/model`。
+    /// 发言模型，交给 pi 的 `provider/model`；默认 DeepSeek 官方 `deepseek-flash`。
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
@@ -122,9 +123,9 @@ impl Default for AmbientConfig {
         Self {
             enabled: false,
             groups: Vec::new(),
-            gate_model: "gemini-3.8-flash".to_string(),
+            gate_model: "deepseek/deepseek-flash".to_string(),
             gate_persona: GATE_PERSONA.to_string(),
-            reply_model: "apilio/gemini-3.8-flash".to_string(),
+            reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
             tools: "read,bash,web_search,fetch_content,get_search_content".to_string(),
             score_threshold: 45,
@@ -556,6 +557,35 @@ async fn consider(
     }
 }
 
+/// 判定模型要用的接口、密钥与纯模型 id。
+///
+/// `gate_model` 写成 `供应商/模型` 时按 `[oai.providers]` 取该供应商的接口
+/// （DeepSeek 官方即走这里）；不带前缀则沿用 `oai` 默认接口，与从前一致。
+async fn gate_endpoint(
+    ctx: &Context,
+    mgr: &Arc<super::data::Manager>,
+    gate_model: &str,
+) -> anyhow::Result<(String, String, String)> {
+    let (provider, model) = super::utils::split_provider(gate_model);
+    let providers =
+        crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai").providers;
+    let (base, key) = {
+        let config = mgr.config.read().await;
+        (config.api_base.clone(), config.api_key.clone())
+    };
+    let Some((base, key)) = super::resolve_endpoint(&providers, &base, &key, provider.as_deref())
+    else {
+        anyhow::bail!(
+            "未知供应商：{}（在 [oai.providers] 里配置）",
+            provider.as_deref().unwrap_or_default()
+        );
+    };
+    if base.is_empty() || key.is_empty() {
+        anyhow::bail!("判定模型需要 API 配置，请先设置 oai 的接口地址与密钥");
+    }
+    Ok((base, key, model))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn consider_batch(
     ctx: &Context,
@@ -578,16 +608,11 @@ async fn consider_batch(
         .await
         .unwrap_or_else(|_| PERSONA.to_string());
     if !mentioned {
-        let (api_base, api_key) = {
-            let config = mgr.config.read().await;
-            (config.api_base.clone(), config.api_key.clone())
-        };
-        if api_base.is_empty() || api_key.is_empty() {
-            anyhow::bail!("判定模型需要 API 配置，请先设置 oai 的接口地址与密钥");
-        }
+        let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
         let threshold = config.effective_threshold(silent_for);
         let verdict =
-            gate::judge(&api_base, &api_key, config, turns, &persona, rhythm, None).await?;
+            gate::judge(&api_base, &api_key, &gate_model, config, turns, &persona, rhythm, None)
+                .await?;
         if !verdict.wants_composition(threshold, focused, silent_for, config.cooldown()) {
             debug!(target: LOG_TARGET, "群 {group} 保持沉默（{}/{}，{}）", verdict.score, threshold, verdict.reason);
             return Ok(());
@@ -677,13 +702,11 @@ async fn speak_up(
         if !current(ctx, group, latest_seq) {
             return Ok(());
         }
-        let (api_base, api_key) = {
-            let config = mgr.config.read().await;
-            (config.api_base.clone(), config.api_key.clone())
-        };
+        let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
         let verdict = gate::judge(
             &api_base,
             &api_key,
+            &gate_model,
             config,
             &latest,
             persona,
@@ -834,8 +857,8 @@ mod tests {
     #[test]
     fn default_models_match_but_explicit_overrides_are_preserved() {
         let config: AmbientConfig = toml::from_str("").unwrap();
-        assert_eq!(config.gate_model, "gemini-3.8-flash");
-        assert_eq!(config.reply_model, "apilio/gemini-3.8-flash");
+        assert_eq!(config.gate_model, "deepseek/deepseek-flash");
+        assert_eq!(config.reply_model, "deepseek/deepseek-flash");
         // 判定人设默认是浓缩画像，比完整人设便宜得多，且不会被空值覆盖。
         assert!(!config.gate_persona.trim().is_empty());
         let custom: AmbientConfig =

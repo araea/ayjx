@@ -6,6 +6,7 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use toml::Value;
 
@@ -21,6 +22,44 @@ pub mod types;
 pub mod utils;
 
 use data::MANAGER;
+
+/// 一个模型供应商的接入点与密钥。
+///
+/// 房间模型、判定模型写成 `供应商/模型` 时，就按这里的名字取接口；
+/// 不带前缀的仍走 `oai` 自己那份默认配置（历史上就是 apilio 中转站）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub(crate) struct ProviderConfig {
+    /// OpenAI 兼容接口基址，例如 `https://api.deepseek.com/v1`。
+    pub api_base: String,
+    /// 该供应商的 APIKEY。
+    pub api_key: String,
+}
+
+/// 解析一次请求要用的接口地址与密钥。
+///
+/// - `provider` 为空：用默认接口（`oai` 数据配置，保持既有房间行为不变）；
+/// - 指定名字且 `[oai.providers]` 里有：用该供应商的配置；
+/// - 指定 `apilio` 但没单独配置：回退到默认接口（它就是历史默认，避免重复填写）；
+/// - 其他未知名字：返回 `None`，宁可报错也不悄悄打到别的站点。
+pub(crate) fn resolve_endpoint(
+    providers: &HashMap<String, ProviderConfig>,
+    default_base: &str,
+    default_key: &str,
+    provider: Option<&str>,
+) -> Option<(String, String)> {
+    let name = provider.map(str::trim).filter(|name| !name.is_empty());
+    match name {
+        None => Some((default_base.to_string(), default_key.to_string())),
+        Some(name) => {
+            if let Some(found) = providers.get(name) {
+                return Some((found.api_base.clone(), found.api_key.clone()));
+            }
+            name.eq_ignore_ascii_case("apilio")
+                .then(|| (default_base.to_string(), default_key.to_string()))
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
@@ -44,6 +83,9 @@ pub(crate) struct OaiConfig {
     /// 走 `/v1/images/generations` 的图像模型关键字（不区分大小写、子串匹配）。
     /// 命中的房间把提示词交给专用图像接口，其余房间仍走聊天补全。
     pub(crate) image_models: Vec<String>,
+    /// 可选供应商表：模型写 `供应商/模型` 时按名字取这里的接口与密钥。
+    /// 不配也不影响既有房间——不带前缀的仍走 `oai` 默认接口。
+    pub(crate) providers: HashMap<String, ProviderConfig>,
     /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
     ambient: ambient::AmbientConfig,
 }
@@ -62,6 +104,7 @@ impl Default for OaiConfig {
                 .iter()
                 .map(|keyword| (*keyword).to_string())
                 .collect(),
+            providers: HashMap::new(),
             ambient: ambient::AmbientConfig::default(),
         }
     }
@@ -248,12 +291,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn providers_route_by_prefix_and_apilio_tracks_the_default_endpoint() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "deepseek".to_string(),
+            ProviderConfig {
+                api_base: "https://api.deepseek.com/v1".into(),
+                api_key: "sk-deepseek".into(),
+            },
+        );
+        let resolve = |name: Option<&str>| {
+            resolve_endpoint(&providers, "https://api.apilio.ai/v1", "sk-apilio", name)
+        };
+        // 不带前缀：默认接口，既有房间行为不变。
+        assert_eq!(
+            resolve(None),
+            Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into()))
+        );
+        // 新供应商按名字取自己的接口。
+        assert_eq!(
+            resolve(Some("deepseek")),
+            Some(("https://api.deepseek.com/v1".into(), "sk-deepseek".into()))
+        );
+        // apilio 不必重复配置，始终回退到默认接口，避免与 `oai <url> <key>` 脱节。
+        assert_eq!(
+            resolve(Some("apilio")),
+            Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into()))
+        );
+        // 未知供应商宁可报错，也不悄悄打到别的站点。
+        assert_eq!(resolve(Some("unknown")), None);
+        assert_eq!(resolve(Some("  ")), Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into())));
+    }
+
+    #[test]
     fn pi_command_defaults_and_legacy_config_remain_loadable() {
         let config: OaiConfig =
             toml::from_str("harness_rooms = ['pi']\nshell_timeout_seconds = 300").unwrap();
         assert_eq!(config.pi_command, "pi");
         let config: OaiConfig = toml::from_str("pi_command = '/custom/pi'").unwrap();
         assert_eq!(config.pi_command, "/custom/pi");
+    }
+
+    #[test]
+    fn provider_table_is_optional_and_parses_when_present() {
+        // 旧配置没有 providers 也能照常加载。
+        let legacy: OaiConfig = toml::from_str("pi_command = 'pi'").unwrap();
+        assert!(legacy.providers.is_empty());
+        let config: OaiConfig = toml::from_str(
+            "[providers.deepseek]\napi_base = 'https://api.deepseek.com/v1'\napi_key = 'sk-x'",
+        )
+        .unwrap();
+        assert_eq!(
+            config.providers.get("deepseek").map(|p| p.api_base.as_str()),
+            Some("https://api.deepseek.com/v1")
+        );
     }
 }
 

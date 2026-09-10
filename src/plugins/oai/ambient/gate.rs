@@ -71,6 +71,7 @@ continuation 仅在当前关注仍有效、且最新消息确实延续那个话�
 pub(crate) async fn judge(
     api_base: &str,
     api_key: &str,
+    model: &str,
     config: &AmbientConfig,
     turns: &[Turn],
     persona: &str,
@@ -156,7 +157,7 @@ pub(crate) async fn judge(
         attempt += 1;
         let result = tokio::time::timeout(
             config.gate_timeout(),
-            super::super::logic::complete(&client, &config.gate_model, messages.clone()),
+            super::super::logic::complete(&client, model, messages.clone(), None),
         )
         .await
         .map_err(|_| anyhow::anyhow!("判定超时（{} 秒）", config.gate_timeout().as_secs()))

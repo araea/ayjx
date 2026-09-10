@@ -36,6 +36,17 @@ show_trace_footer = true
 # 其余房间仍走聊天补全。站点上新图像模型时改这里即可。
 image_models = ["gpt-image-2.5"]
 
+# 供应商表：房间模型或判定模型写 `供应商/模型` 时按名字取这里的接口与密钥，
+# 例如 `##助手 deepseek/deepseek-flash`。不带前缀的仍走 oai 自己的默认接口；
+# 名为 apilio 的供应商即使不在这里配置，也始终回退到默认接口，无需重复填写。
+# 每个供应商两个字段：api_base（OpenAI 兼容基址）与 api_key。
+[oai.providers.deepseek]
+api_base = "https://api.deepseek.com/v1"
+api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# 房间模型与判定模型都支持 `:强度` 后缀，强度取 off/minimal/low/medium/high。
+# 也可建房后单独改：`房间%deepseek-flash:high`。
+
 # 模型列表过滤：中转站一次能吐出上千个 id，`/%` 只展示这里筛出来的那些。
 # 两份关键字都不区分大小写、按子串匹配；drop 优先于 keep。
 # keep 留空表示不筛选，全部接受。站点上新/下架时改这里即可，不必改代码：
@@ -63,14 +74,15 @@ drop = [
 enabled = false
 # 开启搭话的群号；空列表等于不开启。
 groups = []
-# 判定模型（便宜、能看图），复用 oai 已配置的接口与密钥。
-gate_model = "gemini-3.8-flash"
+# 判定模型（便宜、能看图）。写 `供应商/模型` 时按 [oai.providers] 取接口；
+# 默认走 DeepSeek 官方接口的 deepseek-flash。
+gate_model = "deepseek/deepseek-flash"
 # 判定读的「兴趣画像」。默认（不写这一行）用内置浓缩画像，比完整写作人设省一多半 token 且不影响判断。
 # 想自定义就取消注释写一段短文（只写对什么感兴趣、避开什么、怎么接话）；
 # 想退回用完整写作人设（最贵，不推荐）就把它设为空字符串。
 # gate_persona = ""
 # 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
-reply_model = "apilio/gemini-3.8-flash"
+reply_model = "deepseek/deepseek-flash"
 thinking = "low"
 # 发言时开放的辅助工具白名单；每轮额外加载 satori 聊天与绘图工具。
 # 去掉 bash 可关闭本轮命令执行工具。

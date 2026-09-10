@@ -51,7 +51,8 @@ config.toml 不提交到 Git。首次启动会补齐默认字段，不覆盖解�
 Termux 下 ./bot start 会取得唤醒锁；需要使用 tmux 时执行 ./bot session 和 ./bot attach。
 任意房间都可以交给本机 Pi CLI：`##研究 pi` 建房，`助手%pi apilio/claude-opus-5`
 换引擎和模型，房间名不受限制；[oai.ambient] 可让同一个 agent 以固定人格在指定群里
-旁听、偶尔搭话。
+旁听、偶尔搭话。普通房间的模型可写 `供应商/模型`（供应商在 [oai].providers 里配，
+如 `deepseek/deepseek-flash`），并支持 `:强度` 或房间 `thinking` 指定思考强度。
 
 ## 文档与测试
 

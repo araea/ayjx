@@ -99,6 +99,7 @@ pub(crate) async fn conversation(
     base: &Path,
     persona: &str,
     model: &str,
+    thinking: Option<&str>,
     stall: Option<std::time::Duration>,
     hist: &[ChatMessage],
     control: Option<&crate::plugins::ctl::bridge::Lease>,
@@ -119,6 +120,7 @@ pub(crate) async fn conversation(
         session: Some(&session),
         append_system_prompt: persona,
         model: (!follows_pi_config(model)).then_some(model),
+        thinking: thinking.filter(|value| !value.trim().is_empty()),
         prompt: &current.content,
         images: &current.images,
         skills: &skills,
@@ -984,6 +986,7 @@ process.stdin.on('end', () => {
                 "",
                 "",
                 None,
+                None,
                 &history,
                 None,
             ),
@@ -1067,6 +1070,7 @@ setInterval(()=>{{}},1000);
             "",
             "",
             None,
+            None,
             &history,
             None,
         )
@@ -1097,7 +1101,16 @@ setInterval(()=>{{}},1000);
         ];
         let reply = tokio::time::timeout(
             std::time::Duration::from_secs(180),
-            conversation("pi", &dir.0, "请用中文简短回复。", "", None, &history, None),
+            conversation(
+                "pi",
+                &dir.0,
+                "请用中文简短回复。",
+                "",
+                None,
+                None,
+                &history,
+                None,
+            ),
         )
         .await
         .unwrap()

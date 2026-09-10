@@ -27,6 +27,15 @@ pub const ENGINE_PI: &str = "pi";
 /// 房间走中转站的 Chat Completions（含 MJ / 图像房间）。
 pub const ENGINE_CHAT: &str = "chat";
 
+/// 合法的思考强度档位，与 Pi 的 `--thinking` 取值一致（普通房间转成 `reasoning_effort`）。
+pub const THINKING_LEVELS: [&str; 5] = ["off", "minimal", "low", "medium", "high"];
+
+/// 归一化思考强度：只认内置档位，大小写与首尾空白不敏感；其余返回 `None`。
+pub fn normalize_thinking(value: &str) -> Option<String> {
+    let level = value.trim().to_ascii_lowercase();
+    THINKING_LEVELS.contains(&level.as_str()).then_some(level)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub name: String,
@@ -39,9 +48,16 @@ pub struct Agent {
     /// 留空表示还没迁移过的旧配置，此时仍按旧的名字规则推断。
     #[serde(default)]
     pub engine: String,
-    /// 引擎对应的模型：中转站房间是中转站模型 id；pi 房间是 pi 的 `--model`
-    /// （`provider/id` 或裸 id），留空或 `pi` 表示沿用 pi 自身配置。
+    /// 引擎对应的模型：中转站房间是 `供应商/模型` 或裸模型 id；pi 房间是 pi 的
+    /// `--model`（`provider/id` 或裸 id），留空或 `pi` 表示沿用 pi 自身配置。
+    ///
+    /// 中转站房间的 `供应商/` 前缀决定打到哪个接口（见 `[oai.providers]`），
+    /// 不带前缀时沿用 `oai` 默认接口。
     pub model: String,
+    /// 房间默认思考强度（`off` / `minimal` / `low` / `medium` / `high`）。
+    /// 留空表示交给引擎默认；模型写法里的 `:强度` 后缀优先于这里。
+    #[serde(default)]
+    pub thinking: String,
     pub system_prompt: String,
     #[serde(default)]
     pub public_history: Vec<ChatMessage>,
@@ -60,6 +76,7 @@ impl Agent {
             description: desc.to_string(),
             engine: String::new(),
             model: model.to_string(),
+            thinking: String::new(),
             system_prompt: prompt.to_string(),
             public_history: Vec::new(),
             private_histories: HashMap::new(),
@@ -82,6 +99,16 @@ impl Agent {
     pub fn set_engine(&mut self, engine: &str, model: &str) {
         self.engine = engine.to_string();
         self.model = model.to_string();
+    }
+
+    /// 请求时真正生效的思考强度：模型写法里的 `:强度` 后缀优先，其次房间字段。
+    ///
+    /// `set_engine` 会把后缀收进 `thinking`，所以两者通常一致；保留后缀优先是因为
+    /// 旧配置或手改的模型串可能带着后缀（Pi 的 `id:thinking` 写法），不该被忽略。
+    pub fn effective_thinking(&self) -> Option<String> {
+        super::utils::split_thinking(&self.model)
+            .1
+            .or_else(|| normalize_thinking(&self.thinking))
     }
 
     pub fn history_mut(&mut self, private: bool, uid: &str) -> &mut Vec<ChatMessage> {
@@ -246,6 +273,21 @@ mod engine_tests {
         assert_eq!(room.model, "apilio/claude-opus-5");
         room.set_engine(ENGINE_CHAT, "gpt-5.6-luna");
         assert!(!room.uses_pi(), "换回中转站不需要改名");
+    }
+
+    #[test]
+    fn thinking_comes_from_the_model_suffix_first_then_the_room_field() {
+        let mut room = Agent::new("助手", "deepseek/deepseek-flash", "", "");
+        assert_eq!(room.effective_thinking(), None);
+        room.thinking = "low".into();
+        assert_eq!(room.effective_thinking().as_deref(), Some("low"));
+        // 模型串里的 `:强度` 优先于房间字段（旧配置/手改模型串的情形）。
+        room.model = "deepseek/deepseek-flash:high".into();
+        assert_eq!(room.effective_thinking().as_deref(), Some("high"));
+        // 房间字段非法档位直接忽略。
+        room.model = "deepseek/deepseek-flash".into();
+        room.thinking = "unlimited".into();
+        assert_eq!(room.effective_thinking(), None);
     }
 
     /// 还没迁移过的配置里 `engine` 是空的；那时仍按当初的名字规则判断，

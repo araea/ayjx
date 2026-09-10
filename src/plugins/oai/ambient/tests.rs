@@ -148,6 +148,7 @@ async fn live_persona_and_gate_dialogue() {
         let verdict = gate::judge(
             &credentials.api_base,
             &credentials.api_key,
+            &config.gate_model,
             &config,
             &turns,
             PERSONA,
@@ -228,6 +229,7 @@ async fn live_persona_and_gate_dialogue() {
         let verdict = gate::judge(
             &credentials.api_base,
             &credentials.api_key,
+            &config.gate_model,
             &config,
             &latest,
             PERSONA,

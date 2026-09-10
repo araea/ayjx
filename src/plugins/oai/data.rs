@@ -94,6 +94,17 @@ impl Manager {
             config_dirty = true;
         }
 
+        // `模型:强度` 的旧写法收进独立的 `thinking` 字段：行为等价，但让强度可单独
+        // 修改而不必重写模型名。幂等——已经收好的房间再跑一次什么都不做。
+        for agent in config.agents.iter_mut() {
+            let (model, thinking) = super::utils::split_thinking(&agent.model);
+            if let Some(level) = thinking {
+                agent.model = model;
+                agent.thinking = level;
+                config_dirty = true;
+            }
+        }
+
         // 引擎从房间名搬到房间自己身上。老配置里没有这个字段，就按当初的名字规则
         // 一次性写下来：`pi` / `pi-*` 归 pi，其余归中转站。写完之后名字彻底自由，
         // 已有房间的行为一个都不变。
@@ -307,6 +318,51 @@ mod tests {
         assert_eq!(config.default_model, DEFAULT_MODEL);
         assert_eq!(config.defaults_version, CURRENT_DEFAULTS_VERSION);
         assert!(config.pi_room_initialized);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_model_suffix_is_folded_into_the_thinking_field_once() {
+        let unique = format!(
+            "ayjx-oai-thinking-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        // 旧配置里思考强度写在模型串尾部。Config 字段没有 serde 默认值，
+        // 直接写半截 JSON 会被判为损坏并回落到空配置，所以整份序列化出来。
+        let mut legacy = Config {
+            api_base: "https://api.deepseek.com/v1".into(),
+            api_key: "sk-test".into(),
+            pi_room_initialized: true,
+            defaults_version: CURRENT_DEFAULTS_VERSION,
+            ..Default::default()
+        };
+        let mut room = super::super::types::Agent::new("助手", "deepseek/deepseek-flash:high", "", "");
+        room.set_engine(super::super::types::ENGINE_CHAT, "deepseek/deepseek-flash:high");
+        legacy.agents.push(room);
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let manager = Manager::new(dir.clone());
+        let config: Config =
+            serde_json::from_str(&std::fs::read_to_string(&manager.path).unwrap()).unwrap();
+        let room = config.agents.iter().find(|a| a.name == "助手").unwrap();
+        assert_eq!(room.model, "deepseek/deepseek-flash");
+        assert_eq!(room.thinking, "high");
+
+        // 再启动一次不会二次改动（幂等）。
+        let _ = Manager::new(dir.clone());
+        let again: Config =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let room = again.agents.iter().find(|a| a.name == "助手").unwrap();
+        assert_eq!(room.model, "deepseek/deepseek-flash");
+        assert_eq!(room.thinking, "high");
 
         std::fs::remove_dir_all(dir).unwrap();
     }
