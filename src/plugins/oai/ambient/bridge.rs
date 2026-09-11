@@ -856,6 +856,20 @@ impl Session {
         let group = self.group.to_string();
         let (method, params, summary) = match action {
             Action::Send { parts, reply_to } => {
+                // 一整段话按换气处分成几条发出去。模型写得越顺，越容易把两三个意思
+                // 塞进一条；群里没人这么说话。切法见 [`super::breath`]，切几条受本轮
+                // 剩下的消息额度约束——真正发出去的条数才是额度算的东西。
+                if let [Part::Text { text }] = parts.as_slice() {
+                    let budget = self
+                        .config
+                        .max_messages
+                        .clamp(1, 5)
+                        .saturating_sub(self.messages.saturating_sub(1));
+                    let pieces = super::breath::split(text, budget, self.config.split_chars);
+                    if pieces.len() > 1 {
+                        return self.send_in_pieces(pieces, reply_to.as_deref()).await;
+                    }
+                }
                 let mut msg = Message::new();
                 if let Some(id) = reply_to {
                     msg = msg.reply(id);
@@ -952,6 +966,51 @@ impl Session {
         }
         self.record(summary, 0, Message::new(), true);
         Ok(json!({"status":"confirmed","data":result}))
+    }
+    /// 把切好的几条依次发出去，当作模型的同一次 send。
+    ///
+    /// 额度按真正发出去的条数扣：模型多写了两个意思，就少一次另开话头的机会。
+    /// 中途失败不回滚已经发出去的——那些群友已经看见了，只在回执里说清楚发到哪。
+    async fn send_in_pieces(&mut self, pieces: Vec<String>, reply_to: Option<&str>) -> Result<Value> {
+        let mut ids: Vec<String> = Vec::new();
+        let mut failure = None;
+        for (index, piece) in pieces.iter().enumerate() {
+            let mut message = Message::new();
+            if index == 0 && let Some(id) = reply_to {
+                message = message.reply(id);
+            }
+            message = message.text(piece);
+            if index > 0 {
+                self.messages += 1;
+            }
+            match self.send(message).await {
+                Ok(value) => ids.push(
+                    value["message_id"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                Err(error) => {
+                    if index > 0 {
+                        self.messages -= 1;
+                    }
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        // 一条都没发出去时保持原样报错：调用方要按它决定退不退额度。
+        let Some(first) = ids.first().cloned() else {
+            return Err(failure.unwrap_or_else(|| anyhow::anyhow!("没有可发送的内容")));
+        };
+        let note = match failure {
+            None => format!("这段话在换气处分成 {} 条发出，算你这一次发言", ids.len()),
+            Some(error) => format!(
+                "前 {} 条已经发出去了，剩下的没发成：{error}。已经发出的别重发",
+                ids.len()
+            ),
+        };
+        Ok(json!({"status":"confirmed","message_id":first,"message_ids":ids,"note":note}))
     }
     async fn send(&mut self, message: Message) -> Result<Value> {
         let spoken = super::plain_text(&message);
@@ -1651,6 +1710,66 @@ mod tests {
         assert_eq!(kinds, listed);
         // Message 只是为了让 use 不落空；能力键与动作一一对应即可。
         assert!(Message::new().0.is_empty());
+    }
+
+    /// 一口气写完的一条 send，在换气处分成几条真消息发出去，额度照真条数扣。
+    #[tokio::test]
+    async fn one_long_send_leaves_the_group_as_several_messages() {
+        let group = -8_000_108;
+        let (ctx, writer, calls, server) = fixture(group).await;
+        let dir =
+            crate::plugins::oai::pi_agent::ScratchDir::under(&std::env::temp_dir(), "social-split")
+                .unwrap();
+        let mut config = crate::plugins::get_config_or_default::<OaiConfig>(&ctx, "oai").ambient;
+        config.max_messages = 3;
+        config.split_chars = 22;
+        let lease = start(&ctx, &writer, group, 1, &config, dir.path(), dir.path())
+            .await
+            .unwrap();
+        // 先读一次上下文，和人格的实际用法一致（顺带同步窗口的 revision）。
+        assert_eq!(
+            request(&lease, json!({"id":"ctx0","op":"context"})).await["ok"],
+            true
+        );
+        let sent = action(
+            &lease,
+            "long",
+            json!({"action":"send","reply_to":"123","parts":[{"type":"text",
+                "text":"坟挖得挺熟练 一看就不是第一次爬出来所以 Pro 比 Flash 强在哪 强在它不承认自己死了"}]}),
+        )
+        .await;
+        assert_eq!(sent["ok"], true, "{sent}");
+        let ids = sent["result"]["message_ids"].as_array().unwrap();
+        assert_eq!(ids.len(), 2, "{sent}");
+        assert_eq!(sent["result"]["message_id"], ids[0]);
+
+        let bodies: Vec<String> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(method, _)| method == "message.create")
+            .map(|(_, body)| body["content"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        // 引用只挂在第一条上；第二条是接着说的下半句。
+        assert!(bodies[0].contains("quote") && bodies[0].contains("强在哪"), "{bodies:?}");
+        assert!(!bodies[1].contains("quote"), "{bodies:?}");
+        assert!(bodies[1].contains("强在它不承认自己死了"), "{bodies:?}");
+
+        // 两条都算进了消息额度，本轮只剩一条。
+        let after = request(&lease, json!({"id":"ctx","op":"context"})).await;
+        assert_eq!(after["result"]["messages_remaining"], 1, "{after}");
+        // 群里看到的是两条，自己的窗口里也记着两条。
+        assert_eq!(
+            window::with_group(group, |s| s
+                .recent(10)
+                .iter()
+                .filter(|turn| turn.from_me)
+                .count()),
+            2
+        );
+        drop(lease);
+        server.abort();
     }
 
     /// 只读查询：翻 QQ 存的历史与群资料。窗口只有几十条、重启就空，而这两样

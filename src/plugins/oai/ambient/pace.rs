@@ -3,6 +3,7 @@
 //! 两件事在这里合并处理，因为它们其实是一件事：群里发言的自然感一半来自内容
 //! 怎么断句，一半来自这些断句之间隔了多久。模型只管写，断句与等待都在这里定。
 
+use super::breath;
 use crate::message::Message;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -41,11 +42,20 @@ fn action() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\[(poke:(\d{5,12})|dice|rps|wait:(\d+(?:\.\d+)?))\]$").unwrap())
 }
 
+/// 解析出来但还没定形的一条：动作照原样，文字要先等断句分完剩下的额度。
+enum Draft {
+    Act(Message),
+    Text { body: String, reply: bool },
+}
+
 /// 解析模型输出：一行一条消息，标记按 `satori-reply` skill 的约定翻译成消息段。
 ///
+/// 行数是下限而不是上限：模型写了几行就是它自己分好的几条，没用完的消息额度
+/// 交给 [`breath`] 去补——一口气写完的长句，在它自己的换气处切开再依次发出。
+///
 /// 不认识的方括号原样保留——群友本来就会打 `[笑]`，把它们吞掉比留着更糟。
-pub(crate) fn parse(raw: &str, max_messages: usize) -> Speech {
-    let mut out: Vec<Utterance> = Vec::new();
+pub(crate) fn parse(raw: &str, max_messages: usize, split_chars: usize) -> Speech {
+    let mut drafts: Vec<(Draft, f32)> = Vec::new();
     let mut pending_wait = 0.0_f32;
 
     for line in raw.lines() {
@@ -62,7 +72,7 @@ pub(crate) fn parse(raw: &str, max_messages: usize) -> Speech {
                     .min(MAX_WAIT_SECONDS);
                 continue;
             }
-            if out.len() >= max_messages {
+            if drafts.len() >= max_messages {
                 continue;
             }
             let message = match caps.get(2) {
@@ -70,15 +80,10 @@ pub(crate) fn parse(raw: &str, max_messages: usize) -> Speech {
                 None if caps[1].starts_with("dice") => Message::new().dice(),
                 None => Message::new().rps(),
             };
-            out.push(Utterance {
-                message,
-                chars: 0,
-                reply: false,
-                wait: std::mem::take(&mut pending_wait),
-            });
+            drafts.push((Draft::Act(message), std::mem::take(&mut pending_wait)));
             continue;
         }
-        if out.len() >= max_messages {
+        if drafts.len() >= max_messages {
             continue;
         }
         let (reply, body) = match line.strip_prefix("[reply]") {
@@ -88,16 +93,49 @@ pub(crate) fn parse(raw: &str, max_messages: usize) -> Speech {
         if body.is_empty() {
             continue;
         }
-        let (message, chars) = build_message(body);
-        if message.0.is_empty() {
-            continue;
+        drafts.push((
+            Draft::Text {
+                body: body.to_string(),
+                reply,
+            },
+            std::mem::take(&mut pending_wait),
+        ));
+    }
+
+    // 没用完的额度就是还能换几次气；按出现顺序分给写得最长的那几行。
+    let mut spare = max_messages.saturating_sub(drafts.len());
+    let mut out: Vec<Utterance> = Vec::new();
+    for (draft, wait) in drafts {
+        match draft {
+            Draft::Act(message) => out.push(Utterance {
+                message,
+                chars: 0,
+                reply: false,
+                wait,
+            }),
+            Draft::Text { body, reply } => {
+                // 带标记的行不动：切开 `[at:…]`、`[img:…]` 之后那条消息会变成另一个意思。
+                let pieces = if markup().is_match(&body) {
+                    vec![body]
+                } else {
+                    breath::split(&body, spare + 1, split_chars)
+                };
+                spare = spare.saturating_sub(pieces.len().saturating_sub(1));
+                for (index, piece) in pieces.into_iter().enumerate() {
+                    let (message, chars) = build_message(&piece);
+                    if message.0.is_empty() {
+                        continue;
+                    }
+                    out.push(Utterance {
+                        message,
+                        chars,
+                        // 引用只挂在第一条上：后面几条是同一口气里接着说的。
+                        reply: reply && index == 0,
+                        wait: if index == 0 { wait } else { 0.0 },
+                    });
+                }
+            }
         }
-        out.push(Utterance {
-            message,
-            chars,
-            reply,
-            wait: std::mem::take(&mut pending_wait),
-        });
     }
 
     if out.is_empty() {
@@ -219,8 +257,16 @@ mod tests {
     use super::*;
     use simd_json::base::ValueAsScalar;
 
+    fn text_of(item: &Utterance) -> String {
+        item.message
+            .0
+            .iter()
+            .filter_map(|segment| segment.data.get("text").and_then(|v| v.as_str()))
+            .collect()
+    }
+
     fn say(raw: &str) -> Vec<Utterance> {
-        match parse(raw, 3) {
+        match parse(raw, 3, 0) {
             Speech::Say(items) => items,
             Speech::Silent => panic!("expected speech, got silence: {raw}"),
         }
@@ -228,9 +274,9 @@ mod tests {
 
     #[test]
     fn silence_wins_over_anything_else_on_the_line() {
-        assert!(matches!(parse("[silent]", 3), Speech::Silent));
-        assert!(matches!(parse("  \n\n  ", 3), Speech::Silent));
-        assert!(matches!(parse("说点什么\n[silent]", 3), Speech::Silent));
+        assert!(matches!(parse("[silent]", 3, 0), Speech::Silent));
+        assert!(matches!(parse("  \n\n  ", 3, 0), Speech::Silent));
+        assert!(matches!(parse("说点什么\n[silent]", 3, 0), Speech::Silent));
     }
 
     #[test]
@@ -280,6 +326,43 @@ mod tests {
         assert!((items[0].wait - 3.0).abs() < f32::EPSILON);
         assert_eq!(items[1].message.0[0].type_, "dice");
         assert_eq!(items[1].wait, 0.0);
+    }
+
+    /// 模型写一行、群里看到三条：没用完的额度拿去换气。
+    #[test]
+    fn one_breathless_line_spends_the_unused_message_budget() {
+        let raw = "坟挖得挺熟练 一看就不是第一次爬出来所以 Pro 比 Flash 强在哪 强在它不承认自己死了";
+        let Speech::Say(items) = parse(raw, 3, 22) else {
+            panic!("expected speech");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(text_of(&items[1]), "强在它不承认自己死了");
+        // 关掉分段就回到一行一条。
+        let Speech::Say(single) = parse(raw, 3, 0) else {
+            panic!("expected speech");
+        };
+        assert_eq!(single.len(), 1);
+    }
+
+    /// 模型自己分好的几行优先：额度先满足它写的行数，剩下的才拿去断句。
+    #[test]
+    fn the_models_own_line_breaks_come_first() {
+        let long = "那个报错我刚翻到了 是驱动装岔了版本 你把显卡驱动回退一版再试";
+        let Speech::Say(items) = parse(&format!("{long}\n{long}\n{long}"), 3, 12) else {
+            panic!("expected speech");
+        };
+        assert_eq!(items.len(), 3, "三行已经占满额度，不再替它换气");
+        let Speech::Say(items) = parse(&format!("{long}\n{long}"), 3, 12) else {
+            panic!("expected speech");
+        };
+        assert_eq!(items.len(), 3, "剩一条额度，给写在前面的那行");
+    }
+
+    /// 带 `[at:…]`、`[img:…]` 的行整条发：切开之后那几条会变成另一个意思。
+    #[test]
+    fn lines_carrying_markup_are_never_cut() {
+        let items = say("[at:114514] 这事我刚查过 版本号对不上 你回退一版再试试看行不行");
+        assert_eq!(items.len(), 1);
     }
 
     #[test]

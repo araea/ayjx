@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 mod actions;
 mod attention;
+mod breath;
 mod bridge;
 mod gate;
 #[cfg(test)]
@@ -150,6 +151,11 @@ pub(crate) struct AmbientConfig {
     pub send_freshness_seconds: u64,
     /// 一次发言最多拆成几条消息。
     pub max_messages: usize,
+    /// 一条消息大约多少字就该换气：超过大约一条半的长度时，把一段话在最自然的
+    /// 断句处拆成几条依次发出（总数仍受 `max_messages` 约束）；0 关闭自动分段。
+    ///
+    /// 模型写出来的是一整段，群友写出来的是三条——差别只在换气。见 [`breath`]。
+    pub split_chars: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
     pub max_actions: usize,
     /// 每轮最多生成图片的张数；0 关闭绘图。绘图走 `[oai]` 配置的图像模型。
@@ -198,6 +204,7 @@ impl Default for AmbientConfig {
             peak: peak::PeakConfig::default(),
             send_freshness_seconds: 25,
             max_messages: 3,
+            split_chars: 22,
             max_actions: 6,
             draw_budget: 2,
             typing_cpm: 150,
@@ -914,7 +921,7 @@ async fn speak_up(
     let (raw, focus) = attention::extract(&raw, turns, config.focus_max_seconds);
     // 沉默不需要检查草稿；新消息留给下一批。关注仍可在本轮更新。
     let silent = matches!(
-        pace::parse(&raw, config.max_messages.clamp(1, 5)),
+        pace::parse(&raw, config.max_messages.clamp(1, 5), config.split_chars),
         pace::Speech::Silent
     );
     if !silent && !current(ctx, group, *seq) {
@@ -956,7 +963,7 @@ async fn speak_up(
     if let Some(focus) = focus {
         window::with_group(group, |state| state.focus = focus);
     }
-    let mut utterances = match pace::parse(&raw, config.max_messages.clamp(1, 5)) {
+    let mut utterances = match pace::parse(&raw, config.max_messages.clamp(1, 5), config.split_chars) {
         pace::Speech::Silent => {
             info!(target: LOG_TARGET, "群 {group} 想了想，还是没说话");
             return Ok(());

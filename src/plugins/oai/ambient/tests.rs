@@ -202,7 +202,7 @@ async fn live_persona_and_gate_dialogue() {
             verdict,
             raw
         );
-        match pace::parse(&body, 3) {
+        match pace::parse(&body, 3, config.split_chars) {
             pace::Speech::Silent => {}
             pace::Speech::Say(items) => {
                 assert!(!items.is_empty());
