@@ -1138,6 +1138,23 @@ mod tests {
         assert!(no_gate_persona.gate_persona.trim().is_empty());
     }
 
+    /// 人设是每轮都要付一次钱的东西，而它天然会长：每发现一种不满意的说法，
+    /// 就想再加一句话把它堵住。这个上限不是审美洁癖，是提醒——要加一段之前，
+    /// 先看看能不能删两段。真正的边界只有一条（色情与情感纠缠），协议在现场说明里，
+    /// 工具怎么用在 skill 里，剩下的都该是「他是谁」。
+    #[test]
+    fn the_persona_stays_short_enough_to_pay_for_every_round() {
+        assert!(
+            PERSONA.len() < 4096,
+            "内置人设 {} 字节，超出预算了：先删再加",
+            PERSONA.len()
+        );
+        // 判定用的画像比完整人设还要便宜一大截——每条消息都要过它一遍。
+        assert!(GATE_PERSONA.len() < PERSONA.len());
+        // 唯一的硬边界仍然写着。
+        assert!(PERSONA.contains("色情"));
+    }
+
     #[test]
     fn defaults_stay_silent_until_a_group_is_named() {
         let config = AmbientConfig::default();
