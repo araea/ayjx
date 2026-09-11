@@ -183,8 +183,11 @@ black = []
 
 [webshot]
 enabled = true
-# 命中这些域名的链接不截图。
+# 命中这些域名的链接不截图。按域名后缀匹配，example.com 同时覆盖 a.example.com。
 ignore_domains = []
+# 允许截图访问内网/本机地址。默认关闭：截图会原样发回群里，开启后群友发一条
+# http://127.0.0.1:6520/ 之类的链接就能把本机面板、路由器后台渲染成图片读走。
+allow_private_hosts = false
 
 # 语义同 [stats.channel]。
 [webshot.channel]
