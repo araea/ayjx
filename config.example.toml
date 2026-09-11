@@ -90,6 +90,10 @@ thinking = "low"
 # （群友贴的链接也靠 fetch_content 才真读得到）；source_check 给有争议的说法找出处。
 # 不想让它在本轮跑命令，就把 bash 从这行拿掉；名字取自 pi 实际注册的工具。
 tools = "read,write,bash,web_search,source_check,fetch_content,get_search_content"
+# 搭话指令：群里发一条以它打头的消息就跳过判定，直接把最近这段群聊交给人格。
+# 指令本身不进上下文（人格只看到群友聊了什么），后面跟着的话照常算群聊内容。
+# 想关掉就写空字符串；peak.mode = "pause" 与 hourly_limit 仍然拦得住它。
+summon_command = "/搭话"
 # 开口意愿分门槛，调高更沉默。实际门槛还会随「最近十分钟自己说了几轮」抬高
 # （每轮 +8，最多 +24），随关注中的续聊下调 15 分，见 docs/ambient.md。
 score_threshold = 50

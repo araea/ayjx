@@ -1934,7 +1934,7 @@ mod tests {
             Some(std::time::Duration::from_secs(70)),
             &turns,
             &[],
-            true,
+            super::super::speak::Called::Mention,
             &super::super::Scene::build(group, &config, &turns, "群友刚刚在与你正常交流".into()),
             Some((&ctx, &writer, group, &mut seq)),
         )
@@ -1983,7 +1983,7 @@ mod tests {
             Some(std::time::Duration::from_secs(70)),
             &turns,
             &[],
-            true,
+            super::super::speak::Called::Mention,
             &super::super::Scene::build(group, &config, &turns, "尚未发言".into()),
             Some((&ctx, &writer, group, &mut seq)),
         )
@@ -2037,7 +2037,7 @@ mod tests {
             Some(std::time::Duration::from_secs(70)),
             &turns,
             &[],
-            true,
+            super::super::speak::Called::Mention,
             &super::super::Scene::build(group, &config, &turns, "尚未发言".into()),
             Some((&ctx, &writer, group, &mut seq)),
         )

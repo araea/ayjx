@@ -61,11 +61,40 @@ fn system_prompt(persona: &str, config: &AmbientConfig, live: bool, lookup: bool
     )
 }
 
-fn closing(mentioned: bool) -> &'static str {
-    if mentioned {
-        "这一批新消息有人 @ 或引用了你。接不接、怎么接都随你；只输出 [silent] 也是一种回应。"
-    } else {
-        "看看最新消息里有没有你想接的话。想说就说，不想说就 [silent]，也可以只调整关注后看着。"
+fn closing(called: Called) -> &'static str {
+    match called {
+        Called::Mention => {
+            "这一批新消息有人 @ 或引用了你。接不接、怎么接都随你；只输出 [silent] 也是一种回应。"
+        }
+        Called::Summon => {
+            "有人想听你说一句。看看上面的记录，怎么接、说多少都随你；只输出 [silent] 也算数。"
+        }
+        Called::Ordinary => {
+            "看看最新消息里有没有你想接的话。想说就说，不想说就 [silent]，也可以只调整关注后看着。"
+        }
+    }
+}
+
+/// 这一轮为什么被唤起。人格始终保留沉默的权利，变的只是收尾那句提示：
+/// 被点名要说的是「有人冲你来」，搭话指令要说的是「有人想听你说」，而日常
+/// 那句只问它有没有想接的话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Called {
+    /// 判定过线或续聊：没人直接叫它。
+    Ordinary,
+    /// 被 @、被引用或被戳。
+    Mention,
+    /// 群里发了搭话指令。
+    Summon,
+}
+
+impl Called {
+    pub(crate) fn of(mentioned: bool, summoned: bool) -> Self {
+        match (mentioned, summoned) {
+            (_, true) => Called::Summon,
+            (true, false) => Called::Mention,
+            (false, false) => Called::Ordinary,
+        }
     }
 }
 
@@ -80,7 +109,7 @@ pub(crate) async fn compose(
     stall: Option<std::time::Duration>,
     turns: &[Turn],
     images: &[String],
-    mentioned: bool,
+    called: Called,
     scene: &Scene,
     live: Option<(
         &crate::event::Context,
@@ -125,7 +154,7 @@ pub(crate) async fn compose(
         "{}最近的群聊记录：\n{}\n{}",
         scene.brief(),
         transcript(turns),
-        closing(mentioned)
+        closing(called)
     );
     let reply = tokio::time::timeout(
         config.reply_timeout(),
@@ -199,7 +228,7 @@ mod tests {
             "禁止", "不得", "严禁", "必须", "不允许", "不要", "不能", "别再", "别急", "别把",
             "不准", "切勿", "切莫", "只能", "仅能", "唯一",
         ] {
-            for text in [rules.as_str(), TOOL_RULES, LOOKUP_RULES, MEMO_RULES, closing(true), closing(false)] {
+            for text in [rules.as_str(), TOOL_RULES, LOOKUP_RULES, MEMO_RULES, closing(Called::Mention), closing(Called::Summon), closing(Called::Ordinary)] {
                 assert!(
                     !text.contains(word),
                     "提示词里出现了限制性说法「{word}」：{text}"
@@ -256,8 +285,22 @@ mod tests {
 
     #[test]
     fn being_called_out_still_allows_personality_to_choose_silence() {
-        let called = closing(true);
+        let called = closing(Called::Mention);
         assert!(called.contains("[silent]"), "{called}");
-        assert!(closing(false).contains("[silent]"));
+        assert!(closing(Called::Ordinary).contains("[silent]"));
+        // 搭话指令是「有人想听你说」，不是「你必须说」——沉默仍然算数。
+        let summoned = closing(Called::Summon);
+        assert!(summoned.contains("[silent]"), "{summoned}");
+        assert!(summoned.contains("想听你说"), "{summoned}");
+        // 三种唤起说三种话，各说各的场合。
+        assert_ne!(closing(Called::Summon), closing(Called::Mention));
+        assert_ne!(closing(Called::Mention), closing(Called::Ordinary));
+        assert_eq!(
+            Called::of(false, true),
+            Called::Summon,
+            "指令与 @ 同时出现时，说的是「有人想听你说」"
+        );
+        assert_eq!(Called::of(true, false), Called::Mention);
+        assert_eq!(Called::of(false, false), Called::Ordinary);
     }
 }

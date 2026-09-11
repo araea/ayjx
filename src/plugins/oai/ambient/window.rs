@@ -47,6 +47,8 @@ pub(crate) struct GroupState {
     pub running: bool,
     /// 只消费本批次的点名；人格选择沉默后不反复拿旧 @ 强制唤醒。
     unread_mention: bool,
+    /// 本批次收到过搭话指令；与点名一样只消费一次。
+    unread_summon: bool,
     pub focus: Option<Focus>,
     /// 最近一次发言时刻。
     pub last_spoke: Option<Instant>,
@@ -124,6 +126,25 @@ impl GroupState {
 
     pub(crate) fn take_mention(&mut self) -> bool {
         std::mem::take(&mut self.unread_mention)
+    }
+
+    /// 收到一条搭话指令。
+    ///
+    /// 指令本身没有内容可给模型看，所以它不进窗口，只说明「这一批欠一句回应」；
+    /// 若那条消息还带着正文，由调用方按普通消息另行 `receive`。
+    /// 返回 true 表示这个群现在没有 worker，调用方去跑一次 `consider`。
+    pub(crate) fn summon(&mut self) -> bool {
+        self.seq += 1;
+        self.unread_summon = true;
+        if self.running {
+            return false;
+        }
+        self.running = true;
+        true
+    }
+
+    pub(crate) fn take_summon(&mut self) -> bool {
+        std::mem::take(&mut self.unread_summon)
     }
 
     /// 新消息即使出现在模型执行或发送期间，也由同一 worker 接着处理。
@@ -322,6 +343,24 @@ mod tests {
         let mut third = turn("新一轮", false);
         third.message_id = 3;
         assert!(state.receive(third));
+    }
+
+    /// 搭话指令不进窗口，但它必须能把一个闲着的群叫起来，且只叫一次。
+    #[test]
+    fn a_summon_wakes_an_idle_group_once_without_taking_a_turn() {
+        let mut state = GroupState::default();
+        assert!(!state.take_summon());
+        assert!(state.summon());
+        assert!(state.running);
+        assert_eq!(state.seq, 1);
+        assert!(state.turns.is_empty());
+        assert!(state.take_summon());
+        // 一次指令只算一次；人格沉默之后不会拿旧指令再唤醒。
+        assert!(!state.take_summon());
+        // 已经有 worker 在跑时只留下指令，由它下一轮自己看见。
+        assert!(!state.summon());
+        assert_eq!(state.seq, 2);
+        assert!(state.take_summon());
     }
 
     #[test]

@@ -11,6 +11,10 @@
 //!
 //! 判定与措辞分开，是因为它们的成本和失败方式都不一样：判定要便宜、要多、
 //! 要能看图；措辞要慢、要少、要有工具。合成一次调用就只能两头将就。
+//!
+//! 另有一条**搭话指令**（[`AmbientConfig::summon_command`]，默认 `/搭话`）：群里
+//! 发它就直接跳到第三步，判定那一步不再发生。指令本身是命令，被剥掉之后不进
+//! 窗口——人格看到的仍然只是群友聊了什么，而不是有人在按键。
 
 use crate::adapters::satori::{LockedWriter, freshness_for, send_fresh_msg_id};
 use crate::event::{Context, MessageEvent};
@@ -40,6 +44,7 @@ mod tone;
 mod vision;
 mod window;
 
+use speak::Called;
 use window::Turn;
 
 const LOG_TARGET: &str = "Plugin/OAI";
@@ -133,6 +138,11 @@ pub(crate) struct AmbientConfig {
     pub hourly_limit: usize,
     /// 被 @ 或被引用时跳过判定直接开口。
     pub reply_on_mention: bool,
+    /// 搭话指令：群里一条带它的消息跳过判定，直接把最近这段群聊交给人格。
+    ///
+    /// 指令本身不进窗口（`/搭话` 是命令，剥掉之后那一条消息才是群聊内容），
+    /// 所以人格只看到群友聊了什么，不会看到有人在按键。留空关闭。
+    pub summon_command: String,
     /// 记住群里的人和旧事（落盘，跨重启）。关掉就只剩眼前这几十条消息。
     pub memory_enabled: bool,
     /// 按作息与互动起伏的内部状态：影响开口门槛、打字快慢和提示词里的一句状态。
@@ -198,6 +208,7 @@ impl Default for AmbientConfig {
             focus_max_seconds: 300,
             hourly_limit: 0,
             reply_on_mention: true,
+            summon_command: "/搭话".to_string(),
             memory_enabled: true,
             mood_enabled: true,
             memo_budget: 3,
@@ -464,11 +475,18 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
             })
         })
     });
-    // 指令是说给机器人听的，不是群聊内容；记下来只会让人格模型学着复述指令。
+    // 搭话指令是被剥掉的那两个词，不是群聊内容：它不进窗口，只让这一批跳过判定。
+    let summoned = strip_summon(&mut turn.text, &config.summon_command);
+    // 其余指令是说给机器人听的，不是群聊内容；记下来只会让人格模型学着复述指令。
     let is_command = crate::command::get_prefixes(ctx)
         .iter()
         .any(|prefix| !prefix.is_empty() && turn.text.starts_with(prefix.as_str()));
-    if is_command || (turn.text.is_empty() && turn.images.is_empty()) {
+    if is_command {
+        return;
+    }
+    // 剥掉指令后空无一物的那条消息没有内容可给模型看；它只是按了一次键。
+    let empty = turn.text.is_empty() && turn.images.is_empty();
+    if empty && !summoned {
         return;
     }
     if config.memory_enabled && !turn.from_me {
@@ -478,7 +496,11 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     if config.mood_enabled && turn.mentions_me && !turn.from_me {
         mood::nudge(|mood, now| mood.engaged(group, now));
     }
-    let start = window::with_group(group, |state| state.receive(turn));
+    let start = window::with_group(group, |state| {
+        let pushed = !empty && state.receive(turn);
+        // 闲着的群由指令自己叫起来；有 worker 在跑时它下一轮会看见这个标记。
+        pushed || (summoned && state.summon())
+    });
     if !start {
         return;
     }
@@ -593,6 +615,33 @@ fn notice_turn(raw: &simd_json::OwnedValue, me: i64) -> Option<(Turn, Option<i64
         },
         recalled,
     ))
+}
+
+/// 把搭话指令从正文里剥掉，返回是不是真剥到了。
+///
+/// 指令算一个词，出现在句首、`@我` 之后或任意空白之后都认；剥掉之后剩下的
+/// 才是群友真正说的话（`/搭话 你怎么看` → `你怎么看`），照常进窗口。它本身
+/// 永远不进窗口——人格看到有人在按键，就会去回应那个按键而不是群里的话题。
+fn strip_summon(text: &mut String, command: &str) -> bool {
+    let command = command.trim();
+    if command.is_empty() {
+        return false;
+    }
+    let Some(at) = text.find(command) else {
+        return false;
+    };
+    let head = &text[..at];
+    if !head.is_empty() && !head.ends_with(|c: char| c.is_whitespace()) {
+        return false;
+    }
+    let head = head.trim_end();
+    let tail = text[at + command.len()..].trim_start();
+    *text = match head.is_empty() {
+        true => tail.to_string(),
+        false if tail.is_empty() => head.to_string(),
+        false => format!("{head} {tail}"),
+    };
+    true
 }
 
 /// 事件 → 窗口里的一条消息。
@@ -716,15 +765,17 @@ async fn consider(
                 break;
             }
         }
-        let (mut seq, turns, mentioned, silent_for, rhythm, focused, capped) =
+        let (mut seq, turns, mentioned, summoned, silent_for, rhythm, focused, capped) =
             window::with_group(group, |state| {
                 let mentioned = state.take_mention() && config.reply_on_mention;
+                let summoned = state.take_summon();
                 let capped =
                     config.hourly_limit > 0 && state.spoken_last_hour() >= config.hourly_limit;
                 (
                     state.seq,
                     state.recent(config.context_turns.clamp(1, 80)),
                     mentioned,
+                    summoned,
                     state.last_spoke.map(|last| last.elapsed()),
                     state.rhythm(),
                     state.active_focus().is_some(),
@@ -733,8 +784,8 @@ async fn consider(
             });
         if !capped
             && let Err(error) = consider_batch(
-                ctx, writer, mgr, group, &config, &mut seq, &turns, mentioned, silent_for, &rhythm,
-                focused,
+                ctx, writer, mgr, group, &config, &mut seq, &turns, mentioned, summoned,
+                silent_for, &rhythm, focused,
             )
             .await
         {
@@ -789,6 +840,7 @@ async fn consider_batch(
     seq: &mut u64,
     turns: &[Turn],
     mentioned: bool,
+    summoned: bool,
     silent_for: Option<Duration>,
     rhythm: &str,
     focused: bool,
@@ -809,12 +861,12 @@ async fn consider_batch(
             debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，本轮不出声");
             return Ok(());
         }
-        peak::Stance::Dozing if !mentioned => {
+        peak::Stance::Dozing if !mentioned && !summoned => {
             debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，睡着，没被点名就不判定");
             return Ok(());
         }
         peak::Stance::Dozing => {
-            info!(target: LOG_TARGET, "群 {group} 在计价高峰时段被点名，省着回一句");
+            info!(target: LOG_TARGET, "群 {group} 在计价高峰时段被叫醒，省着回一句");
             frugal = config.frugal();
             &frugal
         }
@@ -833,7 +885,10 @@ async fn consider_batch(
         });
     }
     let scene = Scene::build(group, config, turns, rhythm.to_string());
-    if !mentioned {
+    if summoned {
+        // 指令是人按下的：判定那一步整个不发生，这一批直接进第三步。
+        info!(target: LOG_TARGET, "群 {group} 收到搭话指令，这一批交给人格");
+    } else if !mentioned {
         let (api_base, api_key, gate_model) = gate_endpoint(ctx, mgr, &config.gate_model).await?;
         let recent = window::with_group(group, |state| state.spoken_within(window::RECENT_SPEECH));
         let threshold = config.threshold(silent_for, mood::snapshot(group), recent);
@@ -856,11 +911,12 @@ async fn consider_batch(
         info!(target: LOG_TARGET, "群 {group} 被点名，由人格决定是否回应");
     }
     // 判定之后重新取最新窗口，群友连续发几条消息不必从头再筛一遍。
-    let (latest, mentioned, rhythm) = window::with_group(group, |state| {
+    let (latest, mentioned, summoned, rhythm) = window::with_group(group, |state| {
         *seq = state.seq;
         (
             state.recent(config.context_turns.clamp(1, 80)),
             (state.take_mention() && config.reply_on_mention) || mentioned,
+            state.take_summon() || summoned,
             state.rhythm(),
         )
     });
@@ -869,7 +925,16 @@ async fn consider_batch(
     }
     let scene = Scene::build(group, config, &latest, rhythm);
     speak_up(
-        ctx, writer, mgr, group, config, &latest, mentioned, &persona, &scene, seq,
+        ctx,
+        writer,
+        mgr,
+        group,
+        config,
+        &latest,
+        Called::of(mentioned, summoned),
+        &persona,
+        &scene,
+        seq,
     )
     .await
 }
@@ -892,7 +957,7 @@ async fn speak_up(
     group: i64,
     config: &AmbientConfig,
     turns: &[Turn],
-    mentioned: bool,
+    called: Called,
     persona: &str,
     scene: &Scene,
     seq: &mut u64,
@@ -913,7 +978,7 @@ async fn speak_up(
         oai.pi_stall(),
         turns,
         &images,
-        mentioned,
+        called,
         scene,
         Some((ctx, writer, group, seq)),
     )
@@ -1417,4 +1482,47 @@ mod tests {
         assert_eq!(loose.threshold(None, calm, 5), quiet);
     }
 
+    #[test]
+    fn the_summon_command_is_stripped_and_the_rest_of_the_message_stays() {
+        let mut text = "/搭话".to_string();
+        assert!(strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "");
+
+        // 指令后面跟着的才是群友真正说的话，它照常进窗口。
+        let mut text = "/搭话 你怎么看这件事".to_string();
+        assert!(strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "你怎么看这件事");
+
+        // 没加空格的连写、以及 @ 之后再说指令，都认。
+        let mut text = "/搭话你怎么看".to_string();
+        assert!(strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "你怎么看");
+        let mut text = "@我 /搭话 你说呢".to_string();
+        assert!(strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "@我 你说呢");
+
+        // 嵌在词中间的不算指令；配置留空等于关掉这条通路。
+        let mut text = "别/搭话了".to_string();
+        assert!(!strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "别/搭话了");
+        let mut text = "/搭话".to_string();
+        assert!(!strip_summon(&mut text, ""));
+        assert_eq!(text, "/搭话");
+        // 没带指令的那条消息当然原样。
+        let mut text = "这游戏还更新吗".to_string();
+        assert!(!strip_summon(&mut text, "/搭话"));
+        assert_eq!(text, "这游戏还更新吗");
+    }
+
+    #[test]
+    fn the_summon_command_is_on_by_default_and_only_the_named_thing_triggers_it() {
+        let config = AmbientConfig::default();
+        assert_eq!(config.summon_command, "/搭话");
+        // 旧配置里没有这个键也读得出来。
+        let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
+        assert_eq!(legacy.summon_command, config.summon_command);
+        // 想关掉就写空。
+        let off: AmbientConfig = toml::from_str("summon_command = ''").unwrap();
+        assert!(off.summon_command.is_empty());
+    }
 }

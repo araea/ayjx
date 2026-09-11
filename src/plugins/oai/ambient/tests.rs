@@ -3,7 +3,7 @@ use super::*;
 
 #[cfg(unix)]
 #[tokio::test]
-async fn silent_turn_still_drains_new_mentions_and_does_not_replay_them() {
+async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
     use crate::config::{AppConfig, build_config};
     use crate::event::{BotStatus, EventType, LoginUser};
     use std::os::unix::fs::PermissionsExt;
@@ -87,8 +87,9 @@ process.stdin.on('end', () => {{
         *state = Default::default();
         assert!(state.receive(turn(1)));
     });
-    let task = tokio::spawn(async move {
-        consider(&ctx, &writer, &mgr, group).await.unwrap();
+    let task = tokio::spawn({
+        let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
+        async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
     });
     tokio::time::timeout(Duration::from_secs(10), async {
         while !started.exists() {
@@ -103,12 +104,28 @@ process.stdin.on('end', () => {{
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(std::fs::read_to_string(started).unwrap(), "xx");
+    assert_eq!(std::fs::read_to_string(&started).unwrap(), "xx");
     window::with_group(group, |state| {
         assert!(!state.running);
         assert!(!state.take_mention());
         assert!(state.active_focus().is_some());
         assert_eq!(state.spoken_last_hour(), 0);
+    });
+    // 搭话指令直接把这一批交给人格：判定那一步完全不发生——这里没有可用的接口，
+    // 真去判定只会报错，而它走到了人格那一轮，说明指令确实绕过了判定。
+    assert!(window::with_group(group, |state| state.summon()));
+    let task = tokio::spawn({
+        let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
+        async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
+    });
+    tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&started).unwrap(), "xxx");
+    window::with_group(group, |state| {
+        assert!(!state.running);
+        assert!(!state.take_summon());
     });
 }
 
@@ -188,7 +205,7 @@ async fn live_persona_and_gate_dialogue() {
             Some(Duration::from_secs(40)),
             &turns,
             &[],
-            false,
+            Called::Ordinary,
             &scene,
             None,
         )
