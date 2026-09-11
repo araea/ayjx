@@ -765,14 +765,13 @@ async fn gate_endpoint(
         let config = mgr.config.read().await;
         (config.api_base.clone(), config.api_key.clone())
     };
-    let Some(endpoint) = super::resolve_endpoint(&providers, &base, &key, provider.as_deref())
+    let Some((base, key)) = super::resolve_endpoint(&providers, &base, &key, provider.as_deref())
     else {
         anyhow::bail!(
             "未知供应商：{}（在 [oai.providers] 里配置）",
             provider.as_deref().unwrap_or_default()
         );
     };
-    let (base, key) = (endpoint.base, endpoint.key);
     if base.is_empty() || key.is_empty() {
         anyhow::bail!("判定模型需要 API 配置，请先设置 oai 的接口地址与密钥");
     }
