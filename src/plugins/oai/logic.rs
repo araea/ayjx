@@ -1161,17 +1161,22 @@ pub async fn execute(
                 return;
             }
             use std::collections::BTreeMap;
-            let mut groups: BTreeMap<String, Vec<(usize, &Agent)>> = BTreeMap::new();
+            // 分区优先于模型：内置预设那一批的共同点是「预设」而不是「跑哪个模型」，
+            // 混进用户自建的同模型房间里就找不着了。带分区的排在前面（false < true）。
+            let mut groups: BTreeMap<(bool, String), Vec<(usize, &Agent)>> = BTreeMap::new();
             for (i, a) in c.agents.iter().enumerate() {
-                groups
-                    .entry(room_model_label(a))
-                    .or_default()
-                    .push((i + 1, a));
+                let section = a.section.trim();
+                let key = if section.is_empty() {
+                    (true, room_model_label(a))
+                } else {
+                    (false, format!("{section} · {}", room_model_label(a)))
+                };
+                groups.entry(key).or_default().push((i + 1, a));
             }
             let mut html_parts = Vec::new();
-            for (model, mut agents) in groups {
+            for ((plain, model), mut agents) in groups {
                 agents.sort_by_key(|a| a.1.name.to_lowercase());
-                html_parts.push(format!(r#"<div class="model-group"><div class="model-header"><span>📦 {}</span><span class="model-count">{}</span></div><div class="agent-grid">"#, model, agents.len()));
+                html_parts.push(format!(r#"<div class="model-group"><div class="model-header"><span>{} {}</span><span class="model-count">{}</span></div><div class="agent-grid">"#, if plain { "📦" } else { "🎨" }, model, agents.len()));
                 for (real_idx, a) in agents {
                     let desc_display = if !a.description.is_empty() {
                         super::utils::truncate_str(&a.description, 20)
@@ -1697,6 +1702,18 @@ pub async fn execute(
 > 可选参数：`--size 1536x1024`（或 `-s auto`）、`--quality high`（或 `-q low/medium/high/auto`）。
 > 走图像接口的模型关键字由 `[oai].image_models` 配置，默认 `["gpt-image-2.5"]`。
 
+## 画图预设房间
+首次启动自动建好，在 `/#` 的「画图预设」分区里；名字中间的 `·` 是为了不被日常聊天误触发。
+
+| 指令 | 画什么 |
+|------|------|
+{{presets}}
+
+> 用法：`画·手办 一只戴眼镜的橘猫`；发图、引用图片或房间名后 @某人，就以那张图为垫图改图。
+> 可选参数同上：`--size 1536x1024`、`--quality high`；加 `~` 前缀（`~画·手办 ...`）不留历史。
+> 预设就是房间的系统提示词：`画·手办/$` 看一眼，`画·手办$自己的提示词` 改掉，
+> `画·手办~#我的手办` 复制一份再改。删掉的房间不会在下次启动时复活。
+
 ## 历史管理
 | 指令 | 功能 |
 |------|------|
@@ -1721,11 +1738,18 @@ pub async fn execute(
 ## API 配置
 更新指令: `oai API地址 API密钥`
 "#;
+            // 预设那张表跟着代码走：加一间房间不该忘了改帮助。
+            let presets = super::presets::PRESETS
+                .iter()
+                .map(|preset| format!("| `{} 内容` | {} |", preset.name, preset.desc))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let help = help.replace("{{presets}}", &presets);
             reply(
                 ctx,
                 writer,
                 &msg_event,
-                help,
+                &help,
                 cmd.text_mode,
                 "🤖 OAI 符号指令帮助",
             )

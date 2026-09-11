@@ -140,6 +140,13 @@ impl Manager {
             config.pi_room_initialized = true;
             config_dirty = true;
         }
+        // 内置画图预设：建过一次就记下名字，删掉的不复活，新加的才补建。
+        let created = super::presets::seed(&mut config);
+        if created > 0 {
+            config_dirty = true;
+            info!(target: "Plugin/OAI", "已建好 {created} 间画图预设房间（/# 里的「{}」分区）", super::presets::SECTION);
+        }
+
         if config_dirty && let Ok(serialized) = serde_json::to_string_pretty(&config) {
             let _ = std::fs::write(&path, serialized);
         }

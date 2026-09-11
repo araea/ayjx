@@ -41,6 +41,12 @@ pub struct Agent {
     pub name: String,
     #[serde(default)]
     pub description: String,
+    /// 房间在 `/#` 列表里归到哪个分区；留空则按模型分组（一直以来的样子）。
+    ///
+    /// 内置的画图预设用它单独成区：那一批房间的共同点是「预设」而不是「模型」，
+    /// 按模型分组会把它们混进用户自己建的同模型房间里。
+    #[serde(default)]
+    pub section: String,
     /// 执行引擎：[`ENGINE_PI`] 或 [`ENGINE_CHAT`]。
     ///
     /// 房间名曾经是唯一的开关——只有 `pi` 和 `pi-*` 能用 pi agent，于是所有想用 pi
@@ -74,6 +80,7 @@ impl Agent {
         Self {
             name: name.to_string(),
             description: desc.to_string(),
+            section: String::new(),
             engine: String::new(),
             model: model.to_string(),
             thinking: String::new(),
@@ -183,6 +190,12 @@ pub struct Config {
     /// 内置默认值迁移版本；避免每次启动覆盖管理员后续的模型选择。
     #[serde(default)]
     pub defaults_version: u32,
+    /// 已经建过的内置预设房间名（见 [`super::presets`]）。
+    ///
+    /// 记的是「建过」而不是「存在」：管理员删掉哪间就是不要哪间，下次启动不复活；
+    /// 而新加的预设仍会补建，因为它的名字还不在这张表里。
+    #[serde(default)]
+    pub seeded_presets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
