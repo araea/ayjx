@@ -488,7 +488,7 @@ impl Session {
                 ensure!(self.enabled(), "该群的搭话功能已停用");
                 ensure!(self.current(), "群聊已更新，先读 satori_context 再决定");
                 let prompt = request["prompt"].as_str().unwrap_or("").trim().to_string();
-                ensure!(!prompt.is_empty(), "绘图提示词不能为空");
+                ensure!(!prompt.is_empty(), "绘图提示词先给几个字");
                 let images: Vec<String> = request["images"]
                     .as_array()
                     .map(|array| {
@@ -506,7 +506,7 @@ impl Session {
                 let (api_base, api_key, model) = {
                     let mgr = super::super::data::MANAGER
                         .get()
-                        .ok_or_else(|| anyhow::anyhow!("OAI 尚未初始化，暂不能绘图"))?;
+                        .ok_or_else(|| anyhow::anyhow!("OAI 还没就绪，绘图这会儿用不了"))?;
                     let config = mgr.config.read().await;
                     let oai = crate::plugins::get_config_or_default::<super::super::OaiConfig>(
                         &self.ctx,
@@ -623,7 +623,7 @@ impl Session {
                 self.attempted.store(true, Ordering::SeqCst);
                 ensure!(
                     self.current(),
-                    "群聊已更新或停用。先读 satori_context 再决定，禁止盲目重试旧动作"
+                    "群聊已更新或停用。先读 satori_context 再决定，旧动作照现在聊的重新想一遍更稳"
                 );
                 let action: Action = serde_json::from_value(request["request"].clone())?;
                 let turns = self.turns();
@@ -657,7 +657,7 @@ impl Session {
                         // 其余错误进入下一轮上下文；网络超时可能已经成功，不自动重放。
                         self.record(
                             format!(
-                                "[动作未确认 {}：{}；勿盲目重复]",
+                                "[动作未确认 {}：{}；结果未知，换个做法更稳]",
                                 request["request"]["action"], error
                             ),
                             0,
@@ -794,7 +794,7 @@ impl Session {
             Action::Like { .. }
                 if text.contains("send_like failed") || text.contains("not match appid") =>
             {
-                "QQ 拒绝了这个账号的资料卡点赞（平台限制，不是参数问题）。本轮别再试，换一种回应。"
+                "QQ 拒绝了这个账号的资料卡点赞（平台限制，不是参数问题）。这一轮换个法子回应更划算。"
             }
             _ => return false,
         };
@@ -834,7 +834,7 @@ impl Session {
         let media = tokio::fs::canonicalize(&self.media).await.ok();
         ensure!(
             path.starts_with(scratch) || media.is_some_and(|root| path.starts_with(root)),
-            "本地资源应放在本轮工作目录或 ambient/media，不能发送任意私有文件"
+            "本地资源取自本轮工作目录或 ambient/media，Termux 私有路径 QQ 读不到"
         );
         let meta = tokio::fs::metadata(&path).await?;
         ensure!(
@@ -1006,7 +1006,7 @@ impl Session {
         let note = match failure {
             None => format!("这段话在换气处分成 {} 条发出，算你这一次发言", ids.len()),
             Some(error) => format!(
-                "前 {} 条已经发出去了，剩下的没发成：{error}。已经发出的别重发",
+                "前 {} 条已经发出去了，剩下的没发成：{error}。发出去的那几条就留着",
                 ids.len()
             ),
         };
@@ -1039,7 +1039,7 @@ impl Session {
         let id = receipt.ok_or_else(|| {
             anyhow::anyhow!(
                 "这一句没有发出去：交给 QQ 之前群里又有人说话（或被插件拦截）。\
-                 先读 satori_context 看看现在在聊什么，别原样重发"
+                 先读 satori_context 看看现在在聊什么，再决定要不要说"
             )
         })?;
         let numeric = actions::id(&id)?;
@@ -1547,7 +1547,7 @@ mod tests {
         let again = action(&lease, "like-again", json!({"action":"like","user_id":"42"})).await;
         assert_eq!(again["ok"], false, "{again}");
         let second = again["error"].as_str().unwrap();
-        assert!(second.contains("本轮别再试"), "{second}");
+        assert!(second.contains("换个法子"), "{second}");
         assert_eq!(
             calls
                 .lock()

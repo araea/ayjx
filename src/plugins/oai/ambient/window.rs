@@ -163,12 +163,12 @@ impl GroupState {
             });
         let crowding = match recent {
             0 => "",
-            1 => "刚接过一轮，别急着再接。",
-            _ => "最近这十分钟已经由你说了好几轮，这会儿更该看着。",
+            1 => "刚接过一轮，这一轮交给别人也正好。",
+            _ => "最近这十分钟已经由你说了好几轮，这会儿看着就好。",
         };
         format!(
             "你{since}，最近十分钟发言 {recent} 轮，近一小时 {count} 轮。{crowding}\
-             当前关注：{focus}。关注不等于必须回复；只接有新意且还在继续的对话。"
+             当前关注：{focus}。关注是给自己留个念想，接不接随你；有新意又还在继续的对话最值得接。"
         )
     }
 
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(state.spoken_within(Duration::ZERO), 0);
         let rhythm = state.rhythm();
         assert!(rhythm.contains("最近十分钟发言 2 轮"), "{rhythm}");
-        assert!(rhythm.contains("更该看着"), "{rhythm}");
+        assert!(rhythm.contains("看着就好"), "{rhythm}");
         assert!(state.last_spoke.is_some());
     }
 }

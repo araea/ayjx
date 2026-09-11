@@ -109,7 +109,7 @@ pub(crate) fn register(turns: &[Turn]) -> String {
         ));
     }
     format!(
-        "本群此刻：{}。说话往这个劲儿上靠，别自成一格。",
+        "本群此刻：{}。说话往这个劲儿上靠，顺着大家的调子来。",
         parts.join("，")
     )
 }

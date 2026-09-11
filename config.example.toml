@@ -88,7 +88,7 @@ thinking = "low"
 # read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去；
 # web_search / fetch_content / get_search_content 是「不知道就去查」那条路
 # （群友贴的链接也靠 fetch_content 才真读得到）；source_check 给有争议的说法找出处。
-# 去掉 bash 可关闭本轮命令执行工具；名字必须是 pi 实际注册了的工具。
+# 不想让它在本轮跑命令，就把 bash 从这行拿掉；名字取自 pi 实际注册的工具。
 tools = "read,write,bash,web_search,source_check,fetch_content,get_search_content"
 # 开口意愿分门槛，调高更沉默。实际门槛还会随「最近十分钟自己说了几轮」抬高
 # （每轮 +8，最多 +24），随关注中的续聊下调 15 分，见 docs/ambient.md。

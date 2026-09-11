@@ -78,7 +78,7 @@ fn one() -> u8 {
 
 pub(crate) fn id(raw: &str) -> Result<i64> {
     let value: i64 = raw.parse()?;
-    ensure!(value != 0, "ID 不能为 0");
+    ensure!(value != 0, "ID 用一个非零的数字");
     Ok(value)
 }
 pub(crate) fn message<'a>(turns: &'a [Turn], raw: &str) -> Result<&'a Turn> {
@@ -92,7 +92,7 @@ pub(crate) fn user(turns: &[Turn], raw: &str) -> Result<i64> {
     let id = id(raw)?;
     ensure!(
         id > 0 && turns.iter().any(|t| t.user_id == id),
-        "目标必须是当前群记录里的成员"
+        "目标取自当前群记录里的成员"
     );
     Ok(id)
 }
@@ -118,7 +118,7 @@ impl Action {
                             chars += text.chars().count();
                         }
                         Part::Face { id } => {
-                            ensure!(id.parse::<u32>().is_ok(), "表情 ID 必须为数字");
+                            ensure!(id.parse::<u32>().is_ok(), "表情 ID 用数字");
                         }
                         Part::Sticker { message_id, index } => {
                             sticker(message(turns, message_id)?, *index)?;
@@ -149,7 +149,7 @@ impl Action {
                     .join(" ");
                 ensure!(
                     !super::tone::echoes(&body, turns),
-                    "这句话你刚说过，换一句或者干脆别说"
+                    "这句话刚说过，换个说法，或者先放着也行"
                 );
             }
             Self::Poke { user_id } => {
@@ -165,10 +165,10 @@ impl Action {
                 ..
             } => {
                 message(turns, message_id)?;
-                ensure!(emoji_id.parse::<u32>().is_ok(), "表态 ID 必须为数字");
+                ensure!(emoji_id.parse::<u32>().is_ok(), "表态 ID 用数字");
             }
             Self::Recall { message_id } => {
-                ensure!(message(turns, message_id)?.from_me, "只能撤回自己的消息");
+                ensure!(message(turns, message_id)?.from_me, "撤回作用于自己发出的消息");
             }
             Self::Forward { message_ids, texts } => {
                 ensure!(
