@@ -19,6 +19,7 @@ pub mod parser;
 mod pi_agent;
 pub(crate) mod presets;
 pub mod render;
+mod search;
 pub mod types;
 pub mod utils;
 
@@ -35,6 +36,36 @@ pub(crate) struct ProviderConfig {
     pub api_base: String,
     /// 该供应商的 APIKEY。
     pub api_key: String,
+    /// 该接口是否支持联网搜索。
+    ///
+    /// 搜索不属于 OpenAI 兼容协议：走 `~/dev/deepseek-api` 桥接的 DeepSeek APP 接口
+    /// 用请求体里的 `search: true` 开启，答案里带 `[citation:N]`，并在响应的
+    /// `search_results` 里给出来源。别的站点不认这个字段，硬发过去有的会直接报错，
+    /// 所以默认关闭，只对明确声明支持的供应商开启。
+    pub search: bool,
+}
+
+/// 这个供应商（可能为空 = 默认接口）是否支持联网搜索。
+pub(crate) fn provider_supports_search(
+    providers: &HashMap<String, ProviderConfig>,
+    provider: Option<&str>,
+) -> bool {
+    provider
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .and_then(|name| providers.get(name))
+        .is_some_and(|found| found.search)
+}
+
+/// 一次请求要落的接口。
+#[derive(Debug, Clone)]
+pub(crate) struct Endpoint {
+    /// OpenAI 兼容基址（已解析供应商前缀）。
+    pub base: String,
+    /// 该接口的密钥。
+    pub key: String,
+    /// 该接口是否支持联网搜索（见 [`ProviderConfig::search`]）。
+    pub search: bool,
 }
 
 /// 解析一次请求要用的接口地址与密钥。
@@ -48,16 +79,29 @@ pub(crate) fn resolve_endpoint(
     default_base: &str,
     default_key: &str,
     provider: Option<&str>,
-) -> Option<(String, String)> {
+) -> Option<Endpoint> {
     let name = provider.map(str::trim).filter(|name| !name.is_empty());
     match name {
-        None => Some((default_base.to_string(), default_key.to_string())),
+        None => Some(Endpoint {
+            base: default_base.to_string(),
+            key: default_key.to_string(),
+            // 默认接口是中转站，不认 `search` 字段。
+            search: false,
+        }),
         Some(name) => {
             if let Some(found) = providers.get(name) {
-                return Some((found.api_base.clone(), found.api_key.clone()));
+                return Some(Endpoint {
+                    base: found.api_base.clone(),
+                    key: found.api_key.clone(),
+                    search: found.search,
+                });
             }
             name.eq_ignore_ascii_case("apilio")
-                .then(|| (default_base.to_string(), default_key.to_string()))
+                .then(|| Endpoint {
+                    base: default_base.to_string(),
+                    key: default_key.to_string(),
+                    search: false,
+                })
         }
     }
 }
@@ -299,29 +343,64 @@ mod tests {
             ProviderConfig {
                 api_base: "https://api.deepseek.com/v1".into(),
                 api_key: "sk-deepseek".into(),
+                search: false,
+            },
+        );
+        // 带搜索能力的供应商（如本机 DeepSeek APP 桥接）。
+        providers.insert(
+            "dsapp".to_string(),
+            ProviderConfig {
+                api_base: "http://127.0.0.1:9000/v1".into(),
+                api_key: "sk-dsapp".into(),
+                search: true,
             },
         );
         let resolve = |name: Option<&str>| {
             resolve_endpoint(&providers, "https://api.apilio.ai/v1", "sk-apilio", name)
+                .map(|e| (e.base, e.key, e.search))
         };
-        // 不带前缀：默认接口，既有房间行为不变。
+        // 不带前缀：默认接口，既有房间行为不变；中转站不认 search，所以关着。
         assert_eq!(
             resolve(None),
-            Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into()))
+            Some((
+                "https://api.apilio.ai/v1".into(),
+                "sk-apilio".into(),
+                false
+            ))
         );
         // 新供应商按名字取自己的接口。
         assert_eq!(
             resolve(Some("deepseek")),
-            Some(("https://api.deepseek.com/v1".into(), "sk-deepseek".into()))
+            Some((
+                "https://api.deepseek.com/v1".into(),
+                "sk-deepseek".into(),
+                false
+            ))
+        );
+        // 只有声明了 search 的供应商才会带上搜索开关。
+        assert_eq!(
+            resolve(Some("dsapp")),
+            Some(("http://127.0.0.1:9000/v1".into(), "sk-dsapp".into(), true))
         );
         // apilio 不必重复配置，始终回退到默认接口，避免与 `oai <url> <key>` 脱节。
         assert_eq!(
             resolve(Some("apilio")),
-            Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into()))
+            Some((
+                "https://api.apilio.ai/v1".into(),
+                "sk-apilio".into(),
+                false
+            ))
         );
         // 未知供应商宁可报错，也不悄悄打到别的站点。
         assert_eq!(resolve(Some("unknown")), None);
-        assert_eq!(resolve(Some("  ")), Some(("https://api.apilio.ai/v1".into(), "sk-apilio".into())));
+        assert_eq!(
+            resolve(Some("  ")),
+            Some((
+                "https://api.apilio.ai/v1".into(),
+                "sk-apilio".into(),
+                false
+            ))
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use super::data::Manager;
 use super::parser::{Action, Command, Scope};
 use super::types::{Agent, ChatMessage};
 use super::utils::{escape_markdown_special, format_export_txt, format_history};
+use super::Endpoint;
 use crate::adapters::satori::{LockedWriter, api, send_msg};
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
@@ -228,7 +229,7 @@ fn sniff_image_mime(bytes: &[u8]) -> &'static str {
 /// 把房间的思考强度映射成 Chat Completions 的 `reasoning_effort`。
 ///
 /// 档位沿用 Pi 的 `--thinking` 写法；`off` 是「不思考」，等价于 OpenAI 的 `none`。
-fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
+pub(super) fn reasoning_effort(level: &str) -> Option<ReasoningEffort> {
     Some(match level {
         "off" | "none" => ReasoningEffort::None,
         "minimal" => ReasoningEffort::Minimal,
@@ -343,8 +344,14 @@ async fn chat(
         super::mj::handle_agent(&agent, &cmd.args, imgs, ctx, writer, mgr).await;
         return;
     }
-    let (api_base, api_key) = if use_pi {
-        (api.0.clone(), api.1.clone())
+    // Pi 房间由 Pi 自己认 provider/model，这里的 endpoint 只用于普通房间；
+    // 给它一份不含搜索的占位，免得 Pi 分支误开搜索。
+    let endpoint = if use_pi {
+        super::Endpoint {
+            base: api.0.clone(),
+            key: api.1.clone(),
+            search: false,
+        }
     } else {
         match super::resolve_endpoint(
             &oai.providers,
@@ -368,6 +375,7 @@ async fn chat(
             }
         }
     };
+    let (api_base, api_key) = (endpoint.base.clone(), endpoint.key.clone());
 
     let is_priv_ctx = cmd.private_reply;
     let uid = event.user_id().to_string();
@@ -467,6 +475,7 @@ async fn chat(
                     &oai,
                     mgr.path.parent().unwrap_or(&mgr.path),
                     control.as_ref(),
+                    &endpoint,
                 )
                 .await
             }
@@ -695,6 +704,7 @@ async fn respond(
     oai: &super::OaiConfig,
     data_dir: &std::path::Path,
     control: Option<&crate::plugins::ctl::bridge::Lease>,
+    endpoint: &Endpoint,
 ) -> anyhow::Result<Reply> {
     let thinking = agent.effective_thinking();
     if agent.uses_pi() {
@@ -718,6 +728,26 @@ async fn respond(
         });
     }
     let msgs = build_chat_messages(agent, hist).await;
+
+    // 声明了搜索的供应商走自己那条路：OpenAI 协议里没有开关搜索的地方。
+    if endpoint.search {
+        let reply = super::search::complete(
+            &endpoint.base,
+            &endpoint.key,
+            chat_model,
+            msgs,
+            thinking.as_deref(),
+        )
+        .await?;
+        return Ok(Reply {
+            text: reply.text,
+            sources: reply.sources,
+            trace: Vec::new(),
+            trace_overflow: 0,
+            model: Some(chat_model.to_string()),
+        });
+    }
+
     Ok(Reply {
         text: complete(client, chat_model, msgs, thinking.as_deref()).await?,
         sources: Vec::new(),
@@ -1654,6 +1684,7 @@ pub async fn execute(
 
 > 普通房间的模型可写 `供应商/模型`，按 `[oai.providers]` 选接口；不带前缀走默认接口。
 > 思考强度 `off`/`minimal`/`low`/`medium`/`high`，模型后的 `:强度` 优先于房间设置。
+> 供应商配了 `search = true` 时该房间会联网搜索，答案里标 `[1][2]`，卡片底部列出来源。
 
 ## 对话控制
 | 指令 | 功能 |
@@ -2125,10 +2156,26 @@ mod tests {
             ..Default::default()
         };
         let client = Client::with_config(OpenAIConfig::new().with_api_base("").with_api_key(""));
+        // Pi 房间不看 endpoint，给个空占位即可。
+        let endpoint = Endpoint {
+            base: String::new(),
+            key: String::new(),
+            search: false,
+        };
         for name in ["pi", "PI-test"] {
             let agent = Agent::new(name, "mj", "", "");
             let history = vec![ChatMessage::new("user", "test", vec![])];
-            let result = respond(&client, &agent, "mj", &history, &config, &dir, None).await;
+            let result = respond(
+                &client,
+                &agent,
+                "mj",
+                &history,
+                &config,
+                &dir,
+                None,
+                &endpoint,
+            )
+            .await;
             assert!(result.err().unwrap().to_string().contains("无法启动 pi"));
         }
         std::fs::remove_dir_all(dir).unwrap();

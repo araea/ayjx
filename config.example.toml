@@ -44,6 +44,17 @@ image_models = ["gpt-image-2.5"]
 api_base = "https://api.deepseek.com/v1"
 api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
+# 声明 `search = true` 的供应商会联网搜索：请求里带上搜索开关，答案里的引用标记
+# 会改写成 [1][2] 这样的来源序号，并在回复卡片底部列出「参考来源」。
+# 搜索不是 OpenAI 协议的一部分，只有明确支持的接口才认——目前是
+# `~/dev/deepseek-api` 那个桥接本机 DeepSeek APP 的服务。别的站点不要开，
+# 不认这个字段的接口收到后可能直接报错。
+# 它由模型自行决定搜不搜：能直接答的问题（如「1+1」）不会触发。
+# [oai.providers.dsapp]
+# api_base = "http://127.0.0.1:9000/v1"
+# api_key = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# search = true
+
 # 房间模型与判定模型都支持 `:强度` 后缀，强度取 off/minimal/low/medium/high。
 # 也可建房后单独改：`房间%deepseek-flash:high`。
 
