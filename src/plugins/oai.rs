@@ -18,7 +18,6 @@ pub mod logic;
 pub mod mj;
 pub mod parser;
 mod agent;
-pub(crate) mod chat_presets;
 pub(crate) mod presets;
 pub mod render;
 pub(crate) mod search;

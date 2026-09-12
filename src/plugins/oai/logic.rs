@@ -1736,17 +1736,6 @@ pub async fn execute(
 > 预设就是房间的系统提示词：`画·手办/$` 看一眼，`画·手办$自己的提示词` 改掉，
 > `画·手办~#我的手办` 复制一份再改。删掉的房间不会在下次启动时复活。
 
-## 对话模板房间
-首次启动自动建好，在 `/#` 的「对话预设」分区里；一间房一个当下主流的对话模型，
-提示词留空，名字中间的 `·` 同理是为了不被日常聊天误触发。
-
-| 指令 | 模型 |
-|------|------|
-{{chat_presets}}
-
-> 用法：`聊·GPT 帮我把这段话改得更短`。想固定风格就自己写提示词：`聊·GPT$你是...`；
-> 想留一间自己调，先复制：`聊·GPT~#我的GPT`。删掉的房间不会在下次启动时复活。
-
 ## 历史管理
 | 指令 | 功能 |
 |------|------|
@@ -1778,12 +1767,6 @@ pub async fn execute(
                 .collect::<Vec<_>>()
                 .join("\n");
             let help = help.replace("{{presets}}", &presets);
-            let chat_presets = super::chat_presets::PRESETS
-                .iter()
-                .map(|preset| format!("| `{} 内容` | {} |", preset.name, preset.desc))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let help = help.replace("{{chat_presets}}", &chat_presets);
             reply(
                 ctx,
                 writer,

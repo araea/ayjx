@@ -12,11 +12,17 @@ const CURRENT_DEFAULTS_VERSION: u32 = 4;
 /// 旧版建房间时自动填充的默认系统提示词，现已改为留空；迁移时按原样匹配后清掉。
 const LEGACY_DEFAULT_PROMPT: &str = "You are a helpful assistant.";
 
-/// `pi` 房间的人设。
+/// 内置 agent 房间的默认名字。
+///
+/// 取四个字是刻意的：房间指令是前缀匹配的（`parse_agent_cmd`），名字越短越容易在
+/// 日常聊天里撞上；「管家大人」既不会被顺口带出，叫起来也比一个 `pi` 明白。
+const BUILTIN_ROOM: &str = "管家大人";
+
+/// 内置 agent 房间的人设。
 ///
 /// 只写「是谁、什么风格」；运行环境、工具策略与排版要求由内置 agent 自己生成——
 /// 那些内容写死在人设里会随时间过期，也没法随工具集变化。
-const PI_PERSONA: &str = "你是 pi，一个务实、直接的通用助手，回答简洁但不省略关键依据。";
+const PI_PERSONA: &str = "你是管家大人，一个务实、直接的通用助手，回答简洁但不省略关键依据。";
 
 /// 旧版 `pi` 人设；把运行细节写进了人设，现已是内置 agent 自己的事。
 const LEGACY_PI_PERSONA: &str = "You are pi, a capable general assistant. In this public room you can use a full-permission shell and live web search. Use tools whenever they make the answer more accurate; never invent tool results. For web research, include the source URLs you relied on.";
@@ -119,12 +125,12 @@ impl Manager {
             }
         }
 
-        // 老配置只迁移一次；之后若管理员主动删除 `pi`，尊重这一选择。
+        // 老配置只迁移一次；之后若管理员主动删除它，尊重这一选择。
         if !config.pi_room_initialized {
             if !config
                 .agents
                 .iter()
-                .any(|agent| agent.name.eq_ignore_ascii_case("pi"))
+                .any(|agent| agent.name.eq_ignore_ascii_case(BUILTIN_ROOM))
             {
                 let model = if config.default_model.trim().is_empty() {
                     DEFAULT_MODEL
@@ -132,7 +138,7 @@ impl Manager {
                     &config.default_model
                 };
                 let mut room =
-                    super::types::Agent::new("pi", model, PI_PERSONA, "终端与联网工具助手");
+                    super::types::Agent::new(BUILTIN_ROOM, model, PI_PERSONA, "终端与联网工具助手");
                 room.set_engine(super::types::ENGINE_PI, model);
                 config.agents.push(room);
             }
@@ -144,12 +150,6 @@ impl Manager {
         if created > 0 {
             config_dirty = true;
             info!(target: "Plugin/OAI", "已建好 {created} 间画图预设房间（/# 里的「{}」分区）", super::presets::SECTION);
-        }
-        // 内置对话模板房间：与画图预设共用同一份「建过」账，语义一致。
-        let created = super::chat_presets::seed(&mut config);
-        if created > 0 {
-            config_dirty = true;
-            info!(target: "Plugin/OAI", "已建好 {created} 间对话模板房间（/# 里的「{}」分区）", super::chat_presets::SECTION);
         }
 
         if config_dirty && let Ok(serialized) = serde_json::to_string_pretty(&config) {
@@ -304,7 +304,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initializes_pi_room_once() {
+    fn initializes_the_builtin_room_once() {
         let unique = format!(
             "ayjx-oai-pi-{}-{}",
             std::process::id(),
@@ -319,14 +319,15 @@ mod tests {
         let manager = Manager::new(dir.clone());
         let serialized = std::fs::read_to_string(&manager.path).unwrap();
         let config: Config = serde_json::from_str(&serialized).unwrap();
-        let pi = config
+        let room = config
             .agents
             .iter()
-            .find(|agent| agent.name == "pi")
+            .find(|agent| agent.name == BUILTIN_ROOM)
             .unwrap();
-        assert_eq!(pi.description, "终端与联网工具助手");
-        assert_eq!(pi.model, DEFAULT_MODEL);
-        assert!(pi.public_history.is_empty());
+        assert_eq!(room.description, "终端与联网工具助手");
+        assert_eq!(room.model, DEFAULT_MODEL);
+        assert!(room.public_history.is_empty());
+        assert!(room.uses_pi());
         assert_eq!(config.default_model, DEFAULT_MODEL);
         assert_eq!(config.defaults_version, CURRENT_DEFAULTS_VERSION);
         assert!(config.pi_room_initialized);
