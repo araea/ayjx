@@ -18,6 +18,7 @@
 use super::api::{DailyBlock, DailyReport, HotTopic, Item, category_label};
 use super::leaderboard::{Board, Trend};
 use super::render::{RenderOptions, fmt_time, truncate};
+use crate::render::web::TabGuard;
 use anyhow::Result;
 use cdp_html_shot::{Browser, CaptureOptions, Viewport};
 use chrono::{DateTime, Timelike, Utc};
@@ -612,11 +613,14 @@ pub async fn capture(html: &str, scale: f64) -> Result<String> {
         3.0
     };
     let browser = Browser::instance().await;
-    let tab = browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?;
+    // 标签页交给守卫：下面那道 timeout 触发时会把这段流程整个取消，`close()` 便执行
+    // 不到；守卫的 Drop 保证页面一定被关掉。
+    let guard = TabGuard::new(browser.new_tab().await.map_err(|e| anyhow::anyhow!(e))?);
 
     // CDP/Chromium 在 Android 锁屏或进程调度异常时可能永远等不到响应。
     // 给整段截图流程设硬上限，确保定时推送最终能进入文本兜底而非永久卡住。
     let result = tokio::time::timeout(Duration::from_secs(45), async {
+        let tab = guard.tab();
         tab.set_viewport(&Viewport::new(WIDTH, 600).with_device_scale_factor(scale))
             .await?;
         tab.set_content(html).await?;
@@ -639,7 +643,7 @@ pub async fn capture(html: &str, scale: f64) -> Result<String> {
     .await
     .map_err(|_| anyhow::anyhow!("卡片截图超时（45 秒）"))?;
 
-    let _ = tokio::time::timeout(Duration::from_secs(5), tab.close()).await;
+    guard.close().await;
     result
 }
 

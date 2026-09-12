@@ -178,6 +178,49 @@ pub fn html(doc: &Doc) -> String {
 static CAPTURE_GATE: Semaphore = Semaphore::const_new(1);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// 浏览器标签页的清理守卫。
+///
+/// `cdp_html_shot::Tab` 没有 `Drop`：只有显式调用 `close()` 才会关掉页面。而持有它的
+/// future 一旦被 `timeout` 取消（或调用方提前放手），那句 `close()` 就永远执行不到，
+/// 页面会一直留在浏览器里。并发一高，攒下的空白页与已加载页面既吃内存，也让后续
+/// 截图越来越慢。
+///
+/// 守卫把关闭挪进 `Drop`：正常返回、报错、被取消三条路都从这里收尾。`close()` 需要
+/// await 而 `Drop` 只能同步，所以 `Drop` 里派一个独立任务去关——即便当前 future 正被
+/// 取消，关闭照样发生。
+pub(crate) struct TabGuard(Option<cdp_html_shot::Tab>);
+
+impl TabGuard {
+    pub(crate) fn new(tab: cdp_html_shot::Tab) -> Self {
+        Self(Some(tab))
+    }
+
+    /// 借出标签页做操作；关闭只经 [`TabGuard::close`] 或 `Drop`。
+    pub(crate) fn tab(&self) -> &cdp_html_shot::Tab {
+        self.0.as_ref().expect("标签页已被关闭")
+    }
+
+    /// 主动关闭。正常情况下走这里，让清理发生在当前任务里。
+    pub(crate) async fn close(mut self) {
+        if let Some(tab) = self.0.take() {
+            let _ = timeout(Duration::from_secs(3), tab.close()).await;
+        }
+    }
+}
+
+impl Drop for TabGuard {
+    fn drop(&mut self) {
+        let Some(tab) = self.0.take() else { return };
+        // `Drop` 不能 await，交给运行时上的独立任务收尾。运行时已在关闭时 spawn 会
+        // 失败，那种情形进程也快退了，页面随进程一起消失。
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = timeout(Duration::from_secs(3), tab.close()).await;
+            });
+        }
+    }
+}
+
 fn scale_factor(scale: f64) -> f64 {
     if scale.is_finite() {
         scale.clamp(1.0, 4.0)
@@ -210,8 +253,8 @@ pub async fn capture_html(
             Some(path) => Browser::instance_with_path(path).await,
             None => Browser::instance().await,
         };
-        page = Some(browser.new_tab().await?);
-        let tab = page.as_ref().unwrap();
+        page = Some(TabGuard::new(browser.new_tab().await?));
+        let tab = page.as_ref().unwrap().tab();
         tab.set_viewport(&Viewport::new(width, 600).with_device_scale_factor(scale)).await?;
         tab.set_content(html).await?;
         tab.evaluate("document.fonts.ready.then(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)))))").await?;
@@ -226,8 +269,9 @@ pub async fn capture_html(
         tab.find_element(".shot").await?.screenshot_with_options(opts).await
     })).catch_unwind().await;
     // 成功、错误和超时均清理页面；不能在 timeout 的 ? 之后才安排清理。
-    if let Some(tab) = page {
-        let _ = timeout(Duration::from_secs(3), tab.close()).await;
+    // 即便整个 future 被外层取消，TabGuard 的 Drop 也会把关闭补上。
+    if let Some(guard) = page {
+        guard.close().await;
     }
     match result {
         Ok(Ok(result)) => result,
@@ -304,5 +348,56 @@ mod tests {
         assert_eq!(scale_factor(f64::INFINITY), 3.0);
         assert_eq!(scale_factor(0.0), 1.0);
         assert_eq!(scale_factor(9.0), 4.0);
+    }
+
+    /// 调试端口上的页面（`type == "page"`）个数。
+    async fn page_targets(port: u16) -> usize {
+        let targets: serde_json::Value = crate::http::client()
+            .get(format!("http://127.0.0.1:{port}/json/list"))
+            .send()
+            .await
+            .expect("浏览器调试端口无响应")
+            .json()
+            .await
+            .expect("调试端口返回的不是 JSON");
+        targets
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// 守卫析构时必须把页面关掉——future 被 `timeout` 取消时，这是唯一还在生效的
+    /// 清理路径。用真实浏览器开一个固定调试端口，直接数页面个数。
+    #[tokio::test]
+    #[ignore = "需要 Chromium；占用 9222 调试端口"]
+    async fn dropping_the_guard_closes_the_page() {
+        const PORT: u16 = 9222;
+        let browser = cdp_html_shot::Browser::launch_with(
+            cdp_html_shot::LaunchOptions::new().arg(format!("--remote-debugging-port={PORT}")),
+        )
+        .await
+        .unwrap();
+
+        let before = page_targets(PORT).await;
+        {
+            let _guard = TabGuard::new(browser.new_tab().await.unwrap());
+            assert_eq!(page_targets(PORT).await, before + 1, "新开的页面应当可见");
+        }
+        // Drop 里派发的是独立任务，给它一点时间落地。
+        let mut after = before + 1;
+        for _ in 0..30 {
+            after = page_targets(PORT).await;
+            if after == before {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(after, before, "守卫析构后页面应当被关掉");
+
+        let _ = browser.close_async().await;
     }
 }

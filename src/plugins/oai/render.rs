@@ -11,11 +11,13 @@
 //! 区分、代码块深色高对比、表格斑马纹、长 URL 强制断行；正文之外还能挂来源列表
 //! 与耗时页脚，让读者一眼看清结论出处与代价。
 
+use crate::render::web::TabGuard;
 use cdp_html_shot::{Browser, CaptureOptions, ClipRegion, ImageFormat, Viewport};
 use pulldown_cmark::{Options, Parser, html};
 use regex::Regex;
 use std::sync::OnceLock;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// 卡片 CSS 宽度；配合 2 倍像素密度即 1040px 位图，在手机聊天窗口里既清晰又不糊。
 const CARD_WIDTH: u32 = 520;
@@ -32,6 +34,12 @@ const MAX_CARD_HEIGHT: f64 = 20_000.0;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
 /// 等待网页字体就绪的上限。字体没到位会让 CJK 行高算错、卡片底部被切。
 const FONT_WAIT_MS: u32 = 800;
+/// 同时进行的卡片渲染上限。
+///
+/// 群里多个房间、多个人同时发问时，每一轮回复都要截一张卡片；没有闸门的写法就是
+/// 一人一个标签页一起开，浏览器被压垮之后每个渲染又都卡到超时——那正是页面关不掉
+/// 的温床。webshot 与 help/ctl 的卡片各有自己的闸门，这里补上同一道。
+static RENDER_GATE: Semaphore = Semaphore::const_new(2);
 
 /// 卡片内容。
 pub(crate) struct Card<'a> {
@@ -59,6 +67,11 @@ pub(crate) struct Footer {
 /// 渲染成 base64 JPEG。
 pub(crate) async fn render_card(card: Card<'_>) -> anyhow::Result<String> {
     let html = build_html(&card);
+    // 排队在超时之外：等闸门的时间不算渲染预算，否则高峰期排在后头的必然失败。
+    let _permit = RENDER_GATE
+        .acquire()
+        .await
+        .map_err(|_| anyhow::anyhow!("卡片渲染闸门不可用"))?;
     match tokio::time::timeout(RENDER_TIMEOUT, render_html(&html)).await {
         Ok(result) => result,
         Err(_) => Err(anyhow::anyhow!(
@@ -70,9 +83,11 @@ pub(crate) async fn render_card(card: Card<'_>) -> anyhow::Result<String> {
 
 async fn render_html(html: &str) -> anyhow::Result<String> {
     let browser = Browser::instance().await;
-    let tab = browser.new_tab().await?;
-    let result = capture(&tab, html).await;
-    let _ = tab.close().await;
+    // 标签页交给守卫：上面那道 timeout 一旦触发就会把本函数整个取消，原先写在末尾的
+    // `close()` 便执行不到，页面会留在浏览器里。守卫的 Drop 补上这一步。
+    let guard = TabGuard::new(browser.new_tab().await?);
+    let result = capture(guard.tab(), html).await;
+    guard.close().await;
     result
 }
 

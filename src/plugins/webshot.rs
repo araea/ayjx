@@ -4,6 +4,7 @@ use crate::config::build_config;
 use crate::event::Context;
 use crate::message::Message;
 use crate::plugins::{ChannelConfig, PluginError, get_config_or_default};
+use crate::render::web::TabGuard;
 use anyhow::{Result, anyhow};
 use cdp_html_shot::{Browser, CaptureOptions, ImageFormat, Viewport};
 use futures_util::future::BoxFuture;
@@ -193,13 +194,13 @@ async fn capture_url(url: &str, config: &Config, browser_path: Option<String>) -
             Some(path) => Browser::instance_with_path(path).await,
             None => Browser::instance().await,
         };
-        page = Some(browser.new_tab().await?);
-        capture_page(page.as_ref().unwrap(), url, config).await
+        page = Some(TabGuard::new(browser.new_tab().await?));
+        capture_page(page.as_ref().unwrap().tab(), url, config).await
     })
     .await;
 
-    if let Some(tab) = page {
-        let _ = time::timeout(Duration::from_secs(3), tab.close()).await;
+    if let Some(guard) = page {
+        guard.close().await;
     }
 
     match result {
