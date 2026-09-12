@@ -1,8 +1,8 @@
 # Third-party notices
 
 OAI harness 的设计改编自 MIT 许可的 [oh-my-pi](https://github.com/can1357/oh-my-pi)：
-工具循环约定，以及无凭据的 public web 搜索聚合——在软硬双重截止时间内并行扇出到
-多个引擎，再按跨引擎共识排序——其中包括它的 DuckDuckGo 与 Mojeek 结果解析器。
+工具循环约定，以及免密钥的 public web 搜索——多后端顺序回退，其中带它的
+DuckDuckGo 结果解析器。
 
 ## oh-my-pi
 

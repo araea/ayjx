@@ -21,6 +21,7 @@ src/
   config.rs        AppConfig 与插件配置读写，build_config 辅助函数
   event.rs         Context / EventType / MessageEvent 定义
   http.rs          全局 reqwest 客户端（Android CA 兼容），download_bytes
+  log.rs           控制台与文件日志的统一输出
   matcher.rs       事件去重
   message.rs       Message 消息构建器（text/image/node_custom 等）
   plugins.rs       插件框架核心：Plugin 定义、注册宏、流水线、配置读写
@@ -30,7 +31,7 @@ src/
   db/              sea-orm 实体与查询（SQLite，data/bot.db）
 ```
 
-`res/` 存放插件的静态资源（词库、人格提示词、技能说明），`docs/` 是本手册所在，`tests/` 是几个用 Node 跑的端到端脚本（前台指令、重启、Satori 工具）。
+`res/` 存放插件的静态资源（词库、人格提示词、技能说明），`docs/` 是本手册所在，`tests/` 是几个用 Node 跑的端到端脚本（前台指令、重启、卡片落盘）。
 
 ## 事件流
 

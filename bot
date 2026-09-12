@@ -72,8 +72,7 @@ case "${1:-open}" in
         export no_proxy="${no_proxy:+$no_proxy,}127.0.0.1,localhost,::1"
         # Termux app shells export termux-exec's $LD_PRELOAD; sessions started from
         # elsewhere (widgets, cron, a tmux server inherited from another tool) do not.
-        # Without it the bot cannot spawn `#!/usr/bin/env` scripts — notably the pi CLI
-        # behind the pi rooms, which fails with a bare "No such file or directory".
+        # Without it the bot cannot spawn `#!/usr/bin/env` scripts from its tools.
         if [[ -z "${LD_PRELOAD:-}" ]]; then
             for lib in "$PREFIX/lib/libtermux-exec-ld-preload.so" "$PREFIX/lib/libtermux-exec.so"; do
                 if [[ -f "$lib" ]]; then
