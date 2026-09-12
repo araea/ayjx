@@ -13,10 +13,11 @@ use toml::Value;
 pub(crate) mod ambient;
 pub mod data;
 pub mod images;
+pub(crate) mod llm;
 pub mod logic;
 pub mod mj;
 pub mod parser;
-mod pi_agent;
+mod agent;
 pub(crate) mod presets;
 pub mod render;
 pub mod types;
@@ -66,12 +67,14 @@ pub(crate) fn resolve_endpoint(
 #[serde(default)]
 pub(crate) struct OaiConfig {
     enabled: bool,
-    /// 本机 Pi CLI 可执行文件；模型与工具沿用 Pi 配置。
-    pi_command: String,
+    /// 内置 agent 房间没指定模型（留空或写 `pi`）时用哪个模型。
+    /// 写 `供应商/模型` 时按 `[oai.providers]` 取接口；留空则用 oai 的默认模型。
+    pub(crate) agent_default_model: String,
     /// 单次回复的总时间预算。
     request_timeout_seconds: u64,
-    /// pi 的事件流静默多少秒算卡死（卡住且尚未出正文时自动重来一次）；置 0 关闭。
-    /// pi 自身不给模型请求设超时，中转站抽风时它会一直等到总预算耗尽。
+    /// 单次模型请求静默多少秒算卡死（内置 agent 一次性拿完整回复，
+    /// 没有中间事件可看，所以这是单次请求的上限）；卡住且还没动过工具时自动重来一次。
+    /// 置 0 关闭。
     pi_stall_seconds: u64,
     /// 短回复直接以文本发送而不渲染图片的字符上限；置 0 表示始终渲染图片。
     /// 一句话的答复走文本既快又便于复制。
@@ -95,9 +98,9 @@ impl Default for OaiConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            pi_command: "pi".to_string(),
+            agent_default_model: "deepseek/deepseek-flash".to_string(),
             request_timeout_seconds: 300,
-            pi_stall_seconds: 90,
+            pi_stall_seconds: 180,
             plain_text_max_chars: 120,
             show_trace_footer: true,
             model_filter: utils::ModelFilterConfig::default(),
@@ -116,10 +119,17 @@ impl OaiConfig {
         std::time::Duration::from_secs(self.request_timeout_seconds.clamp(30, 1_800))
     }
 
-    /// pi 静默多久算卡死；`None` 表示不看。
+    /// 单次模型请求静默多久算卡死；`None` 表示不看。
     pub(crate) fn pi_stall(&self) -> Option<std::time::Duration> {
         (self.pi_stall_seconds > 0)
             .then(|| std::time::Duration::from_secs(self.pi_stall_seconds.max(20)))
+    }
+
+    /// 内置 agent 房间没写模型时用的默认模型；留空返回 `None`，由调用方退到
+    /// oai config.json 里的 `default_model`。
+    pub(crate) fn agent_default_model(&self) -> Option<&str> {
+        let model = self.agent_default_model.trim();
+        (!model.is_empty()).then_some(model)
     }
 
     pub(crate) fn plain_text_max_chars(&self) -> usize {
@@ -325,18 +335,21 @@ mod tests {
     }
 
     #[test]
-    fn pi_command_defaults_and_legacy_config_remain_loadable() {
+    fn agent_default_model_is_optional_and_legacy_config_remains_loadable() {
+        // 旧配置里那些已经不用的键（如 pi_command）不该让整份配置解析失败。
         let config: OaiConfig =
-            toml::from_str("harness_rooms = ['pi']\nshell_timeout_seconds = 300").unwrap();
-        assert_eq!(config.pi_command, "pi");
-        let config: OaiConfig = toml::from_str("pi_command = '/custom/pi'").unwrap();
-        assert_eq!(config.pi_command, "/custom/pi");
+            toml::from_str("pi_command = 'pi'\nharness_rooms = ['pi']").unwrap();
+        assert_eq!(config.agent_default_model(), Some("deepseek/deepseek-flash"));
+        let config: OaiConfig = toml::from_str("agent_default_model = 'deepseek/deepseek-flash'").unwrap();
+        assert_eq!(config.agent_default_model(), Some("deepseek/deepseek-flash"));
+        let config: OaiConfig = toml::from_str("agent_default_model = '  '").unwrap();
+        assert_eq!(config.agent_default_model(), None);
     }
 
     #[test]
     fn provider_table_is_optional_and_parses_when_present() {
         // 旧配置没有 providers 也能照常加载。
-        let legacy: OaiConfig = toml::from_str("pi_command = 'pi'").unwrap();
+        let legacy: OaiConfig = toml::from_str("agent_default_model = ''").unwrap();
         assert!(legacy.providers.is_empty());
         let config: OaiConfig = toml::from_str(
             "[providers.deepseek]\napi_base = 'https://api.deepseek.com/v1'\napi_key = 'sk-x'",

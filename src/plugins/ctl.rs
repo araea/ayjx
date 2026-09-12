@@ -348,7 +348,7 @@ fn usage(prefix: &str) -> String {
 插件名支持英文及中文显示名；多个名称以空格或逗号分隔。\n\
 例：{prefix}ctl on 帮助中心 ping\n\
 例：{prefix}ctl set repeater channel.white [123456]\n\
-例：{prefix}ctl set ciyi plugin.image_scale 2\n\
+例：{prefix}ctl set oai plain_text_max_chars 120\n\
 配置查看/修改仅限 ctl.admins；控制台可管理。全局开关影响全部会话。\n\
 ctl 保留管理入口；修改它的 admins 请在私聊或控制台执行。\n\
 带生命周期的插件首次启用及排期修改需重启；状态标注“待重启”。"
@@ -765,7 +765,7 @@ mod tests {
         execute(&ctx, "set repeater channel.white.1 789")
             .await
             .unwrap();
-        execute(&ctx, "set ciyi plugin.image_scale 2")
+        execute(&ctx, "set help image_scale 2")
             .await
             .unwrap();
         execute(&ctx, "set wordcloud font_family Noto Sans CJK SC")

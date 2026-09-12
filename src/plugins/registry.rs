@@ -144,19 +144,6 @@ register_plugins!(
         summary: "将一张图按行列切片",
         commands: cmds![("裁剪 <行>x<列> / 切图 / 分割", "如：裁剪 3x3")]
     },
-    ciyi {
-        display_name: "词意猜词",
-        section: "play",
-        summary: "词意游戏：猜词与排行榜，群聊私聊均可",
-        commands: cmds![
-            ("词意帮助 / 词意指令 / 词意指令列表 / 词意帮助列表", "查看指令列表"),
-            ("词意玩法 / 词意规则", "查看游戏规则"),
-            ("词意猜测 [词语]", "开始猜词或提交答案"),
-            ("词意榜", "当前会话排行榜"),
-            ("词意全榜", "全服排行榜"),
-        ],
-        on_init: Some(ciyi::init)
-    },
     webshot {
         display_name: "网页截图",
         section: "message",
@@ -165,10 +152,10 @@ register_plugins!(
     oai {
         display_name: "智能对话",
         section: "play",
-        summary: "多智能体对话与模型/历史管理；内置 pi 使用 Responses API，按配置开放本机工具（符号指令）",
+        summary: "多智能体对话与模型/历史管理；内置 agent 可自行调用工具，按配置开放本机命令（符号指令）",
         commands: cmds![
             ("oai", "查看完整模型、提示词与历史管理指令"),
-            ("~pi <任务>", "内置 pi 房间；需先配置可用的模型 API"),
+            ("##<名称> pi", "建一间内置 agent 房间；模型与工具由 [oai] 配置"),
             ("oai <API地址> <密钥>", "配置模型 API"),
             ("##<名称>(<描述>) <模型> <提示词>", "创建智能体"),
             ("~<名称> <内容>", "与智能体对话"),

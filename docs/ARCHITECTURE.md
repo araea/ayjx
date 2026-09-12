@@ -113,8 +113,7 @@ pub fn default_config() -> Value { build_config(Config::default()) }
 
 | 路线 | 依赖 | 谁在用 | 适用 |
 | --- | --- | --- | --- |
-| 网页阅读卡片 `render/web.rs` | Chrome/Chromium、系统 CJK 字体 | help、ctl、ciyi | 插件手册、状态清单、配置与差异、宣纸风盘面 |
-| 插件自有原生绘图 `ciyi/painter.rs` | 系统 CJK 字体 | ciyi（截图不可用时兜底） | 宣纸风盘面 |
+| 网页阅读卡片 `render/web.rs` | Chrome/Chromium、系统 CJK 字体 | help、ctl | 插件手册、状态清单、配置与差异 |
 | 图表 plotters | 无 | stats、wordcloud | 坐标轴、折线、柱状、词云 |
 | 浏览器截图 cdp_html_shot | Chrome/Chromium | webshot、ai_news、oai | 真实网页、资讯长图、Markdown |
 
@@ -122,17 +121,13 @@ help 与 ctl 共用 `render/web.rs` 的结构化文档与 `res/cards/reading.css
 
 系统卡片串行截图，排队、浏览器初始化、建页与截图共用 45 秒超时，任何结果都尝试关闭页面。最大高度 16000 CSS px、位图最多 6400 万像素，超出则回复完整文本而不裁掉内容。`image_scale` 限制为 1—4 倍，非有限值回落 3 倍。
 
-ciyi 用 `render/web.rs::capture_html` 送自己写的整页 HTML（`ciyi/web.rs` 与 `res/cards/ciyi.css`），660 CSS px 版心、宣纸底、朱砂一色、汉字走宋体，`Doc` 模型排不出的盘面走这条路。它比 help/ctl 多一层兜底：网页截图失败落到 `ciyi/card.rs` 的原生绘图，原生也失败才发纯文本。
-
-兜底那层要跟得上，`ciyi/painter.rs` 因此补了三样浏览器免费给的东西：合成粗体（差多少字重补多少）、虚线圆角路径（沿弧长用圆头笔触点，先进蒙版取最大值再一次性混合，拐角不叠色）、印章超采样（小角度旋转前按 2 倍画）。
-
-字重：Android 自带的 Noto Serif/Sans CJK 只有 Regular 一档，向系统要 Bold 拿回来的还是那张 400 的脸。两条出图路径都会自己合成伪粗体顶上（浏览器天生会，原生绘制靠 `Typeface.embolden` 做形态学膨胀），但外扩轮廓补不出笔画的粗细对比。`sh scripts/install-cjk-weights.sh` 把真的 Bold(700) 与 Black(900) 装进 `~/.fonts` 后，fontconfig 与 fontdb 都会自动改用它，合成量归零，代码一行不用动；不装也能跑，只是题字虚一档。宋体分三档，`serif_x` 只留给题字（大标题、揭晓的答案、印章），正文级加粗仍走 `serif_b`，二十来 px 上再重就糊了。网页卡片同一套分工，靠 `font-weight: 900` 表达。字体是设备本地状态，仓库里恢复不出来，换机器要重跑一次脚本。
+字重：Android 自带的 Noto Serif/Sans CJK 只有 Regular 一档，向系统要 Bold 拿回来的还是那张 400 的脸。两条出图路径都会自己合成伪粗体顶上（浏览器天生会，原生绘制靠 `Typeface.embolden` 做形态学膨胀），但外扩轮廓补不出笔画的粗细对比。`sh scripts/install-cjk-weights.sh` 把真的 Bold(700) 与 Black(900) 装进 `~/.fonts` 后，fontconfig 与 fontdb 都会自动改用它，合成量归零，代码一行不用动；不装也能跑，只是题字虚一档。网页卡片靠 `font-weight: 900` 表达。字体是设备本地状态，仓库里恢复不出来，换机器要重跑一次脚本。
 
 原生工具 `render/font.rs`、`canvas.rs`、`kit.rs` 保留供原生绘图使用；迁移渲染方式以实际阅读质量为准。ai_news 保持网页日夜主题。
 
 出图失败回退纯文本：浏览器缺失、初始化失败、截图超时或尺寸超限都不应让帮助与控制失去响应。图文数据来自同一份注册表及经过权限校验、敏感字段脱敏的配置。
 
-短反馈不出图：一句话的纠错、开关确认、报错走纯文本，出图既慢又刷屏，还挡住了复制粘贴。ciyi 的 `Reply::wants_card` 与 ctl 的 `Output::card` 都是这条线。
+短反馈不出图：一句话的纠错、开关确认、报错走纯文本，出图既慢又刷屏，还挡住了复制粘贴。ctl 的 `Output::card` 就是这条线。
 
 ## 配置与数据
 
@@ -145,7 +140,7 @@ ciyi 用 `render/web.rs::capture_html` 送自己写的整页 HTML（`ciyi/web.rs
 | 入口 | 身份 | 实现 |
 | --- | --- | --- |
 | 聊天或控制台 `/ctl` | 消息发起人，按 `ctl.admins` 判权 | `plugins/ctl.rs` |
-| pi 房间 `ayjx --ctl` | 一次性凭据换维护者身份 | `plugins/ctl/bridge.rs` |
+| agent 房间 `ayjx --ctl` | 一次性凭据换维护者身份 | `plugins/ctl/bridge.rs` |
 
 ## 新增一个插件
 
@@ -176,10 +171,9 @@ cargo fmt          # 提交前
 
 改动插件后至少跑 `cargo test`：`plugins::satori_compat_tests` 会用规范化消息跑全部插件，`help::tests` 校验注册表元数据完整、分区不丢插件。
 
-卡片版式改动要人工看图，三个插件各有一个 `ignored` 的落盘测试：
+卡片版式改动要人工看图，各插件有 `ignored` 的落盘测试：
 
 ```sh
-CIYI_CARD_DUMP=/tmp/cards    cargo test ciyi::card     -- --ignored
 HELP_CARD_DUMP=/tmp/cards    cargo test help::card     -- --ignored
 CTL_CARD_DUMP=/tmp/cards     cargo test ctl::card      -- --ignored
 AI_NEWS_CARD_DUMP=/tmp/cards cargo test live_page_is_parseable -- --ignored  # 落盘 HTML

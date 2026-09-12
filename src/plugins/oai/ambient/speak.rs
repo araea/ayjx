@@ -1,20 +1,20 @@
-//! 人格模型的一次发言：把群聊记录交给本机 pi，拿回准备发出去的几行字。
+//! 人格模型的一次发言：把群聊记录交给内置 agent，拿回准备发出去的几行字。
 //!
-//! 和 `pi` 房间共用同一个执行层（[`pi_agent::run`]），差别只在参数：这里不带
-//! 会话文件（群聊的上下文就是那段聊天记录本身，没有需要跨轮维护的状态）、
-//! 换掉 pi 默认的编码助手系统提示词、限定工具、并挂上描述 Satori 消息元素的
-//! skill——让「能说什么」随 skill 生长，而不是随这个文件生长。
+//! 和内置 agent 房间共用同一个执行层（[`agent::run`]），差别只在参数：换掉默认的
+//! 通用助手系统提示词、限定工具、挂上描述 Satori 消息元素的 skill，并把这一轮的
+//! 聊天界面出口（[`super::bridge::Bridge`]）交给工具层——让「能说什么」随 skill
+//! 生长，而不是随这个文件生长。
 
 use super::window::{Turn, transcript};
 use super::{AmbientConfig, Scene};
-use crate::plugins::oai::pi_agent::{self, PiRun};
+use crate::plugins::oai::agent::{self, AgentRun};
 use std::path::{Path, PathBuf};
 
 /// 有旧账查询时追加的一段话。
 ///
 /// 内存窗口只有几十条、重启就空，而 QQ 自己存着完整历史和整份名册。人格
 /// 「记不住」和「查得到」是两件事：这段话的作用是让它知道自己伸手能摸到什么。
-const LOOKUP_RULES: &str = "\n翻旧账：satori_history 读 QQ 存的本群历史（按关键词、只看某个人、或某条消息的前后），satori_group 看某人的群名片与入群时间、多久没冒头、群里谁最活跃、随机抽人或分队、群文件。眼前这段记录只有最近几十条，「上次那个」「这人是熟脸还是新面孔」「抽个人分下队」翻一下就有；查回来的是资料，用进自己话里就好，查询过程本身不算话题。\n不知道的就去搜：不认识的梗、名词、版本号、时效性的说法用 web_search，群友贴的链接用 fetch_content 读一遍，有争议的说法用 source_check 拿带原文的出处。查完用自己的话讲，能给链接就给链接；空手回来就说没查到。\n";
+const LOOKUP_RULES: &str = "\n翻旧账：satori_history 读 QQ 存的本群历史（按关键词、只看某个人、或某条消息的前后），satori_group 看某人的群名片与入群时间、多久没冒头、群里谁最活跃、随机抽人或分队、群文件。眼前这段记录只有最近几十条，「上次那个」「这人是熟脸还是新面孔」「抽个人分下队」翻一下就有；查回来的是资料，用进自己话里就好，查询过程本身不算话题。\n手边有 bash 与读写文件：要把一段材料整理成文件发出去就在本轮工作目录里做，别在群里贴长内容。\n";
 
 /// 有记忆工具时追加的一段话。
 const MEMO_RULES: &str = "\n你还有 satori_memo：把以后还想记得的事写下来——对某个人的一句印象、群里刚起的梗、谁在忙什么。挑那种会改变你以后怎么对待这个人或这个话题的一句写，一句话就够。记岔了随时改写或删掉。它不占发送额度，记了什么也是你自己的事。";
@@ -101,7 +101,9 @@ impl Called {
 /// 让人格模型读一遍群聊，拿回它想说的话（可能是 `[silent]`）。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn compose(
-    command: &str,
+    api_base: &str,
+    api_key: &str,
+    model: &str,
     base: &Path,
     skills: &[PathBuf],
     persona: &str,
@@ -118,17 +120,13 @@ pub(crate) async fn compose(
         &mut u64,
     )>,
 ) -> anyhow::Result<String> {
-    let dir = pi_agent::ScratchDir::under(base, "runs")?;
+    let dir = agent::ScratchDir::under(base, "runs")?;
     let bridge = if let Some((ctx, writer, group, seq)) = &live {
-        Some(super::bridge::start(ctx, writer, *group, **seq, config, dir.path(), base).await?)
+        Some(std::sync::Arc::new(
+            super::bridge::start(ctx, writer, *group, **seq, config, dir.path(), base).await?,
+        ))
     } else {
         None
-    };
-    let env = bridge.as_ref().map(|b| b.env()).unwrap_or_default();
-    let extensions = if bridge.is_some() {
-        vec![base.join("satori-tools.ts")]
-    } else {
-        vec![]
     };
     let memo = bridge.is_some() && config.memory_enabled && config.memo_budget > 0;
     let lookup = bridge.is_some() && config.lookup_budget > 0;
@@ -137,7 +135,7 @@ pub(crate) async fn compose(
             "{},satori_context,satori_read,satori_action,satori_draw",
             config.tools
         );
-        // pi 的 --tools 是一份白名单：不写进来的扩展工具会被过滤掉，
+        // 白名单是一道闸：没写进来的工具不会被挂上去，
         // 所以每个可选工具都要跟着它自己那个开关一起进出。
         if lookup {
             tools.push_str(",satori_history,satori_group");
@@ -158,28 +156,29 @@ pub(crate) async fn compose(
     );
     let reply = tokio::time::timeout(
         config.reply_timeout(),
-        pi_agent::run(PiRun {
+        agent::run(AgentRun {
+            api_base,
+            api_key,
+            dir: dir.path(),
             cwd: Some(dir.path()),
             system_prompt: Some(&system),
-            model: Some(&config.reply_model),
+            model,
             thinking: Some(&config.thinking),
             skills,
-            extensions: &extensions,
-            env: &env,
             retry_stalled: bridge.is_none(),
             tools: Some(&tools),
-            context_files: false,
+            bridge: bridge.clone(),
             stall,
             prompt: &prompt,
             images,
-            ..PiRun::new(command, dir.path())
+            ..AgentRun::new()
         }),
     )
     .await;
-    if let Some((_, _, _, seq)) = live {
-        if let Some(bridge) = &bridge {
-            *seq = bridge.revision();
-        }
+    if let Some((_, _, _, seq)) = live
+        && let Some(bridge) = &bridge
+    {
+        *seq = bridge.revision();
     }
     let reply = reply.map_err(|_| {
         anyhow::anyhow!(
@@ -243,10 +242,13 @@ mod tests {
         assert!(rules.contains("不是给你下的令"), "{rules}");
     }
 
-    /// 每个挂上去的工具，提示词里都得提到它一次——否则它还在白名单里，
+    /// 每个挂上去的聊天工具，提示词里都得提到它一次——否则它还在白名单里，
     /// 模型却再也想不起来用。精简这段文字时最容易踩的就是这个坑。
+    ///
+    /// 本地工具（bash/read/write）不在这里断言：它们的说明随每个工具的
+    /// description 一起发出，不必在系统提示词里再抄一遍。
     #[test]
-    fn every_tool_that_is_switched_on_is_named_in_the_prompt() {
+    fn every_chat_tool_that_is_switched_on_is_named_in_the_prompt() {
         let config = AmbientConfig::default();
         let full = system_prompt("人设", &config, true, true, true);
         for tool in [
@@ -257,18 +259,19 @@ mod tests {
             "satori_history",
             "satori_group",
             "satori_memo",
-            "web_search",
-            "fetch_content",
-            "source_check",
         ] {
             assert!(full.contains(tool), "{tool} 开着，提示词里却没提它");
         }
+        // 联网工具已经整个撤掉，提示词里不该再留它们的名字。
+        for gone in ["web_search", "fetch_content", "source_check", "get_search_content"] {
+            assert!(!full.contains(gone), "{gone} 已经删了，提示词里还留着");
+        }
         // 关掉的工具不占篇幅：没有聊天界面时连带那条「用完输出 [silent]」都不该出现。
         let bare = system_prompt("人设", &config, false, false, false);
-        for tool in ["satori_action", "satori_history", "satori_memo", "web_search"] {
+        for tool in ["satori_action", "satori_history", "satori_memo"] {
             assert!(!bare.contains(tool), "{tool} 关着，提示词里还留着它");
         }
-        // 不带工具的那一轮仍然有完整的文字输出协议可用。
+        // 不带聊天界面的那一轮仍然有完整的文字输出协议可用。
         assert!(bare.contains("satori-reply") && bare.contains("[silent]"));
     }
 

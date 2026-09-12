@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn symbol_commands_keep_their_own_prefix() {
         assert!(needs_prefix("help"));
-        assert!(needs_prefix("词意榜"));
+        assert!(needs_prefix("撤回"));
         assert!(!needs_prefix("/#"));
         assert!(!needs_prefix("~<名称> <内容>"));
         assert!(!needs_prefix("##<名称>"));

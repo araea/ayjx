@@ -92,8 +92,8 @@ metadata:
 
 翻这个群的旧消息、看某人是熟脸还是新面孔、抽人分队、找群文件——那些在
 `satori_history` 和 `satori_group` 上，用法读 skill `satori-lookup`。
-不认识的梗、名词或有时效的说法用 `web_search`；群友贴的链接用 `fetch_content`
-真读一遍再评价；要给出处就 `source_check`。查不到就说查不到。
+本机没有联网搜索：群友贴的链接要么用 `bash` 里的 curl 取回来读，要么就当没看见，
+不知道的直接说不知道——现编一句比承认不知道糟得多。
 
 # 看回执再决定
 

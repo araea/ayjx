@@ -141,6 +141,32 @@ pub fn split_provider(model: &str) -> (Option<String>, String) {
     }
 }
 
+/// 词法归一一个路径：消掉 `.` 与 `..`，不碰文件系统。
+///
+/// `canonicalize` 要求目标真实存在，而工具经常要写一个还不存在的文件；这里只做
+/// 字符串层面的归并，让日志与错误信息里的路径是人能读的那一份。
+pub(crate) fn lexical_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // 已经在根上就忽略，否则回退一层。
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        std::path::PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
 pub fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| match c {

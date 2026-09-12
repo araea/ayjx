@@ -14,7 +14,7 @@
 #     sh scripts/install-cjk-weights.sh --check  # 只看装没装
 #
 # 核对本机实际拿到的字重：
-#     cargo test ciyi::painter::tests::report -- --ignored --nocapture
+#     fc-match "Noto Serif CJK SC:weight=bold"
 
 set -eu
 

@@ -97,7 +97,7 @@ impl Agent {
     /// 显式的 `engine` 说了算；只有还没迁移过的旧配置才回退到「名字叫 pi 或 pi-*」。
     pub fn uses_pi(&self) -> bool {
         match self.engine.trim() {
-            "" => super::pi_agent::legacy_pi_name(&self.name),
+            "" => super::agent::legacy_pi_name(&self.name),
             engine => engine.eq_ignore_ascii_case(ENGINE_PI),
         }
     }
@@ -357,7 +357,7 @@ pub(crate) struct Source {
 /// 而工具参数（命令、搜索词、URL）恰恰是尾巴最有信息量。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TraceStep {
-    /// 工具名，例如 `web_search`。
+    /// 工具名，例如 `bash`。
     pub name: String,
     /// 参数摘要；可能为空。
     pub detail: String,

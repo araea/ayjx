@@ -70,7 +70,7 @@ pub fn usage(prefix: &str, cmds: &[crate::plugins::Cmd]) -> Card {
         Block::Code(vec![
             format!("{prefix}ctl on 帮助中心 ping"),
             format!("{prefix}ctl set repeater channel.white [123456]"),
-            format!("{prefix}ctl set ciyi plugin.image_scale 2"),
+            format!("{prefix}ctl set oai plain_text_max_chars 120"),
             format!("{prefix}ctl reset ai_news --confirm"),
         ]),
         Block::Callout {

@@ -27,10 +27,10 @@ admins = [123456789] # 维护者 QQ 号，可填多个
 | `/ctl on help ping` | 一次开启多个插件 |
 | `/插件 关闭 复读机,网页截图` | 中文名与逗号分隔也可用 |
 | `/ctl show repeater` | 当前完整配置 |
-| `/ctl show ciyi plugin.image_scale` | 查看嵌套字段 |
+| `/ctl show oai model_filter` | 查看嵌套字段 |
 | `/ctl defaults help` | 查看默认值 |
 | `/ctl set help image_enabled 关` | 设置布尔值 |
-| `/ctl set ciyi plugin.image_scale 2` | 设置数字 |
+| `/ctl set oai plain_text_max_chars 120` | 设置数字 |
 | `/ctl set repeater channel.white [123456, 789012]` | 替换数组 |
 | `/ctl set repeater channel.white.0 456789` | 修改已有数组元素，索引从 0 开始 |
 | `/ctl set repeater channel { white = [123456], black = [] }` | 替换整张表 |
@@ -94,18 +94,18 @@ admins = [123456789] # 维护者 QQ 号，可填多个
 - ctl 不允许通过聊天关闭自身，也不允许管理员通过聊天移除自己的权限；整插件 `reset` 保留 `enabled`，重置 ctl 还保留 `admins`
 - `/restart` 需全局管理员且 `restart.allow_manual_restart = true`。定时与手动重启都只向主循环提出请求，由主循环停止任务、关闭数据库与浏览器、保存配置；Unix/Termux 随后 exec 替换当前进程，保留 PID、终端、环境变量、启动参数与单实例锁，重新连接 Satori 前有短暂连接中断。`restart.time` 支持 `HH:MM` 或 `HH:MM:SS`，使用系统本地时区；内存阈值只统计 ayjx 自身 RSS（Linux/Android），不含 Chromium 子进程
 
-## 在 pi 房间里用自然语言操作
+## 在 agent 房间里用自然语言操作
 
-`[ctl].pi_control`（默认 `true`）让 `pi` / `pi-*` 房间可以直接说「把复读机关掉」「词云的字体调大一点」，由 agent 自己去查、去改、去复核。
+`[ctl].pi_control`（默认 `true`）让 agent 房间可以直接说「把复读机关掉」「词云的字体调大一点」，由 agent 自己去查、去改、去复核。
 
-一轮 pi 房间对话开始时，ayjx 为这一轮签发一次性凭据，随环境变量交给 pi 子进程，并挂上说明用法的 `ayjx-control` skill。agent 执行 `ayjx --ctl "<命令>"`，命令经本机 Unix 套接字回到运行中的实例，由 ctl 以维护者身份执行，回执原样打到 stdout，因此 agent 能看见结果、据此继续，而不是盲发一条命令。
+一轮 agent 房间对话开始时，ayjx 为这一轮签发一次性凭据，随环境变量交给 agent 的工具子进程，并挂上说明用法的 `ayjx-control` skill。agent 执行 `ayjx --ctl "<命令>"`，命令经本机 Unix 套接字回到运行中的实例，由 ctl 以维护者身份执行，回执原样打到 stdout，因此 agent 能看见结果、据此继续，而不是盲发一条命令。
 
-- 不做身份限制：任何能在 pi 房间里说话的人都能借它操作机器人。这是部署时的明确选择；pi 房间的 agent 本来就持有全权限 shell，这条通道没有扩大它的能力边界，但确实把「改配置」从管理员专属变成了人人可用
+- 不做身份限制：任何能在 agent 房间里说话的人都能借它操作机器人。这是部署时的明确选择；agent 房间本来就持有全权限 shell，这条通道没有扩大它的能力边界，但确实把「改配置」从管理员专属变成了人人可用
 - ctl 自己的保命规则仍在：不能通过聊天关闭 ctl，不能把管理入口锁死。它们防的是误操作，不是权限
 - 凭据随这一轮对话结束立即作废（兜底寿命 30 分钟），只存在于内存与子进程环境变量里，不落盘、不上命令行。套接字为 `data/ctl/control.sock`，权限 `0600`
 - 每条经通道执行的命令都按「控制通道执行（QQ号）：命令」记进日志，可追溯到人
-- 群聊搭话（`[oai.ambient]`）里的 pi 不签发 ctl 管理凭据：那是无人触发的自发言，不该带着改配置的能力上场
-- 收回这份开放有两个层次：`/ctl set ctl pi_control 关` 只堵住这条通道，pi 房间的 shell 与联网能力仍在；真正的边界在 pi 侧的工具配置
+- 群聊搭话（`[oai.ambient]`）里的 agent 不签发 ctl 管理凭据：那是无人触发的自发言，不该带着改配置的能力上场
+- 收回这份开放有两个层次：`/ctl set ctl pi_control 关` 只堵住这条通道，agent 房间的 shell 仍在；真正的边界在 agent 的工具白名单
 
 ctl 操作 `config.toml` 中插件自己的配置。连接凭据、全局过滤规则、数据库中的插件业务数据，以及 oai 独立存储的模型 API 与智能体历史仍由其原入口管理。例如 oai 的 API、模型与房间操作见 `/oai`，推送目标快捷指令见 `/help ai_news`。
 

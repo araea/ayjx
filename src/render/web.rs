@@ -193,7 +193,7 @@ pub async fn capture(doc: &Doc, scale: f64, browser_path: Option<&str>) -> Resul
 /// 把一段自带样式的整页 HTML 截成 PNG base64。
 ///
 /// 与 [`capture`] 走同一道串行闸门与同一套尺寸护栏，只是版面由调用方自己写——
-/// help / ctl 的 `Doc` 模型排不出来的卡片（如词意的盘面）走这里。
+/// help / ctl 的 `Doc` 模型排不出来的卡片（如篇幅很长的插件手册）走这里。
 /// 页面里必须有一个 `.shot` 元素，它的外接矩形就是出图范围。
 pub async fn capture_html(
     html: &str,

@@ -107,7 +107,7 @@ pub(crate) fn valid_agent_name(name: &str) -> bool {
         && !name
             .chars()
             .any(|c| c.is_whitespace() || "&\"#~/ _'!@$%:*".contains(c))
-        && (!name.contains('-') || super::pi_agent::legacy_pi_name(name))
+        && (!name.contains('-') || super::agent::legacy_pi_name(name))
 }
 
 pub fn parse_create(raw: &str) -> Option<(String, String, String, String)> {

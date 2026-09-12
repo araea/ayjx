@@ -1,19 +1,19 @@
-//! pi 房间 → ctl 的本机控制通道。
+//! agent 房间 → ctl 的本机控制通道。
 //!
-//! pi 房间里的 agent 本来就有一个全权限 shell，所以「让它改机器人配置」的难点从来
+//! agent 房间里的 agent 本来就有一个全权限 shell，所以「让它改机器人配置」的难点从来
 //! 不是能力，而是**怎么改**：直接去写 `config.toml` 会被运行中的实例在退出时覆盖，
 //! 而绕道控制台（`tmux send-keys`）拿不到任何回执，agent 只能盲发。
 //!
-//! 这里给出一条正路：一轮 pi 房间对话开始时签发一枚一次性凭据，随环境变量交给 pi
-//! 子进程；agent 用 `ayjx --ctl "<命令>"` 把命令送回本进程的 Unix 套接字，由
+//! 这里给出一条正路：一轮 agent 房间对话开始时签发一枚一次性凭据，随环境变量交给
+//! agent 的工具子进程；agent 用 `ayjx --ctl "<命令>"` 把命令送回本进程的 Unix 套接字，由
 //! [`super::execute`] 以维护者身份执行，再把 `/ctl` 原样的回执打回 stdout——
 //! 于是 agent 能看见结果并据此继续。
 //!
-//! **这条通道不做身份限制**：任何能在 pi 房间里说话的人都能借它操作机器人，这是
-//! 部署者明确的选择（`[ctl].pi_control`，默认开）。它并没有扩大 pi 房间的能力边界
+//! **这条通道不做身份限制**：任何能在 agent 房间里说话的人都能借它操作机器人，这是
+//! 部署者明确的选择（`[ctl].pi_control`，默认开）。它并没有扩大 agent 房间的能力边界
 //! ——同一个 agent 手里的 bash 能做的事只多不少——但确实把「改配置」从管理员专属
 //! 变成了群友可用。要收回这份信任有两个层次：关掉本开关只堵住这条通道，真正的边界
-//! 在 pi 侧的工具配置。
+//! 在 agent 侧的工具白名单。
 //!
 //! 留下的两样东西不是权限，是可恢复性：每条命令都按「控制通道执行」记进日志，
 //! 凭据随这一轮对话作废、不落盘、不上命令行。
@@ -61,7 +61,7 @@ pub(crate) struct Lease {
 }
 
 impl Lease {
-    /// 交给 pi 子进程的环境变量。
+    /// 交给工具子进程（bash）的环境变量。
     pub(crate) fn env(&self) -> Vec<(String, String)> {
         vec![
             ("AYJX_CTL_TOKEN".to_string(), self.token.clone()),
@@ -88,9 +88,9 @@ impl Drop for Lease {
     }
 }
 
-/// 为一轮 pi 房间对话签发控制凭据。
+/// 为一轮 agent 房间对话签发控制凭据。
 ///
-/// `[ctl].pi_control` 关闭或套接字起不来时返回 `None`——那时 pi 房间的行为与从前
+/// `[ctl].pi_control` 关闭或套接字起不来时返回 `None`——那时 agent 房间的行为与从前
 /// 完全一致。除此之外不看发起人是谁：这条通道对所有人开放。
 pub(crate) async fn lease(ctx: &Context) -> Option<Lease> {
     if !enabled(ctx) {
@@ -254,7 +254,7 @@ async fn handle(request: Request) -> Response {
     // 审计：谁、在哪一轮、执行了什么，落进与聊天同一份日志。
     info!(target: LOG_TARGET, "控制通道执行（{user}）：{command}");
     match super::execute(&ctx, &command).await {
-        // 控制通道只要文本：调用方可能是 CLI 或 pi agent，图片对它们没有意义
+        // 控制通道只要文本：调用方可能是 CLI 或 agent，图片对它们没有意义
         Ok(out) => Response { ok: true, text: out.text },
         Err(text) => Response {
             ok: false,
@@ -272,7 +272,7 @@ pub fn client(command: &str) -> Result<String, String> {
     use std::os::unix::net::UnixStream;
 
     let socket = std::env::var("AYJX_CTL_SOCK")
-        .map_err(|_| "缺少 AYJX_CTL_SOCK：控制通道只在 ayjx 的 pi 房间对话内可用。")?;
+        .map_err(|_| "缺少 AYJX_CTL_SOCK：控制通道只在 ayjx 的 agent 房间对话内可用。")?;
     let token = std::env::var("AYJX_CTL_TOKEN")
         .map_err(|_| "缺少 AYJX_CTL_TOKEN：本轮对话没有获得控制授权。")?;
 
@@ -377,7 +377,7 @@ mod tests {
     async fn the_channel_is_open_to_everyone_and_expires_with_the_turn() {
         // 不在 ctl.admins 里的普通群友同样拿得到凭据——这条通道不做身份限制。
         let ctx = context(false).await;
-        let lease = lease(&ctx).await.expect("任何 pi 房间对话都应当拿到凭据");
+        let lease = lease(&ctx).await.expect("任何 agent 房间对话都应当拿到凭据");
         let socket = lease.socket.clone();
         let token = lease.token.clone();
 

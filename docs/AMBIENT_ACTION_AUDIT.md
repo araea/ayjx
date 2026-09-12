@@ -2,6 +2,8 @@
 
 记录三轮审计的发现、改动与验证。基线为 2026-09-08。
 
+> **2026-09-12 变更**：工具通道从「pi 扩展 + Unix RPC」改成进程内直调（`ambient::bridge::Bridge::call`），pi CLI 与 `res/ambient/satori-tools.ts` 已删除。文中「Pi 扩展」「Unix RPC」「`node tests/satori-tools.cjs`」等描述是当时的事实，不再对应现在的代码；动作参数、回执、额度与去重的约定没有变，实现位置改为 `src/plugins/oai/ambient/bridge.rs` 与 `src/plugins/oai/agent/`。
+
 ## 第一轮：接入层（2026-09-08）
 
 结论：群聊接入层有明显增强空间，而 satori-qq 已支持所需的普通成员互动，不需要为本次改造重装 QQ 模块。原有 Pi 群聊虽有搜索工具，平台输出却主要依赖「逐行文字 + 少量标记」，无法根据动作结果继续调整。
@@ -58,14 +60,19 @@
 - 真实 `apilio/claude-sonnet-5` 隔离试聊：「给这条消息点个赞的表态，不用再发文字」。模型实际调用 `login.get` 与 `reaction.create`，最终 `[silent]`，没有 `message.create`。该测试的 QQ 端全部是本地假服务
 - 本机真实 satori-qq 只读核对：在两个群里各找一条真实合并转发展开，文字转发拿回发送者、时间与全部五条正文，图片转发拿回七条 `[图片]` 与可下载的资源直链，全程只调用 `internal/message_search` 与 `internal/get_forward`
 
-复现：`cargo test --offline`、`node tests/satori-tools.cjs`。合并转发真机只读核对：
+复现：`cargo test ambient`。合并转发真机只读核对：
 
 ```sh
-AYJX_FORWARD_LIVE_CHANNEL=<群号> cargo test --offline live_forward_expansion -- --ignored --nocapture
-cargo test --offline live_pi_social_tool_selection -- --ignored --nocapture
+AYJX_FORWARD_LIVE_CHANNEL=<群号> cargo test live_forward_expansion -- --ignored --nocapture
 ```
 
-后者会调用本机 Pi 已配置的模型，需要网络，但不连接真实 QQ。
+工具选择与人格行为用 `AYJX_AMBIENT_LIVE_GATE_BASE` / `_KEY` 指定一个可用端点后跑：
+
+```sh
+cargo test live_agent_ -- --ignored --nocapture
+```
+
+它们会调用真实模型，需要网络，但不连接真实 QQ。
 
 ## 第二轮：合并转发与真机实测（2026-09-09）
 
@@ -137,9 +144,9 @@ satori-qq 侧补了一处：`native:` 原来要求父消息还在模块自己的
 
 ### 复核方式
 
-- `cargo test --offline`：287 项通过，新增 4 项（时效锚点、每句都带条件、只读查询的预算与格式、能力清单与动作枚举一致）
-- `node tests/satori-tools.cjs`：真实 pi 0.85.1 注册并激活 7 个 satori 工具，schema 与 Unix RPC 回执照旧；两份 skill 走 pi 自己的加载器零诊断加载，常驻上下文只占 925 字节（正文靠 `read` 按需取）。同时钉住「子操作不能叫 `op`」
-- 真实模型隔离试聊（`live_pi_reaches_for_history_instead_of_making_it_up`，ignored）：群友问「上次你说的那个驱动到底怎么弄的 我往上翻翻不到了」，模型依次调用 `satori_read` → `message_search` → `message_context`，然后照查到的原话回答，没有编。QQ 端全是本地假服务
+- `cargo test`：新增 4 项（时效锚点、每句都带条件、只读查询的预算与格式、能力清单与动作枚举一致）
+- 7 个 satori 工具的参数 schema 与信封约定由 `src/plugins/oai/agent/tools.rs` 与 `bridge.rs` 的单测钉住（含「子操作不能叫 `op`」）；skill 每轮复制进临时目录，提示词里只留一行索引（正文靠 `read` 按需取）
+- 真实模型隔离试聊（`live_agent_reaches_for_history_instead_of_making_it_up`，ignored）：群友问「上次你说的那个驱动到底怎么弄的 我往上翻翻不到了」，模型依次调用 `satori_read` → `message_search` → `message_context`，然后照查到的原话回答，没有编。QQ 端全是本地假服务
 - 本机 satori-qq 0.8.9.30 只读探测：`internal/capabilities` 取回动作清单，`message_search` / `message_context` / `member_info` 的参数与返回形状照着 `SatoriHub.java` 逐字核对（`limit` 1–100、`scan_limit` 上限 1000、`before` 游标、`guild_id` 缺失即 1400），假服务按同一形状应答
 - 本机 satori-qq 0.8.9.30 真机只读复核（群 175131947）：`message_search`（扫 118 条、命中 21 条、按 `created_at` 毫秒渲染）、`message_context`（前后各取到消息）、`member_info`（等级、入群时间、`silent_days`）、`group_overview`（797 人 / 24 小时活跃 38）、`random_member`（池 796）全部按本实现的参数形状返回
 - 全程没有向真实群发送任何测试消息

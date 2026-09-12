@@ -24,7 +24,7 @@ description: 查看与修改你所寄居的这台 ayjx 机器人自身的插件�
 | `list` | 所有插件与开关状态 |
 | `list on` / `list off` / `list 统计` | 按状态或名称筛选 |
 | `show <插件>` | 当前完整配置 |
-| `show <插件> <路径>` | 查看嵌套字段，如 `show ciyi plugin.image_scale` |
+| `show <插件> <路径>` | 查看嵌套字段，如 `show oai model_filter.keep` |
 | `defaults <插件>` | 默认值 |
 | `diff <插件>` | 与默认值的差异 |
 | `on <插件> [插件...]` | 开启，可一次多个 |

@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 mod actions;
 mod attention;
 mod breath;
-mod bridge;
+pub(crate) mod bridge;
 mod gate;
 #[cfg(test)]
 #[path = "ambient/tests.rs"]
@@ -102,13 +102,11 @@ pub(crate) struct AmbientConfig {
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
-    /// 发言时开放给 pi 的工具白名单，逗号分隔。
+    /// 发言时开放的工具白名单，逗号分隔。
     ///
-    /// 默认这几样各有用处：`read`/`write`/`bash` 让它能在本轮工作目录里整理材料
-    /// 再当文件发出去；`web_search` / `fetch_content` / `get_search_content` 是
-    /// 「不知道就去查」那条路（群友贴的链接也靠 fetch_content 才真读得到）；
-    /// `source_check` 用来给有争议的说法找带原文的出处。名字取自 pi 实际注册
-    /// 的工具，没注册的会被静默忽略。
+    /// `read`/`write`/`bash` 让它能在本轮工作目录里整理材料再当文件发出去；
+    /// 聊天界面的 `satori_*` 由代码按开关自动加上，不写在这里。
+    /// 名字取自 [`super::agent::tools`] 实际注册的工具，没注册的会被静默忽略。
     pub tools: String,
     /// 开口意愿分的门槛，0-100。调高更沉默。
     pub score_threshold: u8,
@@ -192,8 +190,7 @@ impl Default for AmbientConfig {
             gate_persona: GATE_PERSONA.to_string(),
             reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
-            tools: "read,write,bash,web_search,source_check,fetch_content,get_search_content"
-                .to_string(),
+            tools: "read,write,bash".to_string(),
             score_threshold: 50,
             silence_relief_per_10min: 0,
             silence_relief_cap: 0,
@@ -407,7 +404,7 @@ fn skills_root(oai_data: &Path) -> PathBuf {
     base_dir(oai_data).join("skills")
 }
 
-/// 交给 pi 的 `--skill` 路径清单。
+/// 这一轮随身的 skill 目录清单。
 fn skill_dirs(oai_data: &Path) -> Vec<PathBuf> {
     let root = skills_root(oai_data);
     SKILLS.iter().map(|(name, _)| root.join(name)).collect()
@@ -430,11 +427,6 @@ pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&dir).await?;
         tokio::fs::write(dir.join("SKILL.md"), body).await?;
     }
-    tokio::fs::write(
-        base_dir(oai_data).join("satori-tools.ts"),
-        include_str!("../../../res/ambient/satori-tools.ts"),
-    )
-    .await?;
     tokio::fs::create_dir_all(base_dir(oai_data).join("media")).await?;
     tokio::fs::create_dir_all(base_dir(oai_data).join("memory")).await?;
     memory::attach(&base_dir(oai_data));
@@ -801,10 +793,11 @@ async fn consider(
     }
 }
 
-/// 判定模型要用的接口、密钥与纯模型 id。
+/// 一个模型要用的接口、密钥与纯模型 id。
 ///
-/// `gate_model` 写成 `供应商/模型` 时按 `[oai.providers]` 取该供应商的接口
+/// 模型写成 `供应商/模型` 时按 `[oai.providers]` 取该供应商的接口
 /// （DeepSeek 官方即走这里）；不带前缀则沿用 `oai` 默认接口，与从前一致。
+/// 判定模型与发言模型共用这一份解析——它们只是两个不同的模型名。
 async fn gate_endpoint(
     ctx: &Context,
     mgr: &Arc<super::data::Manager>,
@@ -969,8 +962,11 @@ async fn speak_up(
     let images = vision::usable_images(turns, config.context_images).await;
 
     let started = Instant::now();
+    let (api_base, api_key, reply_model) = gate_endpoint(ctx, mgr, &config.reply_model).await?;
     let raw = speak::compose(
-        &oai.pi_command,
+        &api_base,
+        &api_key,
+        &reply_model,
         &base,
         &skill_dirs(&data_dir),
         persona,

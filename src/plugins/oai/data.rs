@@ -14,12 +14,11 @@ const LEGACY_DEFAULT_PROMPT: &str = "You are a helpful assistant.";
 
 /// `pi` 房间的人设。
 ///
-/// 只写「是谁、什么风格」；运行环境、工具策略与排版要求由
-/// 本机 Pi Agent 按自身配置生成——
-/// 那些内容写死在人设里会随时间过期，也没法随托管检索的可用性变化。
+/// 只写「是谁、什么风格」；运行环境、工具策略与排版要求由内置 agent 自己生成——
+/// 那些内容写死在人设里会随时间过期，也没法随工具集变化。
 const PI_PERSONA: &str = "你是 pi，一个务实、直接的通用助手，回答简洁但不省略关键依据。";
 
-/// 旧版 `pi` 人设；把运行细节写进了人设，现已由 Pi Agent 生成。
+/// 旧版 `pi` 人设；把运行细节写进了人设，现已是内置 agent 自己的事。
 const LEGACY_PI_PERSONA: &str = "You are pi, a capable general assistant. In this public room you can use a full-permission shell and live web search. Use tools whenever they make the answer more accurate; never invent tool results. For web research, include the source URLs you relied on.";
 
 // 全局单例管理器
@@ -110,7 +109,7 @@ impl Manager {
         // 已有房间的行为一个都不变。
         for agent in config.agents.iter_mut() {
             if agent.engine.trim().is_empty() {
-                agent.engine = if super::pi_agent::legacy_pi_name(&agent.name) {
+                agent.engine = if super::agent::legacy_pi_name(&agent.name) {
                     super::types::ENGINE_PI
                 } else {
                     super::types::ENGINE_CHAT

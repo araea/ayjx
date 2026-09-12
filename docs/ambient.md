@@ -1,6 +1,6 @@
 # 群聊搭话
 
-`oai` 的可选能力：让本机 pi 以固定人格作为群友参与聊天。默认关闭，只在 `[oai.ambient].groups` 列出的群里生效。
+`oai` 的可选能力：让内置 agent 以固定人格作为群友参与聊天。默认关闭，只在 `[oai.ambient].groups` 列出的群里生效。
 
 ## 参与方式
 
@@ -76,9 +76,9 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 - `satori_history` 翻本群历史（`internal/message_search` / `message_context`）。可按关键词、只看某个人、限定最近多少小时，或直接看某条消息的前后几条。返回与窗口同一种格式的逐条记录（`[时刻 id=…] 谁: 说了什么`），不是原始 JSON，模型不必为了读旧消息再学一种格式。带 `next` 游标可以继续往早翻。关键词按原文包含匹配，短词更管用；搜不到就是本地历史里确实没有
 - `satori_group` 查现成资料，`what` 选一种：`member`（群名片、头衔、角色、入群时间、`silent_days` 多久没冒头）、`roster`（人数与活跃概况）、`activity`（最活跃或最沉默的人）、`anniversary`（快到入群周年的人）、`draw`（随机抽人）、`teams`（随机分队）、`files`（群文件目录，或某个文件的下载链接）
 
-两者都是只读的：不发消息、不改群设置、不占 `max_actions`，但每轮共用 `lookup_budget` 次（默认 4，高峰被点名醒来时压到 1）。参数写错不扣额度，真要发出查询时才扣。`lookup_budget = 0` 就当这两个工具不存在，`--tools` 白名单与 `capabilities.lookups` 会一起把它们摘掉。
+两者都是只读的：不发消息、不改群设置、不占 `max_actions`，但每轮共用 `lookup_budget` 次（默认 4，高峰被点名醒来时压到 1）。参数写错不扣额度，真要发出查询时才扣。`lookup_budget = 0` 就当这两个工具不存在，白名单与 `capabilities.lookups` 会一起把它们摘掉。
 
-搜外网走的还是 pi 自己那套（`web_search` / `fetch_content` / `source_check` / `get_search_content`，由 `tools` 白名单控制）。三件事分工不同：不认识的梗与名词去搜，群友贴的链接要 `fetch_content` 真读一遍再评价，有争议的说法用 `source_check` 拿带原文的出处。查不到就说查不到。
+本地工具（`bash` / `read` / `write` / `edit` / `glob` / `grep`，由 `tools` 白名单控制）让它能在本轮工作目录里整理材料、读一遍群友贴的东西再当文件发出去。这里没有联网搜索：查不到就说查不到，不要现编。
 
 `member` 给的是事实，`remember` 给的是「你怎么看这个人」，两者互相补充：一个新冒头的 ID 到底是三年老熟人还是上周进群的，名册说得比感觉准，而值得记的那一句仍要人格自己用 `satori_memo` 写下。
 
@@ -93,11 +93,11 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 
 ## 平台动作与表达
 
-人格通过本轮专属的 Pi 扩展参与群聊：
+人格通过本轮专属的聊天界面工具参与群聊（实现在 `src/plugins/oai/agent/tools.rs` 与 `ambient/bridge.rs`，都跑在进程内）：
 
 - `satori_context` 读取最新窗口、精确消息 ID、原始资源、当前平台能力与剩余额度
 - `satori_read` 查询窗口中的原消息，或完整展开其合并转发
-- `satori_action` 执行一个结构化动作并返回回执，由同一轮 Pi 根据结果继续判断
+- `satori_action` 执行一个结构化动作并返回回执，由同一轮对话根据结果继续判断
 - `satori_draw` 调用 `[oai]` 配置的图像模型生成图片并保存到 `ambient/media`，返回本地路径、改写的标题与剩余额度，随后用 `satori_action` 的 send + image 发出。绘图是独立的模型调用，不占平台写动作额度，受 `draw_budget` 限流
 - `satori_history` 翻 QQ 保存的本群历史，`satori_group` 查这个群的现成资料，两者都只读，受 `lookup_budget` 限流
 - `satori_memo` 写长期记忆：`people`（对某个群成员的一句印象，再写一次即为改写）、`notes`（这个群的一件旧事）、`forget_people` / `forget_notes`。不占发送额度，受 `memo_budget` 限流，关闭 `memory_enabled` 时不注册
@@ -124,11 +124,11 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 
 普通房间对话走同一个展开器：引用一条合并转发或消息里自带合并转发时，展开结果作为引用块进入提示词，转发内的图片（最多 4 张）一并作为视觉输入，不再只留一个 `[合并转发]`。
 
-入站记录保留媒体与引用参数，消息编号以字符串传给 Pi，避免大整数精度丢失。戳一戳机器人会作为点名进入判定；撤回会清掉原正文和媒体；表态事件没有可靠操作者，只记录为平台事件，不推测是谁点的，也不靠自己的表态回声唤醒自己。
+入站记录保留媒体与引用参数，消息编号以字符串传给模型，避免大整数精度丢失。戳一戳机器人会作为点名进入判定；撤回会清掉原正文和媒体；表态事件没有可靠操作者，只记录为平台事件，不推测是谁点的，也不靠自己的表态回声唤醒自己。
 
-每轮动作即时执行，成功发送的消息 ID 可供随后引用或撤回，错误也回到工具与窗口。同一工具请求 ID 不会重复执行，含平台工具的 Pi 会话关闭整轮静默重试。一旦调用动作工具，最终自然语言不再另行发送。最终 `[silent]` 只停止后续输出，不能取消已经执行的动作。
+每轮动作即时执行，成功发送的消息 ID 可供随后引用或撤回，错误也回到工具与窗口。同一工具请求 ID 不会重复执行，动过工具的会话关闭整轮静默重试。一旦调用动作工具，最终自然语言不再另行发送。最终 `[silent]` 只停止后续输出，不能取消已经执行的动作。
 
-执行与等待期间若群聊更新或插件停用，拒绝尚未交给 Satori 的动作，模型可重新读 context 后改主意。已经进入 QQ 内核的操作不能靠取消 Pi 收回；网络超时属于结果未确认，不自动重发。每轮最多 `max_actions` 个写操作（含失败尝试），其中发送消息仍受 `max_messages` 限制。每次成功动作回填上下文，但一轮只计一次参与频率。
+执行与等待期间若群聊更新或插件停用，拒绝尚未交给 Satori 的动作，模型可重新读 context 后改主意。已经进入 QQ 内核的操作不能靠取消这一轮收回；网络超时属于结果未确认，不自动重发。每轮最多 `max_actions` 个写操作（含失败尝试），其中发送消息仍受 `max_messages` 限制。每次成功动作回填上下文，但一轮只计一次参与频率。
 
 本轮工作目录中的本地文件与 `data/oai/ambient/media` 素材会通过 `upload.create` 上传，不能直接把 Termux 私有路径交给 QQ。目录位置相对于 ayjx 可执行文件，当前实例通常是 `target/release/data/oai/ambient/media`，可放入含义清楚的图片与 GIF，context 每轮最多列 40 项。本地单文件上限 20 MiB，网络媒体须是已核实的 http(s) 直链。不提供任意路径读取发送、跨群发言、@全体或群管理工具。这属于工具接口边界，既有 `bash` / `read` 仍按原配置运行，并非操作系统沙箱。
 
@@ -147,7 +147,7 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 
 未使用动作工具的最终正文仍兼容旧版逐行输出与 `[at:]`、`[face:]`、`[img:]`、`[reply]`、`[poke:]`、`[dice]`、`[rps]`、`[wait:]`、`[silent]`。精确引用与复杂媒体优先使用工具。模型耗时计入首条等待，后续按打字速度错开；收到新消息会停止旧草稿继续发送。
 
-完整操作协议在 `res/ambient/skills/satori-reply/SKILL.md`，扩展实现是 `res/ambient/satori-tools.ts`，每次启动同步到可执行文件旁的数据目录。使用 Pi 原生扩展 API，只在群聊调用时显式加载，不修改全局 Pi 配置或 Pi 房间。
+完整操作协议在 `res/ambient/skills/satori-reply/SKILL.md`，另有一份 `satori-lookup` 讲怎么翻旧账。两份 skill 每轮随其他 skill 一起复制进这轮的临时目录，系统提示词里只留一行索引，模型要用哪份就用 `read` 打开——常驻开销只有那两行。
 
 ## 人设和升级
 
@@ -179,14 +179,14 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 /ctl show oai ambient.reply_model
 ```
 
-`deepseek` 是本机 Pi 中已配置的官方 provider 名，换其他模型时填写 Pi 能识别的 `provider/model`（如 `apilio/gemini-3.8-flash`）。判定模型同样写 `供应商/模型`，由 ayjx 按 `[oai.providers]` 取该供应商的接口与密钥：
+`deepseek` 是 `[oai.providers]` 里配好的供应商名，换其他模型时写该表里有的 `供应商/模型`（如 `apilio/gemini-3.8-flash`）。判定模型同样写 `供应商/模型`，由 ayjx 按 `[oai.providers]` 取该供应商的接口与密钥：
 
 ```text
 /ctl set oai ambient.gate_model deepseek/deepseek-flash
 /ctl show oai ambient.gate_model
 ```
 
-默认判定与发言统一使用 DeepSeek 官方 `deepseek-flash`（原生多模态）。判定打 `[oai.providers.deepseek]` 的接口，发言通过 Pi 的 `deepseek/deepseek-flash` 调用，保留人格、上下文与聊天工具，发言端保留 `thinking = "low"`。不带供应商前缀的判定模型仍走 oai 默认接口。指令保存到配置并在下一轮读取，无需重启，已经开始的请求仍可能使用旧模型。已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。这些设置只管理群聊搭话，与普通 oai 智能体及 Pi 房间的默认模型独立。
+默认判定与发言统一使用 DeepSeek 官方 `deepseek-flash`（原生多模态）。判定与发言都打 `[oai.providers.deepseek]` 的接口，人格、上下文与聊天工具不变，发言端保留 `thinking = "low"`。不带供应商前缀的模型仍走 oai 默认接口。指令保存到配置并在下一轮读取，无需重启，已经开始的请求仍可能使用旧模型。已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。这些设置只管理群聊搭话，与普通 oai 智能体及 Agent 房间的默认模型独立。
 
 ## 配置
 
@@ -198,9 +198,9 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 | `groups` | `[]` | 允许搭话的群号 |
 | `gate_model` | `deepseek/deepseek-flash` | 判定模型；`供应商/模型` 按 `[oai.providers]` 取接口，不带前缀走 oai 默认接口 |
 | `gate_persona` | 浓缩画像 | 判定读的兴趣画像，留空则回退完整人设 |
-| `reply_model` | `deepseek/deepseek-flash` | pi 的发言模型 |
+| `reply_model` | `deepseek/deepseek-flash` | 发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
-| `tools` | `read,write,bash,web_search,source_check,fetch_content,get_search_content` | 辅助工具白名单；本轮按开关自动附加 satori 系列工具。名字必须是 pi 实际注册了的工具，写错只会被静默忽略 |
+| `tools` | `read,write,bash` | 本地工具白名单（bash/read/write/edit/glob/grep）；本轮按开关自动附加 satori 系列工具。写错的名字会被静默忽略 |
 | `score_threshold` | `50` | 普通开口意愿门槛，调高更沉默 |
 | `speech_penalty_per_turn` | `8` | 最近十分钟每说过一轮，门槛上调的分数；0 关闭 |
 | `speech_penalty_cap` | `24` | 上面那笔加价的上限 |
@@ -234,11 +234,11 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 | `gate_timeout_seconds` | `45` | 单次判定超时 |
 | `reply_timeout_seconds` | `240` | 人格回复含工具调用超时 |
 
-判定遇到网络抖动重试一次，其他错误当轮沉默。图片预先转码缩放，GIF 取首帧，转码结果按直链缓存半小时——一轮里判定与发言各要看一次，手机上重下重解一遍要白等好几秒，而那点时间是从模拟打字的预算里扣的。pi 超时会连同派生工具进程一起终止。工具中的 `bash` 可执行本机命令，不需要时可从白名单移除。
+判定遇到网络抖动重试一次，其他错误当轮沉默。图片预先转码缩放，GIF 取首帧，转码结果按直链缓存半小时——一轮里判定与发言各要看一次，手机上重下重解一遍要白等好几秒，而那点时间是从模拟打字的预算里扣的。超时会连同派生工具进程一起终止。工具中的 `bash` 可执行本机命令，不需要时可从白名单移除。
 
 ## 验证与能力边界
 
-`cargo test --offline ambient` 覆盖动作参数、回执、上传、引用、转发、撤回、停用、新消息、去重与事件。`node tests/satori-tools.cjs` 用本机 Pi 验证扩展真实加载、白名单、参数 schema 与 Unix RPC，不调用模型也不发 QQ。全套 Rust 测试中带 live 的 ignored 测试需要显式环境变量与网络。
+`cargo test ambient` 覆盖动作参数、回执、上传、引用、转发、撤回、停用、新消息、去重与调度。全套 Rust 测试中带 live 的 ignored 测试需要显式环境变量与网络，用 `AYJX_AMBIENT_LIVE_GATE_BASE` / `_KEY` 指定一个可用的 OpenAI 兼容端点。
 
 平台功能接通不等于 QQ 服务端必然接受：资料卡赞次数、表态支持、撤回时限、资源过期及网络状态仍以真实回执为准。语音与视频支持发送现成资源，目前不新增语音识别、语音合成或视频理解。滚动窗口、关注与动作回执仍只活在本进程内，重启清空；跨重启保留的只有落盘的熟人记忆（`memory/<群号>.json`）与状态（`mood.json`），那是人格自己写下的几句印象与一条起伏曲线，不是完整聊天历史，也不做跨群关联。真正的聊天历史在 QQ 那边，靠 `satori_history` 现查，所以重启之后「想不起来」的事仍然查得回来，但那是查询而不是记忆。
 

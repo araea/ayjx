@@ -359,14 +359,14 @@ mod tests {
             url: "https://www.openai.com/index/a?utm=1".into(),
         }];
         let html = build_html(&Card {
-            title: "pi #3回复",
+            title: "研究 #3回复",
             markdown: "## 结论\n\n- 要点\n\n```rust\nfn main() {}\n```\n",
             sources: &sources,
             footer: Some(Footer {
                 meta: "gpt-5.6-luna · 8.2秒".into(),
                 trace: vec![TraceStep::new(
-                    "web_search",
-                    "pi agent satori 协议 自动摘要 与工具轨迹 渲染",
+                    "bash",
+                    "cargo test oai 工具轨迹 渲染",
                 )],
                 trace_overflow: 0,
             }),
@@ -376,9 +376,9 @@ mod tests {
         assert!(html.contains("openai.com"), "{html}");
         assert!(!html.contains("utm=1"), "来源只展示域名");
         assert!(html.contains("gpt-5.6-luna · 8.2秒"), "{html}");
-        assert!(html.contains("web_search"), "{html}");
+        assert!(html.contains("bash"), "{html}");
         assert!(
-            html.contains("pi agent satori 协议 自动摘要 与工具轨迹 渲染"),
+            html.contains("cargo test oai 工具轨迹 渲染"),
             "工具参数完整出现在页脚：{html}"
         );
     }
@@ -430,12 +430,12 @@ mod live_tests {
             url: "https://example.com/a".into(),
         }];
         let base64 = render_card(Card {
-            title: "pi #1回复",
+            title: "研究 #1回复",
             markdown,
             sources: &sources,
             footer: Some(Footer {
                 meta: "gpt-5.6-luna · 3.4秒".into(),
-                trace: vec![TraceStep::new("web_search", "测试")],
+                trace: vec![TraceStep::new("bash", "测试")],
                 trace_overflow: 0,
             }),
         })

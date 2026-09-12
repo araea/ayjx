@@ -19,13 +19,14 @@ access_token = ""
 
 [oai]
 enabled = true
-# pi / pi-* 房间使用本机 Pi CLI，模型与工具沿用 Pi 配置。
-# 公有、私有和临时模式均支持；房间提示词追加到 Pi 系统提示词。
-pi_command = "pi"
+# 内置 agent 房间（`##研究 pi`）没写模型时用哪个：留空或写 `pi` 的房间都取这里的值。
+# 写成 `供应商/模型` 时按下面的 [oai.providers] 取接口；留空则退到 oai 的默认模型。
+agent_default_model = "deepseek/deepseek-flash"
 # 单次回复的总时间预算（秒）。
 request_timeout_seconds = 300
-# pi 事件流静默这么多秒算卡死，掐掉重来一次（pi 自身不给模型请求设超时）；0 关闭。
-pi_stall_seconds = 90
+# 单次模型请求静默这么多秒算卡死，掐掉重来一次（没有中间事件可看，所以这是单次
+# 请求的上限）；卡住且还没动过工具才会重试，动过就不再重放。0 关闭。
+pi_stall_seconds = 180
 # 不含标题/列表/代码块的短回复直接发文本，不渲染图片；置 0 表示始终渲染图片。
 plain_text_max_chars = 120
 # 在回复卡片页脚显示模型、耗时与工具调用轨迹。
@@ -68,7 +69,7 @@ drop = [
     "customtools", "highspeed", "lightning", "-image-preview", "-vision-exp",
 ]
 
-# 群聊搭话：让同一个 Pi Agent 以固定人格在指定群里旁听，绝大多数时候沉默。
+# 群聊搭话：让同一个 agent 以固定人格在指定群里旁听，绝大多数时候沉默。
 # 完整字段与取舍见 docs/ambient.md；人设在 data/oai/ambient/persona.md。
 [oai.ambient]
 enabled = false
@@ -81,15 +82,14 @@ gate_model = "deepseek/deepseek-flash"
 # 想自定义就取消注释写一段短文（只写对什么感兴趣、避开什么、怎么接话）；
 # 想退回用完整写作人设（最贵，不推荐）就把它设为空字符串。
 # gate_persona = ""
-# 发言模型，交给 pi 的 provider/model；思考强度 off/minimal/low/medium/high。
+# 发言模型，同样写 `供应商/模型`；思考强度 off/minimal/low/medium/high。
 reply_model = "deepseek/deepseek-flash"
 thinking = "low"
-# 发言时开放的辅助工具白名单；每轮额外加载 satori 聊天、查询与绘图工具。
-# read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去；
-# web_search / fetch_content / get_search_content 是「不知道就去查」那条路
-# （群友贴的链接也靠 fetch_content 才真读得到）；source_check 给有争议的说法找出处。
-# 不想让它在本轮跑命令，就把 bash 从这行拿掉；名字取自 pi 实际注册的工具。
-tools = "read,write,bash,web_search,source_check,fetch_content,get_search_content"
+# 发言时额外开放的本地工具白名单（逗号分隔，可写 bash/read/write/edit/glob/grep）。
+# read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去。
+# 聊天界面的 satori_* 工具由代码按下面的开关自动加上，不用写在这里。
+# 不想让它跑命令就把 bash 去掉。
+tools = "read,write,bash"
 # 搭话指令：群里发一条以它打头的消息就跳过判定，直接把最近这段群聊交给人格。
 # 指令本身不进上下文（人格只看到群友聊了什么），后面跟着的话照常算群聊内容。
 # 想关掉就写空字符串；peak.mode = "pause" 与 hourly_limit 仍然拦得住它。

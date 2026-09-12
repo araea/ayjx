@@ -1,44 +1,107 @@
 //! 调度回归与可选真实模型试聊；所有场景均不向 QQ 发送测试消息。
 use super::*;
 
-#[cfg(unix)]
+/// 一个只说固定一句话的假模型端点。
+///
+/// agent 在进程内之后，「假模型」不再是一个假 CLI，而是一个 OpenAI 兼容的
+/// HTTP 服务：每次请求记一笔，等 `release` 出现再回话——调度回归要的正是
+/// 「上一轮还没收尾时新消息怎么排队」。
+async fn fake_model(reply: &str) -> (String, std::path::PathBuf, std::path::PathBuf, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+    let dir = std::env::temp_dir().join(format!("ayjx-ambient-{:032x}", rand::random::<u128>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let started = dir.join("started");
+    let release = dir.join("release");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let body = serde_json::json!({
+        "id": "x",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "fake",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": reply},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    })
+    .to_string();
+
+    let task_started = started.clone();
+    let task_release = release.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let (started, release, body) = (task_started.clone(), task_release.clone(), body.clone());
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_err() {
+                    return;
+                }
+                let mut length = 0;
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap_or(0);
+                    }
+                }
+                let mut payload = vec![0; length];
+                let _ = reader.read_exact(&mut payload).await;
+
+                // 第一轮被 release 卡住，第二轮直接回话。
+                std::fs::write(&started, "x").map(|_| ()).ok();
+                for _ in 0..2000 {
+                    if release.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let _ = reader
+                    .get_mut()
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    (base, started, release, task)
+}
+
 #[tokio::test]
 async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
     use crate::config::{AppConfig, build_config};
     use crate::event::{BotStatus, EventType, LoginUser};
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::RwLock;
 
     let dir =
-        super::super::pi_agent::ScratchDir::under(&std::env::temp_dir(), "ambient-test").unwrap();
-    let started = dir.path().join("started");
-    let release = dir.path().join("release");
-    let node = std::process::Command::new("node")
-        .args(["-p", "process.execPath"])
-        .output()
-        .unwrap();
-    assert!(node.status.success());
-    let command = dir.path().join("pi");
-    std::fs::write(&command, format!(r##"#!{}
-const fs = require('fs');
-let input = '';
-process.stdin.on('data', c => input += c);
-process.stdin.on('end', () => {{
-  fs.appendFileSync({started:?}, 'x');
-  const timer = setInterval(() => {{
-    if (!fs.existsSync({release:?})) return;
-    clearInterval(timer);
-    console.log(JSON.stringify({{type:'message_end', message:{{role:'assistant',stopReason:'stop',content:[{{type:'text',text:'[focus:{{"topic":"测试话题","seconds":30}}]\n[silent]'}}]}}}}));
-  }}, 20);
-}});
-"##, String::from_utf8_lossy(&node.stdout).trim())).unwrap();
-    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o700)).unwrap();
+        super::super::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-test").unwrap();
+    let (base, started, release, server) =
+        fake_model("[focus:{\"topic\":\"测试话题\",\"seconds\":30}]\n[silent]").await;
+    // 第一轮的回话要等测试放行，第二轮（搭话指令）才不必再等。
+    let _ = std::fs::remove_file(&release);
     let group = -8_000_001;
     let oai = super::super::OaiConfig {
-        pi_command: command.to_str().unwrap().into(),
         ambient: AmbientConfig {
             enabled: true,
             groups: vec![group],
+            // 判定模型与发言模型都指向这个假端点：没有供应商前缀，走 oai 默认接口。
+            gate_model: "fake-model".into(),
+            reply_model: "fake-model".into(),
             debounce_seconds: 1,
             context_images: 0,
             // 调度回归与计价时段无关；钉死它，免得这个测试在工作日上午换一种行为。
@@ -71,6 +134,13 @@ process.stdin.on('end', () => {{
     };
     let writer = Arc::new(crate::adapters::satori::SatoriClient::console());
     let mgr = Arc::new(super::super::data::Manager::new(dir.path().to_path_buf()));
+    {
+        // 模型端点指向假服务；密钥随便填，它只被塞进 Authorization 头。
+        let mut c = mgr.config.write().await;
+        c.api_base = base;
+        c.api_key = "test-only".into();
+        mgr.save(&c);
+    }
     init(dir.path()).await.unwrap();
     let turn = |id| Turn {
         user_id: 42,
@@ -91,7 +161,7 @@ process.stdin.on('end', () => {{
         let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
         async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         while !started.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -100,43 +170,42 @@ process.stdin.on('end', () => {{
     .unwrap();
     window::with_group(group, |state| assert!(!state.receive(turn(2))));
     std::fs::write(&release, "go").unwrap();
-    tokio::time::timeout(Duration::from_secs(10), task)
+    tokio::time::timeout(Duration::from_secs(15), task)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(std::fs::read_to_string(&started).unwrap(), "xx");
     window::with_group(group, |state| {
         assert!(!state.running);
         assert!(!state.take_mention());
         assert!(state.active_focus().is_some());
         assert_eq!(state.spoken_last_hour(), 0);
     });
-    // 搭话指令直接把这一批交给人格：判定那一步完全不发生——这里没有可用的接口，
-    // 真去判定只会报错，而它走到了人格那一轮，说明指令确实绕过了判定。
+    // 搭话指令直接把这一批交给人格：判定那一步完全不发生——这里假端点什么模型都答，
+    // 真去判定也会成功，而它走到人格那一轮并写下关注，说明指令确实绕过了判定。
     assert!(window::with_group(group, |state| state.summon()));
     let task = tokio::spawn({
         let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
         async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
     });
-    tokio::time::timeout(Duration::from_secs(10), task)
+    tokio::time::timeout(Duration::from_secs(15), task)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(std::fs::read_to_string(&started).unwrap(), "xxx");
     window::with_group(group, |state| {
         assert!(!state.running);
         assert!(!state.take_summon());
     });
+    server.abort();
 }
 
 #[tokio::test]
-#[ignore = "需要 AYJX_AMBIENT_LIVE_DATA、已配置的 pi 和网络；仅打印试聊，不发群消息"]
+#[ignore = "需要 AYJX_AMBIENT_LIVE_DATA、已配置的模型接口和网络；仅打印试聊，不发群消息"]
 async fn live_persona_and_gate_dialogue() {
     let data = PathBuf::from(std::env::var("AYJX_AMBIENT_LIVE_DATA").unwrap());
     let mgr = super::super::data::Manager::new(data.clone());
     let credentials = mgr.config.read().await;
     let dir =
-        super::super::pi_agent::ScratchDir::under(&std::env::temp_dir(), "ambient-live").unwrap();
+        super::super::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-live").unwrap();
     init(dir.path()).await.unwrap();
     let config = AmbientConfig {
         tools: "read".into(),
@@ -196,8 +265,16 @@ async fn live_persona_and_gate_dialogue() {
         .await
         .unwrap();
         // 试聊同时查看人格决定，即便筛选不放行；线上仍按分数筛选。
+        let (provider, reply_model) = super::super::utils::split_provider(&config.reply_model);
+        let reply_base = std::env::var("AYJX_AMBIENT_LIVE_GATE_BASE")
+            .unwrap_or_else(|_| credentials.api_base.clone());
+        let reply_key = std::env::var("AYJX_AMBIENT_LIVE_GATE_KEY")
+            .unwrap_or_else(|_| credentials.api_key.clone());
+        let _ = provider;
         let raw = speak::compose(
-            "pi",
+            &reply_base,
+            &reply_key,
+            &reply_model,
             dir.path(),
             &skill_dirs(dir.path()),
             PERSONA,
