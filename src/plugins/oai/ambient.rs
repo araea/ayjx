@@ -855,21 +855,37 @@ async fn consider_batch(
     let persona = tokio::fs::read_to_string(persona_path(data_dir))
         .await
         .unwrap_or_else(|_| PERSONA.to_string());
-    // 计价高峰时段：要么彻底不出声，要么睡着——不再主动判定（判定是最频繁的那次
-    // 调用），只有被点名才醒一次，并且换上最省的一份上下文。
+    // 计价高峰时段：价格翻倍，但也不必整段不出声。要么彻底睡着（`pause`），要么
+    // 压成偶尔醒一次——不跟着消息频率一直判定，只隔 `doze_gate_seconds` 看一眼，
+    // 每小时自主开口不超过 `doze_reply_limit` 次；被点名或搭话指令则立刻醒，
+    // 并且统一换上最省的一份上下文。
     let stance = config.peak.stance();
     let frugal;
+    let mut doze = false;
     let config = match stance {
         peak::Stance::Asleep => {
             debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，本轮不出声");
             return Ok(());
         }
-        peak::Stance::Dozing if !mentioned && !summoned => {
-            debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，睡着，没被点名就不判定");
-            return Ok(());
+        peak::Stance::Dozing if mentioned || summoned => {
+            info!(target: LOG_TARGET, "群 {group} 在计价高峰时段被叫醒，省着回一句");
+            frugal = config.frugal();
+            &frugal
         }
         peak::Stance::Dozing => {
-            info!(target: LOG_TARGET, "群 {group} 在计价高峰时段被叫醒，省着回一句");
+            // 两条闸门都只在本地读时间戳，不产生费用：这一小时的自主开口配额，
+            // 以及距上次主动判定够不够久。任一条没过就这一批不判定，群里照常攒上下文。
+            let peak = &config.peak;
+            let due = window::with_group(group, |state| {
+                peak.doze_allows_reply(state.doze_spoke_last_hour())
+                    && state.allow_doze_gate(peak.doze_gate())
+            });
+            if !due {
+                debug!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，这一批不主动判定");
+                return Ok(());
+            }
+            info!(target: LOG_TARGET, "群 {group} 处于计价高峰时段，偶尔看一眼要不要接话");
+            doze = true;
             frugal = config.frugal();
             &frugal
         }
@@ -938,6 +954,7 @@ async fn consider_batch(
         &persona,
         &scene,
         seq,
+        doze,
     )
     .await
 }
@@ -964,6 +981,8 @@ async fn speak_up(
     persona: &str,
     scene: &Scene,
     seq: &mut u64,
+    // 这一句是睡着时的自主开口，用来计进高峰时段的每小时上限。
+    doze: bool,
 ) -> anyhow::Result<()> {
     let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
     let data_dir = mgr.path.parent().unwrap_or(&mgr.path).to_path_buf();
@@ -1120,6 +1139,10 @@ async fn speak_up(
         window::with_group(group, |state| {
             if !sent {
                 state.mark_spoke();
+                // 睡着时的自主开口单独计数，好让高峰时段的费用有每小时硬上限。
+                if doze {
+                    state.mark_doze_spoke();
+                }
             }
             // 服务端自发事件可能先到；按回执 ID 去重。
             state.receive(Turn {
@@ -1317,9 +1340,14 @@ mod tests {
         // 其余设置原样带过去。
         assert_eq!(frugal.reply_model, config.reply_model);
         assert_eq!(frugal.groups, config.groups);
+        // 但睡着不等于彻底不出声：每五分钟看一眼、每小时最多自己开两次口，
+        // 高峰时段的费用因此有一条硬上限。
+        assert_eq!(config.peak.doze_gate(), Duration::from_secs(300));
+        assert_eq!(config.peak.doze_reply_limit, 2);
         // 旧配置里没有这张表也能读出来。
         let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
         assert_eq!(legacy.peak.windows, config.peak.windows);
+        assert_eq!(legacy.peak.doze_gate(), config.peak.doze_gate());
     }
 
     /// 联网搜索对搭话是默认开着的：遇到不认识的梗、新版本、比赛战况，先查再开口。

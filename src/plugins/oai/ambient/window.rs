@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::attention::Focus;
 
@@ -58,6 +58,10 @@ pub(crate) struct GroupState {
     feedback: Option<i64>,
     /// 近期发言时刻，用于每小时上限。
     spoken: VecDeque<Instant>,
+    /// 睡着（计价高峰）时上一次主动判定的时刻：把自主判定压到隔一段时间一次。
+    doze_gate_at: Option<Instant>,
+    /// 睡着时自主开口的时刻，用于每小时上限——判定便宜、开口贵，这条管的是后者。
+    doze_spoken: VecDeque<Instant>,
 }
 
 impl GroupState {
@@ -239,6 +243,42 @@ impl GroupState {
                 break;
             }
         }
+    }
+
+    /// 睡着时到了可以主动看一眼的时候吗。到了就在同一把锁里记下这一刻，
+    /// 让同一段时间内到达的其他批次都跳过——判定是最频繁的那次调用。
+    /// `interval` 为 0 表示关掉自主判定。
+    pub(crate) fn allow_doze_gate(&mut self, interval: Duration) -> bool {
+        if interval.is_zero() {
+            return false;
+        }
+        let now = Instant::now();
+        if self
+            .doze_gate_at
+            .is_some_and(|at| now.duration_since(at) < interval)
+        {
+            return false;
+        }
+        self.doze_gate_at = Some(now);
+        true
+    }
+
+    /// 睡着时最近一小时自主开口了几次。
+    pub(crate) fn doze_spoke_last_hour(&mut self) -> usize {
+        let now = Instant::now();
+        while let Some(first) = self.doze_spoken.front() {
+            if now.duration_since(*first).as_secs() >= 3_600 {
+                self.doze_spoken.pop_front();
+            } else {
+                break;
+            }
+        }
+        self.doze_spoken.len()
+    }
+
+    /// 记一次睡着时的自主开口。
+    pub(crate) fn mark_doze_spoke(&mut self) {
+        self.doze_spoken.push_back(Instant::now());
     }
 }
 
@@ -440,5 +480,22 @@ mod tests {
         assert!(rhythm.contains("最近十分钟发言 2 轮"), "{rhythm}");
         assert!(rhythm.contains("看着就好"), "{rhythm}");
         assert!(state.last_spoke.is_some());
+    }
+
+    /// 睡着时的两条闸门：判定按间隔放行，开口按每小时计数。
+    #[test]
+    fn dozing_gates_judgement_by_interval_and_keeps_its_own_hourly_tally() {
+        let mut state = GroupState::default();
+        // 写 0 关掉自主判定。
+        assert!(!state.allow_doze_gate(Duration::ZERO));
+        // 到点放行一次，紧接着的批次都被挡下。
+        assert!(state.allow_doze_gate(Duration::from_secs(3_600)));
+        assert!(!state.allow_doze_gate(Duration::from_secs(3_600)));
+        // 睡着时的自主开口单独计数，不和清醒时的发言混在一起。
+        assert_eq!(state.doze_spoke_last_hour(), 0);
+        state.mark_doze_spoke();
+        state.mark_doze_spoke();
+        assert_eq!(state.doze_spoke_last_hour(), 2);
+        assert_eq!(state.spoken_last_hour(), 0);
     }
 }
