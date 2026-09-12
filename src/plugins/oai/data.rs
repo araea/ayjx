@@ -145,6 +145,12 @@ impl Manager {
             config_dirty = true;
             info!(target: "Plugin/OAI", "已建好 {created} 间画图预设房间（/# 里的「{}」分区）", super::presets::SECTION);
         }
+        // 内置对话模板房间：与画图预设共用同一份「建过」账，语义一致。
+        let created = super::chat_presets::seed(&mut config);
+        if created > 0 {
+            config_dirty = true;
+            info!(target: "Plugin/OAI", "已建好 {created} 间对话模板房间（/# 里的「{}」分区）", super::chat_presets::SECTION);
+        }
 
         if config_dirty && let Ok(serialized) = serde_json::to_string_pretty(&config) {
             let _ = std::fs::write(&path, serialized);
