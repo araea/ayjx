@@ -98,8 +98,9 @@ pub(crate) struct AmbientConfig {
     /// 判定用的浓缩人设画像（见 [`GATE_PERSONA`]）。判定只需知道对什么感兴趣、
     /// 避开什么、怎么接话，不需要完整写作人设；留空则回退用完整人设（更贵）。
     pub gate_persona: String,
-    /// 发言模型，写成 `供应商/模型`。默认走 oai 默认接口的 `gemini-3.8-flash`：
-    /// 判定便宜、发言金贵——发言要像人，但也要快、要扛得住频繁搭话。
+    /// 发言模型，写成 `供应商/模型`；默认 DeepSeek 官方的 `deepseek-flash`。
+    /// 试过更贵的 Claude / Gemini，实测在真实群聊里并不比它更像人，人机感
+    /// 另有来源（该长该短没控住），所以默认仍留在便宜这一档。
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
@@ -195,7 +196,7 @@ impl Default for AmbientConfig {
             groups: Vec::new(),
             gate_model: "deepseek/deepseek-flash".to_string(),
             gate_persona: GATE_PERSONA.to_string(),
-            reply_model: "apilio/gemini-3.8-flash".to_string(),
+            reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
             tools: "read,write,bash".to_string(),
             score_threshold: 50,
@@ -1222,7 +1223,7 @@ mod tests {
     fn default_models_match_but_explicit_overrides_are_preserved() {
         let config: AmbientConfig = toml::from_str("").unwrap();
         assert_eq!(config.gate_model, "deepseek/deepseek-flash");
-        assert_eq!(config.reply_model, "apilio/gemini-3.8-flash");
+        assert_eq!(config.reply_model, "deepseek/deepseek-flash");
         // 判定人设默认是浓缩画像，比完整人设便宜得多，且不会被空值覆盖。
         assert!(!config.gate_persona.trim().is_empty());
         let custom: AmbientConfig =

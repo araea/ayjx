@@ -200,18 +200,18 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 由 `ctl.admins` 中的全局管理员向机器人发送以下指令，私聊、已接入的群聊与本机控制台均可。发言模型影响所有已启用搭话的群：
 
 ```text
-/ctl set oai ambient.reply_model apilio/gemini-3.8-flash
+/ctl set oai ambient.reply_model deepseek/deepseek-flash
 /ctl show oai ambient.reply_model
 ```
 
-`apilio` 是 oai 默认接口的别名，即使不写在 `[oai.providers]` 里也能用；换其他模型时写 `[oai.providers]` 里配置过的 `供应商/模型`（如 `deepseek/deepseek-flash` 走 DeepSeek 官方）。判定模型同样写 `供应商/模型`，由 ayjx 按 `[oai.providers]` 取该供应商的接口与密钥：
+`deepseek` 是 `[oai.providers]` 里配置好的供应商名，换其他模型时写该表里有的 `供应商/模型`（如 `apilio/gemini-3.8-flash`）。判定模型同样写 `供应商/模型`，由 ayjx 按 `[oai.providers]` 取该供应商的接口与密钥：
 
 ```text
 /ctl set oai ambient.gate_model deepseek/deepseek-flash
 /ctl show oai ambient.gate_model
 ```
 
-默认判定用 DeepSeek 官方 `deepseek-flash`（原生多模态）——判定每条新消息都跑一次，便宜、快是第一位；发言默认用 oai 默认接口的 `gemini-3.8-flash`——发言要像人，也要快、要扛得住频繁搭话，所以挑快档里最稳的一个。两者接口各按自己的 `供应商/` 前缀取（`apilio` 回退到 oai 默认接口，`deepseek` 走 `[oai.providers.deepseek]`），人格、上下文与聊天工具不变，发言端保留 `thinking = "low"`。不带供应商前缀的模型仍走 oai 默认接口。指令保存到配置并在下一轮读取，无需重启，已经开始的请求仍可能使用旧模型。已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。这些设置只管理群聊搭话，与普通 oai 智能体及 Agent 房间的默认模型无关。
+默认判定与发言统一使用 DeepSeek 官方 `deepseek-flash`（原生多模态）。判定与发言都打 `[oai.providers.deepseek]` 的接口，人格、上下文与聊天工具不变，发言端保留 `thinking = "low"`。不带供应商前缀的模型仍走 oai 默认接口。**换贵的模型未必更像人**：拿真实群聊记录回放过 Claude / Gemini 的快档，发言质量与 `deepseek-flash` 同档，而「人机感」另有来源（该长该短的判据、以及一句长文该拆没拆），所以默认留在便宜这一档；真要换，照上面的指令改即可。指令保存到配置并在下一轮读取，无需重启，已经开始的请求仍可能使用旧模型。已有配置不会随仓库默认值更新而自动替换，升级实例请执行上述指令。这些设置只管理群聊搭话，与普通 oai 智能体及 Agent 房间的默认模型无关。
 
 ## 配置
 
@@ -223,7 +223,7 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 | `groups` | `[]` | 允许搭话的群号 |
 | `gate_model` | `deepseek/deepseek-flash` | 判定模型；`供应商/模型` 按 `[oai.providers]` 取接口，不带前缀走 oai 默认接口 |
 | `gate_persona` | 浓缩画像 | 判定读的兴趣画像，留空则回退完整人设 |
-| `reply_model` | `apilio/gemini-3.8-flash` | 发言模型；判定图便宜、发言图快且像人，所以两者默认不是一个模型 |
+| `reply_model` | `deepseek/deepseek-flash` | 发言模型 |
 | `thinking` | `low` | 发言模型思考强度 |
 | `tools` | `read,write,bash` | 本地工具白名单（bash/read/write/edit/glob/grep）；本轮按开关自动附加 satori 系列工具。写错的名字会被静默忽略 |
 | `score_threshold` | `50` | 普通开口意愿门槛，调高更沉默 |
