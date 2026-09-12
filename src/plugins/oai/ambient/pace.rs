@@ -37,6 +37,17 @@ fn markup() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\[(at|face|img):([^\]]{1,512})\]").unwrap())
 }
 
+/// 一行里所有标记所占的字符区间（半开），交给 [`breath`] 护住。
+fn markup_spans(line: &str) -> Vec<std::ops::Range<usize>> {
+    markup()
+        .find_iter(line)
+        .map(|found| {
+            let start = line[..found.start()].chars().count();
+            start..start + found.as_str().chars().count()
+        })
+        .collect()
+}
+
 fn action() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"^\[(poke:(\d{5,12})|dice|rps|wait:(\d+(?:\.\d+)?))\]$").unwrap())
@@ -114,12 +125,11 @@ pub(crate) fn parse(raw: &str, max_messages: usize, split_chars: usize) -> Speec
                 wait,
             }),
             Draft::Text { body, reply } => {
-                // 带标记的行不动：切开 `[at:…]`、`[img:…]` 之后那条消息会变成另一个意思。
-                let pieces = if markup().is_match(&body) {
-                    vec![body]
-                } else {
-                    breath::split(&body, spare + 1, split_chars)
-                };
+                // 标记本身不能切，但带标记的长句照样要换气：护住 `[at:…]`、`[img:…]`
+                // 这些 token 的下标，标记之外该切还切。从前是整行不动，于是一句
+                // `[at:…] + 一长段` 会原样发成一条几百字不带标点的长文。
+                let shield = markup_spans(&body);
+                let pieces = breath::split_protected(&body, spare + 1, split_chars, &shield);
                 spare = spare.saturating_sub(pieces.len().saturating_sub(1));
                 for (index, piece) in pieces.into_iter().enumerate() {
                     let (message, chars) = build_message(&piece);
@@ -303,6 +313,24 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["at", "text", "text", "face"]);
         assert!(items[0].chars > 4);
+    }
+
+    /// 带 `[at:…]` 的长句照样要换气：护住标记，标记之外照切。
+    #[test]
+    fn a_long_line_with_markup_still_breathes() {
+        let raw = "[at:114514] 第一步把依赖装上 第二步重跑一次 第三步贴出错的第一行 别把整个日志都发出来";
+        let Speech::Say(items) = parse(raw, 3, 14) else {
+            panic!("expected speech");
+        };
+        assert!(items.len() > 1, "{items:?}");
+        // @ 留在第一条上，标记本身没被切开。
+        assert_eq!(items[0].message.0[0].type_, "at");
+        assert!(
+            items
+                .iter()
+                .all(|item| text_of(item).matches('[').count() == text_of(item).matches(']').count()),
+            "{items:?}"
+        );
     }
 
     #[test]

@@ -841,16 +841,13 @@ impl Session {
                 // 一整段话按换气处分成几条发出去。模型写得越顺，越容易把两三个意思
                 // 塞进一条；群里没人这么说话。切法见 [`super::breath`]，切几条受本轮
                 // 剩下的消息额度约束——真正发出去的条数才是额度算的东西。
-                if let [Part::Text { text }] = parts.as_slice() {
-                    let budget = self
-                        .config
-                        .max_messages
-                        .clamp(1, 5)
-                        .saturating_sub(self.messages.saturating_sub(1));
-                    let pieces = super::breath::split(text, budget, self.config.split_chars);
-                    if pieces.len() > 1 {
-                        return self.send_in_pieces(pieces, reply_to.as_deref()).await;
-                    }
+                let budget = self
+                    .config
+                    .max_messages
+                    .clamp(1, 5)
+                    .saturating_sub(self.messages.saturating_sub(1));
+                if let Some(rows) = split_send(parts, budget, self.config.split_chars) {
+                    return self.send_in_pieces(rows, reply_to.as_deref()).await;
                 }
                 let mut msg = Message::new();
                 if let Some(id) = reply_to {
@@ -953,15 +950,23 @@ impl Session {
     ///
     /// 额度按真正发出去的条数扣：模型多写了两个意思，就少一次另开话头的机会。
     /// 中途失败不回滚已经发出去的——那些群友已经看见了，只在回执里说清楚发到哪。
-    async fn send_in_pieces(&mut self, pieces: Vec<String>, reply_to: Option<&str>) -> Result<Value> {
+    async fn send_in_pieces(&mut self, rows: Vec<Vec<Part>>, reply_to: Option<&str>) -> Result<Value> {
         let mut ids: Vec<String> = Vec::new();
         let mut failure = None;
-        for (index, piece) in pieces.iter().enumerate() {
+        for (index, row) in rows.iter().enumerate() {
             let mut message = Message::new();
             if index == 0 && let Some(id) = reply_to {
                 message = message.reply(id);
             }
-            message = message.text(piece);
+            for part in row {
+                // [`split_send`] 只会放行 At/Face/Text，别的段不进这条路径。
+                message = match part {
+                    Part::At { user_id } => message.at(user_id),
+                    Part::Face { id } => message.face(id),
+                    Part::Text { text } => message.text(text),
+                    _ => message,
+                };
+            }
             if index > 0 {
                 self.messages += 1;
             }
@@ -1112,6 +1117,49 @@ impl Session {
     }
 }
 
+/// 一条 `send` 要不要按换气切成几条；要切就给出每一条的元素表。
+///
+/// 只有「恰好一段文字、后面没别的段」时才切：文字前面挂着的 `@`、表情跟着
+/// 第一条走，切出来的后续几条是同一口气里的话。带图片/文件/转发那类段的
+/// 一律不切——那些段的归属没法靠断句猜，宁可整条发。从前只认「整条只有一个
+/// 文字段」，于是 `@某人 + 一长段` 会原样发成一条长文。
+fn split_send(parts: &[Part], budget: usize, target: usize) -> Option<Vec<Vec<Part>>> {
+    let index = parts
+        .iter()
+        .position(|part| matches!(part, Part::Text { .. }))?;
+    if index + 1 != parts.len()
+        || parts.iter().filter(|p| matches!(p, Part::Text { .. })).count() != 1
+        || !parts[..index]
+            .iter()
+            .all(|part| matches!(part, Part::At { .. } | Part::Face { .. }))
+    {
+        return None;
+    }
+    let Part::Text { text } = &parts[index] else {
+        return None;
+    };
+    let pieces = super::breath::split(text, budget, target);
+    if pieces.len() <= 1 {
+        return None;
+    }
+    let prefix = &parts[..index];
+    Some(
+        pieces
+            .into_iter()
+            .enumerate()
+            .map(|(piece_index, piece)| {
+                let mut row: Vec<Part> = if piece_index == 0 {
+                    prefix.to_vec()
+                } else {
+                    Vec::new()
+                };
+                row.push(Part::Text { text: piece });
+                row
+            })
+            .collect(),
+    )
+}
+
 /// 按文件头识别图片扩展名，用于给落盘的绘图结果起一个正确的文件名。
 fn image_extension(bytes: &[u8]) -> &'static str {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
@@ -1132,6 +1180,83 @@ fn image_extension(bytes: &[u8]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn long_line() -> String {
+        "第一步把依赖装上 第二步重跑一次 第三步贴出错的第一行 别把整个日志都发出来".to_string()
+    }
+
+    fn text_rows(rows: &[Vec<Part>]) -> Vec<String> {
+        rows.iter()
+            .map(|row| {
+                row.iter()
+                    .filter_map(|part| match part {
+                        Part::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// `@某人 + 一长段` 也要切开：@ 跟第一条，文字按换气分条。
+    #[test]
+    fn a_long_text_with_a_leading_at_is_split_into_rows() {
+        let parts = vec![
+            Part::At { user_id: "114514".into() },
+            Part::Text { text: long_line() },
+        ];
+        let rows = split_send(&parts, 3, 14).expect("该切");
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(matches!(rows[0].first(), Some(Part::At { .. })), "{rows:?}");
+        assert!(
+            rows[1..].iter().all(|row| matches!(row.as_slice(), [Part::Text { .. }])),
+            "{rows:?}"
+        );
+        // 只丢掉换气处的空格，一个字都不许丢。
+        let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+        assert_eq!(squash(&text_rows(&rows).concat()), squash(&long_line()));
+    }
+
+    /// 文字后面还挂着别的段，或者压根不止一段文字：整条发，不拿断句去猜段落归属。
+    #[test]
+    fn sends_that_cannot_be_cleanly_split_stay_whole() {
+        assert!(
+            split_send(
+                &[
+                    Part::Text { text: long_line() },
+                    Part::Face { id: "178".into() },
+                ],
+                3,
+                14
+            )
+            .is_none()
+        );
+        assert!(
+            split_send(
+                &[
+                    Part::Text { text: "第一段".into() },
+                    Part::Text { text: long_line() },
+                ],
+                3,
+                14
+            )
+            .is_none()
+        );
+        assert!(
+            split_send(
+                &[
+                    Part::At { user_id: "114514".into() },
+                    Part::Text { text: long_line() },
+                    Part::Face { id: "178".into() },
+                ],
+                3,
+                14
+            )
+            .is_none()
+        );
+        // 本来就不长的文字不动。
+        assert!(split_send(&[Part::Text { text: "试".into() }], 3, 14).is_none());
+    }
     use crate::{
         config::{AppConfig, build_config},
         event::{BotStatus, EventType, LoginUser},

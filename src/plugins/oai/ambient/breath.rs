@@ -43,19 +43,46 @@ fn is_cjk(c: char) -> bool {
 /// 不该切的时候原样返回一条——调用方拿到的永远是「要发出去的几条」，
 /// 不必再判断这次到底切没切。
 pub(crate) fn split(text: &str, budget: usize, target: usize) -> Vec<String> {
+    split_protected(text, budget, target, &[])
+}
+
+/// 同 [`split`]，但 `protected` 里给出的字符区间（半开，按字符计）内不许下刀。
+///
+/// 用来护住 `[at:…]`、`[img:…]` 这类标记：token 里的逗号或空格看着像换气处，
+/// 真切下去会把标记截成两半，那条消息就变成另一个意思了。护住的只是切口，
+/// 标记之外该切照切——带标记的长句照样是几条短消息。
+pub(crate) fn split_protected(
+    text: &str,
+    budget: usize,
+    target: usize,
+    protected: &[std::ops::Range<usize>],
+) -> Vec<String> {
     let whole = || vec![text.trim().to_string()];
     let trimmed = text.trim();
     // 带换行说明模型自己排过版了，那是它的意思，不要替它重排。
     if budget <= 1 || target == 0 || trimmed.is_empty() || trimmed.contains('\n') {
         return whole();
     }
+    // trim 掉的前导空白会让下标整体前移，护住区间跟着挪。
+    let lead = text.chars().count() - text.trim_start().chars().count();
+    let shield: Vec<std::ops::Range<usize>> = protected
+        .iter()
+        .map(|range| {
+            let start = range.start.saturating_sub(lead);
+            let end = range.end.saturating_sub(lead).max(start);
+            start..end
+        })
+        .collect();
     let chars: Vec<char> = trimmed.chars().collect();
     // 四舍五入：一条半的长度才值得切成两条，免得把一句寻常的话劈成两半。
     let want = ((chars.len() + target / 2) / target).min(budget);
     if want <= 1 {
         return whole();
     }
-    let cuts = candidates(&chars);
+    let cuts: Vec<Cut> = candidates(&chars)
+        .into_iter()
+        .filter(|cut| !shielded(cut, &shield))
+        .collect();
     let mut chosen: Vec<Cut> = Vec::new();
     for index in 1..want {
         let ideal = (chars.len() * index / want) as i64;
@@ -145,6 +172,18 @@ fn candidates(chars: &[char]) -> Vec<Cut> {
     cuts
 }
 
+/// 这一刀会不会切进被护住的标记里。
+///
+/// 切口在 `end`（上一段末字的后一位）与 `resume`（下一段首字）之间；把
+/// `[end-1, resume]` 这段缝拿去和每个护住区间比对，沾上就不能切。
+fn shielded(cut: &Cut, shield: &[std::ops::Range<usize>]) -> bool {
+    let band_start = cut.end.saturating_sub(1);
+    let band_end = cut.resume;
+    shield
+        .iter()
+        .any(|range| band_start < range.end && band_end >= range.start)
+}
+
 /// 这一刀会不会切出一个太短的碎片。
 fn fits(chosen: &[Cut], cut: &Cut, total: usize) -> bool {
     if cut.end < MIN_FRAGMENT || total.saturating_sub(cut.resume) < MIN_FRAGMENT {
@@ -182,6 +221,29 @@ mod tests {
                 "一看就不是第一次爬出来所以 Pro 比 Flash 强在哪",
                 "强在它不承认自己死了"
             ]
+        );
+    }
+
+    /// 被护住的标记不能切开：`[img:…]` 里的逗号看着像换气处，也不许下刀。
+    #[test]
+    fn a_protected_token_survives_the_cut() {
+        let raw = "[img:http://example.com/a, b] 图放这儿了 剩下的自己看 别问我参数怎么调";
+        let end = raw.chars().position(|c| c == ']').unwrap() + 1;
+        // 不护的时候，标记里的逗号会被当成换气处，切开就断成两截。
+        assert!(
+            split(raw, 3, 10)
+                .iter()
+                .any(|piece| piece.contains("[img:") && !piece.contains(']')),
+            "前提变了：这条不该照旧切"
+        );
+        let guarded = split_protected(raw, 3, 10, &[0..end]);
+        assert!(guarded.len() > 1, "{guarded:?}");
+        assert!(guarded[0].starts_with("[img:http://example.com/a, b]"), "{guarded:?}");
+        assert!(
+            guarded
+                .iter()
+                .all(|piece| piece.matches('[').count() == piece.matches(']').count()),
+            "{guarded:?}"
         );
     }
 
