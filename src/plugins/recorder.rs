@@ -603,6 +603,13 @@ fn parse_message_content(
     (text_char_count as i32, joined_text)
 }
 
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <RecorderConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}
+
 #[cfg(test)]
 mod satori_tests {
     use super::*;
@@ -622,9 +629,3 @@ mod satori_tests {
     }
 }
 
-/// Validate control edits against the plugin's actual configuration type.
-pub fn validate_config(value: &toml::Value) -> Result<(), String> {
-    <RecorderConfig as serde::Deserialize>::deserialize(value.clone())
-        .map(|_| ())
-        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
-}

@@ -66,10 +66,10 @@ impl Rendered {
     /// 取某一条的标题与链接：优先用渲染时留下的结构化数据；
     /// 旧记录（升级前落盘、`links` 为空）则从条目正文里解析。
     pub fn entry_links(&self, index: usize) -> EntryLinks {
-        if let Some(links) = self.links.get(index) {
-            if !links.title.is_empty() || links.has_link() {
-                return links.clone();
-            }
+        if let Some(links) = self.links.get(index)
+            && (!links.title.is_empty() || links.has_link())
+        {
+            return links.clone();
         }
         self.entries
             .get(index)

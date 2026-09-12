@@ -634,14 +634,14 @@ pub fn process_event(
     };
     // Matcher dispatch only uses a synchronous mutex. Consume interactive input in
     // receive order as well, and let consumed messages interrupt pending repeats.
-    if let EventType::Satori(event) = &ctx.event {
-        if event.get_str("post_type") == Some("message") {
-            match ctx.matcher.dispatch(event.clone()) {
-                Some(event) => ctx.event = EventType::Satori(event),
-                None => {
-                    plugins::repeater::interrupt(&ctx, &writer);
-                    return Box::pin(async { Ok(()) });
-                }
+    if let EventType::Satori(event) = &ctx.event
+        && event.get_str("post_type") == Some("message")
+    {
+        match ctx.matcher.dispatch(event.clone()) {
+            Some(event) => ctx.event = EventType::Satori(event),
+            None => {
+                plugins::repeater::interrupt(&ctx, &writer);
+                return Box::pin(async { Ok(()) });
             }
         }
     }

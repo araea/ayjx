@@ -236,7 +236,7 @@ mod tests {
                 .any(|piece| piece.contains("[img:") && !piece.contains(']')),
             "前提变了：这条不该照旧切"
         );
-        let guarded = split_protected(raw, 3, 10, &[0..end]);
+        let guarded = split_protected(raw, 3, 10, std::slice::from_ref(&(0..end)));
         assert!(guarded.len() > 1, "{guarded:?}");
         assert!(guarded[0].starts_with("[img:http://example.com/a, b]"), "{guarded:?}");
         assert!(

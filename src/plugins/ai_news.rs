@@ -768,34 +768,34 @@ pub fn handle(
 
         // 引用卡片 + 直接回复数字即可提取，无需指令前缀。
         // 必须先于下方按 "ai"/"模型" 的快速预判，因为裸数字不包含这些关键字。
-        if let Some(target) = current_target {
-            if let Some(reply_id) = message_reply_id(&ctx) {
-                // 只有引用的是本插件推送过的资讯卡片，并且回复文本像一条序号请求时
-                // 才拦截；否则放行给其它插件，避免把普通数字消息误当提取。
-                if let Some(rendered) = state::extraction(target.state_id(), &reply_id).await {
-                    match parse_extraction_wanted(msg.text(), rendered.entries.len()) {
-                        Some(Ok(wanted)) => {
-                            let config = load_config(&ctx);
-                            let reply = handle_extraction_reply(
-                                &ctx,
-                                &config,
-                                target,
-                                &reply_id,
-                                &wanted,
-                                message_id,
-                            )
-                            .await;
-                            send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
-                            return Ok(None);
-                        }
-                        Some(Err(message)) => {
-                            // 看起来是序号请求但非法（如越界），给一条提示
-                            let body = Message::new().reply(message_id).text(message);
-                            send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
-                            return Ok(None);
-                        }
-                        None => {}
+        if let Some(target) = current_target
+            && let Some(reply_id) = message_reply_id(&ctx)
+        {
+            // 只有引用的是本插件推送过的资讯卡片，并且回复文本像一条序号请求时
+            // 才拦截；否则放行给其它插件，避免把普通数字消息误当提取。
+            if let Some(rendered) = state::extraction(target.state_id(), &reply_id).await {
+                match parse_extraction_wanted(msg.text(), rendered.entries.len()) {
+                    Some(Ok(wanted)) => {
+                        let config = load_config(&ctx);
+                        let reply = handle_extraction_reply(
+                            &ctx,
+                            &config,
+                            target,
+                            &reply_id,
+                            &wanted,
+                            message_id,
+                        )
+                        .await;
+                        send_msg(&ctx, writer, group_id, Some(user_id), reply).await?;
+                        return Ok(None);
                     }
+                    Some(Err(message)) => {
+                        // 看起来是序号请求但非法（如越界），给一条提示
+                        let body = Message::new().reply(message_id).text(message);
+                        send_msg(&ctx, writer, group_id, Some(user_id), body).await?;
+                        return Ok(None);
+                    }
+                    None => {}
                 }
             }
         }
@@ -1805,6 +1805,13 @@ fn quiet_label(config: &AiNewsConfig, target: Option<PushTarget>) -> String {
     format!("{}—{}", start, end)
 }
 
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <AiNewsConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2244,9 +2251,3 @@ mod tests {
     }
 }
 
-/// Validate control edits against the plugin's actual configuration type.
-pub fn validate_config(value: &toml::Value) -> Result<(), String> {
-    <AiNewsConfig as serde::Deserialize>::deserialize(value.clone())
-        .map(|_| ())
-        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
-}

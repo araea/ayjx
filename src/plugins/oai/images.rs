@@ -490,6 +490,6 @@ mod tests {
         // 没有 revised_prompt 时标题回退到提示词。
         assert_eq!(generated.caption, "一只橘猫");
         assert_eq!(generated.model.as_deref(), Some("gpt-image-2.5-flare"));
-        let _ = server.await.unwrap();
+        server.await.unwrap();
     }
 }

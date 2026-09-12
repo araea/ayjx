@@ -156,7 +156,7 @@ mod tests {
     fn supported_types_pass_through_untouched() {
         let url = data_url("image/jpeg", b"not really a jpeg");
         assert_eq!(normalize(&url).as_deref(), Some(url.as_str()));
-        assert_eq!(normalize(&data_url("IMAGE/PNG", b"x")).is_some(), true);
+        assert!(normalize(&data_url("IMAGE/PNG", b"x")).is_some());
     }
 
     #[test]

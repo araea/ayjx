@@ -1733,10 +1733,13 @@ mod tests {
                 .contains("internal:red/10000/_tmp/test")
         );
         assert!(sends[2].1["content"].as_str().unwrap().contains("forward"));
+        // 请求体里的群号是字符串（`perform` 里 `self.group.to_string()` 出去的），
+        // 先转好再比，免得在闭包里现造一个。
+        let group_id = group.to_string();
         assert!(
             calls
                 .iter()
-                .any(|(m, p)| m == "internal/poke" && p["guild_id"] == group.to_string())
+                .any(|(m, p)| m == "internal/poke" && p["guild_id"] == group_id)
         );
         drop(calls);
         assert_eq!(window::with_group(group, |s| s.spoken_last_hour()), 1);
@@ -2486,6 +2489,6 @@ mod tests {
         assert_eq!(context["result"]["writes_remaining"], config.max_actions);
         drop(bridge);
         server.abort();
-        let _ = image_server.await.unwrap();
+        image_server.await.unwrap();
     }
 }

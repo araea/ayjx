@@ -596,12 +596,10 @@ async fn duckduckgo(
     let html = get_text(client, &url).await?;
     let hits: Vec<Hit> = ddg_items(&html)
         .into_iter()
-        .filter_map(|(title, url, snippet)| {
-            Some(Hit {
-                title: strip_tags(&title),
-                url,
-                snippet: strip_tags(&snippet),
-            })
+        .map(|(title, url, snippet)| Hit {
+            title: strip_tags(&title),
+            url,
+            snippet: strip_tags(&snippet),
         })
         .filter(|hit| !hit.title.is_empty() && !hit.url.is_empty())
         .take(limit)

@@ -140,7 +140,7 @@ impl View {
             if !clock.is_empty() {
                 out.push_str(&format!(" {clock}"));
             }
-            out.push_str("：");
+            out.push('：');
             out.push_str(&describe(&node.message));
             out.push('\n');
         }

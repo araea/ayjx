@@ -405,12 +405,14 @@ mod tests {
 
     #[test]
     fn focus_expires_and_never_wakes_itself() {
-        let mut state = GroupState::default();
-        state.focus = Some(Focus {
-            users: vec![1],
-            topic: "游戏".into(),
-            until: Instant::now() + Duration::from_secs(30),
-        });
+        let mut state = GroupState {
+            focus: Some(Focus {
+                users: vec![1],
+                topic: "游戏".into(),
+                until: Instant::now() + Duration::from_secs(30),
+            }),
+            ..GroupState::default()
+        };
         assert!(state.active_focus().is_some());
         assert!(!state.running);
         state.focus.as_mut().unwrap().until = Instant::now() - Duration::from_secs(1);

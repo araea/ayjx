@@ -459,15 +459,15 @@ fn scoped_key(
 
 /// Consumed interactive input still breaks a conversation's pending repeat.
 pub fn interrupt(ctx: &Context, writer: &LockedWriter) {
-    if let Some(msg) = ctx.as_message() {
-        if let Some(key) = scoped_key(
+    if let Some(msg) = ctx.as_message()
+        && let Some(key) = scoped_key(
             ctx,
             writer,
             msg.group_id().filter(|id| *id != 0),
             msg.user_id(),
-        ) {
-            break_chain(key, now_secs());
-        }
+        )
+    {
+        break_chain(key, now_secs());
     }
 }
 
@@ -642,6 +642,13 @@ pub fn handle(
         }
         Ok(Some(ctx))
     })
+}
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <RepeaterConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
 }
 
 #[cfg(test)]
@@ -1042,9 +1049,3 @@ mod tests {
     }
 }
 
-/// Validate control edits against the plugin's actual configuration type.
-pub fn validate_config(value: &toml::Value) -> Result<(), String> {
-    <RepeaterConfig as serde::Deserialize>::deserialize(value.clone())
-        .map(|_| ())
-        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
-}

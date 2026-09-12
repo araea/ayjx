@@ -271,7 +271,8 @@ pub fn relaunch(config: &AppConfig) -> Result<(), PluginError> {
     {
         use std::os::unix::process::CommandExt;
         info!(target: "Plugin/Restart", "配置已保存，正在原地重启（保留前台终端与 PID）...");
-        return Err(cmd.exec().into());
+        // exec 只在失败时返回：正常路径下这个进程已经被新程序替掉了。
+        Err(cmd.exec().into())
     }
 
     #[cfg(not(unix))]
