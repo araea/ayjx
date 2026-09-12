@@ -134,6 +134,91 @@ pub(crate) const PRESETS: &[Preset] = &[
         desc: "浮世绘木版画",
         prompt: "A ukiyo-e woodblock print of the subject: flat color areas, bold sumi ink outlines, visible woodgrain and washi paper texture, a Prussian blue and vermilion palette, stylized waves and clouds, vertical composition with a decorative cartouche in one corner.",
     },
+    Preset {
+        name: "画·云朵",
+        desc: "云彩拼出主体的形状",
+        prompt: "A photograph of a clear daytime sky in which the scattered clouds have arranged themselves into the unmistakable silhouette of the subject, floating high above a simple landscape or quiet rooftops. Bright natural light, realistic soft-edged cloud texture, the rest of the sky left open and clean so the shape reads at a glance.",
+    },
+    Preset {
+        name: "画·充气",
+        desc: "充气玩具：软乎乎的气球感",
+        prompt: "A high-resolution 3D render of the subject as an inflatable, puffy object: soft rounded air-filled volumes, smooth matte vinyl with subtle fabric creases and stitching seams, a slightly squishy irregular silhouette, gentle soft-box shadows. Floating on a clean minimal light-gray background, studio product lighting, tactile and playful.",
+    },
+    Preset {
+        name: "画·随拍",
+        desc: "刻意平庸的随手自拍",
+        prompt: "An extremely ordinary phone selfie of the subject, with no deliberate composition: slight motion blur, uneven indoor or late-afternoon light blowing out the highlights a little, an awkward angle, a cluttered real-life background, one arm half out of frame as if the phone was pulled from a pocket a second too late. Deliberately mundane, unedited snapshot look, no retouching.",
+    },
+    Preset {
+        name: "画·传送门",
+        desc: "Q 版角色穿传送门来牵你",
+        prompt: "The subject appears as a 3D chibi figure stepping out of a glowing oval portal and reaching back to pull the viewer in by the hand, glancing over its shoulder mid-motion. Inside the portal is the subject's own stylized chibi world; outside is an ordinary real-world room. Shimmering blue and purple portal light, cinematic third-person camera, the viewer's hand just visible at the frame edge.",
+    },
+    Preset {
+        name: "画·拍立得",
+        desc: "从拍立得相纸里走出来",
+        prompt: "The subject rendered as a 3D chibi figure printed on a Polaroid photo that a hand holds up; the figure is stepping out of the picture, breaking through the flat photo border into the space in front of it, one foot and one hand already outside the white frame. Soft daylight, clean background, believable paper texture and a thick white Polaroid margin.",
+    },
+    Preset {
+        name: "画·水晶球",
+        desc: "窗边水晶球里的小世界",
+        prompt: "A glass snow globe on a wooden table beside a window, containing a tiny detailed chibi scene of the subject. Warm afternoon sun shines through the glass and scatters small golden highlights, the room behind is blurred and dim. Inside the globe the little figures are lively and precise; the glass shows believable refraction and a soft rim of light.",
+    },
+    Preset {
+        name: "画·低多边形",
+        desc: "低多边形三角面渲染",
+        prompt: "A low-poly 3D render of the subject built from clean triangular facets, flat shaded with a restrained palette of two or three colors, standing in a stylized geometric desert of simple shapes. Crisp ambient occlusion, no textures, sharp readable silhouettes, a calm modern digital-art render.",
+    },
+    Preset {
+        name: "画·迷你城",
+        desc: "微缩城市一角的可爱建筑",
+        prompt: "A 3D chibi miniature diorama of a tiny two-story building shaped like an oversized everyday object related to the subject, with big windows showing a warm detailed interior of wood, lamps and tiny busy figures. A charming city corner around it: benches, street lamps, potted plants. Tilt-shift miniature photography, soft afternoon light, rich small-scale detail.",
+    },
+    Preset {
+        name: "画·壁画",
+        desc: "国风城墙壁画与倾泻的花",
+        prompt: "A tall traditional Chinese city wall carrying a mural of the subject in flowing hanfu; a great flowering tree leans over the wall and its blossom-heavy branches spill down, the flowers gathering into the subject's hair like a crown. Blue blossoms against pale stone, bright sky, fallen petals on the asphalt road below with a few passers-by. Ultra-detailed photorealistic mural photography.",
+    },
+    Preset {
+        name: "画·吉卜力",
+        desc: "吉卜力手绘动画风",
+        prompt: "Redraw the subject as a hand-painted Studio Ghibli style animation cel: soft watercolor backgrounds, layered gouache skies, gentle warm light, rounded natural shapes, expressive but simple faces, rich greens and towering cumulus clouds, a quiet sense of wonder. Traditional 2D cel animation look, visible brushwork, no 3D rendering.",
+    },
+    Preset {
+        name: "画·钥匙扣",
+        desc: "Q 版橡胶钥匙扣特写",
+        prompt: "A close-up photograph of a hand holding a cute colorful rubber keychain charm of the subject: chibi proportions, a bold black outline around the silhouette, soft matte rubber surface, a small silver key ring attached, gently catching the light. Neutral blurred background, shallow depth of field, crisp product-photo clarity.",
+    },
+    Preset {
+        name: "画·盲盒",
+        desc: "盲盒公仔与包装盒",
+        prompt: "A blind-box designer toy of the subject: a chibi vinyl figure with a matte finish and a few glossy accents, standing in front of its own illustrated window box with bold lettering and a small series logo. Clean studio lighting, soft pastel gradient backdrop, product photography, the box art matching the figure exactly.",
+    },
+    Preset {
+        name: "画·RPG卡",
+        desc: "RPG 角色属性卡",
+        prompt: "A collectible RPG character card of the subject: the character stands confidently with tools or symbols of its trade, rendered in a soft-lit 3D cartoon style. The card shows skill bars and stat values along one side, a title banner across the top and a name plate at the bottom, framed with clean lines like real model-kit packaging, the background keyed to the subject's theme.",
+    },
+    Preset {
+        name: "画·四格",
+        desc: "四格漫画，带点幽默",
+        prompt: "A colorful four-panel manga page that explains or jokes about the subject, with clear panel borders, expressive characters, simple speech bubbles and a punchline in the last panel. Clean inking, flat screentone shading, readable visual storytelling, a little humor, every caption short and correctly spelled.",
+    },
+    Preset {
+        name: "画·简笔",
+        desc: "手绘简笔画表情系列",
+        prompt: "Turn the subject into a hand-drawn stick-figure doodle, then show a row of six reaction faces of it: tongue out, smiling, frowning, surprised, thinking, winking. Loose black marker lines on white paper, minimal color, charmingly crude and expressive.",
+    },
+    Preset {
+        name: "画·复古广告",
+        desc: "红黄放射的复古促销海报",
+        prompt: "A retro promotional poster about the subject: bold Chinese headline lettering, a red-and-yellow radiating sunburst background, a polished vintage-style illustration of the subject center stage, ribbon banners and starburst price tags, halftone print texture, the look of a 1980s Chinese advertising poster. Keep the lettering short and spelled correctly.",
+    },
+    Preset {
+        name: "画·CCD",
+        desc: "CCD 老数码相机的自拍",
+        prompt: "A selfie of the subject shot on an old CCD compact camera: slight overexposure, harsh direct on-camera flash, washed-out colors, mild digital noise, a soft glow around the highlights and flash-lit skin, dated casual framing. Straight-out-of-camera early-2000s digital look, no modern color grading.",
+    },
 ];
 
 /// 选一个真正在售的图像模型；列表还没拉回来就用兜底 id。
