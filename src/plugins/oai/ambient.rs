@@ -152,6 +152,12 @@ pub(crate) struct AmbientConfig {
     /// 内存窗口只有几十条、且重启就空，但 QQ 自己存着完整历史与整份成员名册。
     /// 开着它，人格才能想起「上周那个报错」和「这人上次是什么时候冒头的」。
     pub lookup_budget: usize,
+    /// 发言时是否联网：遇到不认识的梗、新版本、比赛战况这类训练知识够不着的事，
+    /// 可以先搜一下再开口。**默认开启**——人格的价值有一半在于不瞎说。
+    /// 后端与房间共用 `[oai.search]` 那份配置，这里只管这个开关和预算。
+    pub search_enabled: bool,
+    /// 每轮最多联网几次（搜索与抓取合并）。0 等于关掉出网工具。
+    pub search_budget: usize,
     /// 计价高峰时段的作息（见 [`peak`]）。DeepSeek 官方接口空闲时段半价，
     /// 而搭话是这里唯一无人触发的付费功能，最值得挑时段。
     pub peak: peak::PeakConfig,
@@ -210,6 +216,8 @@ impl Default for AmbientConfig {
             mood_enabled: true,
             memo_budget: 3,
             lookup_budget: 4,
+            search_enabled: true,
+            search_budget: 3,
             peak: peak::PeakConfig::default(),
             send_freshness_seconds: 25,
             max_messages: 3,
@@ -291,6 +299,8 @@ impl AmbientConfig {
             max_messages: self.max_messages.min(2),
             draw_budget: 0,
             lookup_budget: self.lookup_budget.min(1),
+            // 高峰时段半价的是模型调用；联网搜索不便宜也更慢，这一句先不查。
+            search_enabled: false,
             ..self.clone()
         }
     }
@@ -971,6 +981,7 @@ async fn speak_up(
         &skill_dirs(&data_dir),
         persona,
         config,
+        &oai.search,
         oai.pi_stall(),
         turns,
         &images,
@@ -1301,12 +1312,32 @@ mod tests {
         assert!(frugal.max_messages <= 2);
         assert_eq!(frugal.draw_budget, 0);
         assert_eq!(frugal.lookup_budget, 1);
+        // 联网不便宜也更慢，高峰时段这一句先不查。
+        assert!(!frugal.search_enabled);
         // 其余设置原样带过去。
         assert_eq!(frugal.reply_model, config.reply_model);
         assert_eq!(frugal.groups, config.groups);
         // 旧配置里没有这张表也能读出来。
         let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
         assert_eq!(legacy.peak.windows, config.peak.windows);
+    }
+
+    /// 联网搜索对搭话是默认开着的：遇到不认识的梗、新版本、比赛战况，先查再开口。
+    /// 房间 agent 那边默认关，两个开关互不影响。
+    #[test]
+    fn search_is_on_by_default_for_ambient_and_shared_with_rooms_only_in_config() {
+        let config = AmbientConfig::default();
+        assert!(config.search_enabled);
+        assert_eq!(config.search_budget, 3);
+        // 旧配置里没有这两个键也读得出来。
+        let legacy: AmbientConfig = toml::from_str("groups = [1]").unwrap();
+        assert!(legacy.search_enabled);
+        assert_eq!(legacy.search_budget, config.search_budget);
+        // 想关就写 false；写 0 也等于关。
+        let off: AmbientConfig = toml::from_str("search_enabled = false").unwrap();
+        assert!(!off.search_enabled);
+        let zero: AmbientConfig = toml::from_str("search_budget = 0").unwrap();
+        assert_eq!(zero.search_budget, 0);
     }
 
     #[test]

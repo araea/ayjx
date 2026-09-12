@@ -20,6 +20,7 @@ pub mod parser;
 mod agent;
 pub(crate) mod presets;
 pub mod render;
+pub(crate) mod search;
 pub mod types;
 pub mod utils;
 
@@ -90,6 +91,9 @@ pub(crate) struct OaiConfig {
     /// 可选供应商表：模型写 `供应商/模型` 时按名字取这里的接口与密钥。
     /// 不配也不影响既有房间——不带前缀的仍走 `oai` 默认接口。
     pub(crate) providers: HashMap<String, ProviderConfig>,
+    /// 联网搜索：给内置 agent 房间的 `web_search` / `web_fetch`。
+    /// 默认关闭，群聊搭话另有 `[oai.ambient] search_enabled`，两者互不影响。
+    pub(crate) search: search::SearchConfig,
     /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
     ambient: ambient::AmbientConfig,
 }
@@ -109,6 +113,7 @@ impl Default for OaiConfig {
                 .map(|keyword| (*keyword).to_string())
                 .collect(),
             providers: HashMap::new(),
+            search: search::SearchConfig::default(),
             ambient: ambient::AmbientConfig::default(),
         }
     }

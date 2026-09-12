@@ -279,6 +279,7 @@ async fn live_persona_and_gate_dialogue() {
             &skill_dirs(dir.path()),
             PERSONA,
             &config,
+            &Default::default(),
             Some(Duration::from_secs(40)),
             &turns,
             &[],

@@ -127,6 +127,8 @@ pub(crate) struct AgentRun<'a> {
     pub retry_stalled: bool,
     /// 真实聊天界面的工具出口；`None` 表示这一轮不接聊天界面。
     pub bridge: Option<std::sync::Arc<super::ambient::bridge::Bridge>>,
+    /// 联网搜索出口；`None` 表示这一轮没有 `web_search` / `web_fetch`。
+    pub web: Option<&'a super::search::Search>,
     /// 用户正文。
     pub prompt: &'a str,
     /// 随正文送入的图片地址。
@@ -153,6 +155,7 @@ impl<'a> AgentRun<'a> {
             stall: None,
             retry_stalled: true,
             bridge: None,
+            web: None,
             prompt: "",
             images: &[],
             max_steps: 24,
@@ -170,6 +173,8 @@ pub(crate) struct AgentReply {
     pub trace: Vec<TraceStep>,
     /// 超出保留上限、未进入 `trace` 的调用次数。
     pub trace_overflow: usize,
+    /// 这一轮联网检索引用过的网页来源，渲染在回复卡片下方。
+    pub sources: Vec<super::types::Source>,
 }
 
 /// 房间对话：按历史展开消息，驱动一轮 agent。
@@ -186,6 +191,7 @@ pub(crate) async fn conversation(
     stall: Option<std::time::Duration>,
     hist: &[ChatMessage],
     control: Option<&crate::plugins::ctl::bridge::Lease>,
+    search: &super::search::SearchConfig,
 ) -> anyhow::Result<AgentReply> {
     let (current, previous) = hist
         .split_last()
@@ -196,6 +202,10 @@ pub(crate) async fn conversation(
     let skills: Vec<PathBuf> = control
         .map(|lease| vec![lease.skill().to_path_buf()])
         .unwrap_or_default();
+    // 搜索状态一轮一份：预算、客户端与引用来源都随这一轮生灭。
+    let web = search
+        .enabled
+        .then(|| super::search::Search::new(search.clone()));
     // 房间的工作目录沿用 bot 自身：与从前一致，bash 与文件工具都在这里活动。
     let cwd = std::env::current_dir().ok();
     run::run_with_history(
@@ -211,6 +221,7 @@ pub(crate) async fn conversation(
             control: control.is_some(),
             env: &env,
             stall,
+            web: web.as_ref(),
             prompt: &current.content,
             images: &current.images,
             ..AgentRun::new()

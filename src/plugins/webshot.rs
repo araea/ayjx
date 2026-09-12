@@ -105,7 +105,10 @@ fn domain_matches(host: &str, rule: &str) -> bool {
 ///
 /// IP 字面量直接判定；域名会真实解析一次，所以 `127.0.0.1.nip.io` 这类
 /// 「公网域名解析回本机」的绕过同样会被拦下。
-async fn host_is_internal(host: &Host<&str>) -> bool {
+///
+/// `web_fetch` 也用这套判定：搜索结果是不可信输入，模型可能被网页里的一句话
+/// 指使去读本机面板，两处必须用同一份规则，不能各写一套。
+pub(crate) async fn host_is_internal(host: &Host<&str>) -> bool {
     match host {
         Host::Ipv4(ip) => ip_is_internal(IpAddr::V4(*ip)),
         Host::Ipv6(ip) => ip_is_internal(IpAddr::V6(*ip)),

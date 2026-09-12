@@ -9,7 +9,7 @@ anyhow = "1.0"
 
 # 文本处理
 jieba-rs = "0.10"     # 中文分词
-regex = "1.12"        # 正则表达式
+regex = "1.13"        # 正则表达式
 pulldown-cmark = "0.13" # Markdown 解析
 glob = "0.3"          # 内置 agent 的文件匹配工具
 walkdir = "2"         # 内置 agent 的目录遍历工具
@@ -26,10 +26,10 @@ base64 = "0.23"
 
 # 网络与 HTTP
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "http2", "charset", "json", "multipart"] }
-http = "1.4"
+http = "1.5"
 url = "2.5"
 tokio-tungstenite = "0.30"  # WebSocket
-quick-xml = "0.38"           # Satori 消息元素解析
+quick-xml = "0.42"           # Satori 消息元素解析
 rig-core = { version = "0.42", default-features = false, features = ["reqwest", "rustls"] }  # OpenAI 兼容补全
 
 # 异步运行时与工具

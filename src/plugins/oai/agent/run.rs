@@ -38,6 +38,15 @@ const CONTROL_HINT: &str = "\
 这一轮你还能直接操作机器人自己：用 bash 执行 `\"$AYJX_CTL_BIN\" --ctl \"<命令>\"`，
 可以查看和修改插件开关与配置。具体用法见下面列的 skill，命令的回执会原样打回来。";
 
+/// 联网搜索的用法说明；只有这一轮真挂了出网工具时才写进提示词。
+///
+/// 工具本身各有 description，这里只交代那件工具描述不了的事：什么时候该伸手去搜
+/// （模型常常凭记忆直接答，答的还是过期信息），以及别拿它当 `read` 用。
+const SEARCH_HINT: &str = "\
+这一轮你能联网：web_search 查训练知识之外的最新信息（赛程战况、版本、新闻、近况），
+web_fetch 读某个网址的正文。不确定或可能已经变了的事实，先搜再答，别凭记忆硬说；
+已知具体网址就直接 web_fetch。来源链接要带在回答里。";
+
 /// 跑一轮对话。
 pub(crate) async fn run(run: AgentRun<'_>) -> anyhow::Result<super::AgentReply> {
     run_with_history(run, &[]).await
@@ -73,7 +82,7 @@ async fn attempt(
     history: &[super::super::types::ChatMessage],
 ) -> Result<super::AgentReply, Failure> {
     let context = Context::prepare(run, history).await?;
-    let definitions = super::tools::definitions(run.tools, run.bridge.is_some());
+    let definitions = super::tools::definitions(run.tools, run.bridge.is_some(), run.web.is_some());
     let client = llm::client(run.api_base, run.api_key).map_err(|message| Failure {
         message,
         stalled: false,
@@ -133,6 +142,7 @@ async fn attempt(
                 model: Some(run.model.to_string()),
                 trace: trace.steps,
                 trace_overflow: trace.overflow,
+                sources: run.web.map(|web| web.sources()).unwrap_or_default(),
             });
         }
 
@@ -193,6 +203,10 @@ impl Context {
                 if run.control {
                     base.push_str("\n\n");
                     base.push_str(CONTROL_HINT);
+                }
+                if run.web.is_some() {
+                    base.push_str("\n\n");
+                    base.push_str(SEARCH_HINT);
                 }
                 match run.append_system_prompt.trim() {
                     "" => base,

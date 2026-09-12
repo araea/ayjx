@@ -69,6 +69,36 @@ drop = [
     "customtools", "highspeed", "lightning", "-image-preview", "-vision-exp",
 ]
 
+# 联网搜索：内置 agent 房间的 web_search / web_fetch 两个出网工具。
+# 默认关闭；群聊搭话那边默认开着（[oai.ambient] search_enabled），两个开关彼此独立，
+# 都要关就两处都改。后端、预算与密钥在这里配一次，两边共用。
+[oai.search]
+enabled = false
+# 后端顺序：前一个不可用（没配密钥）或失败（超时/报错/零结果）就顺延到下一个。
+# `"auto"` 展开成「所有免密钥后端 + 配好了密钥的密钥后端」，免密钥的排前面兜底。
+# 内置：bing、duckduckgo（免密钥抓取，中文查询会先收紧汉字间的空格再交给 Bing）；
+#       tavily、brave、serper（在本表下面的 backends 里写 api_key）；
+#       searxng（在 backends 里写 base_url，指向自建实例）。
+# 免密钥抓取够日常用，但中文时效性内容（比赛战况、新版本）的召回不如商业接口，
+# 要稳就配上 tavily 或自建一个 searxng 排在前面。
+providers = ["auto"]
+# 一轮对话里搜索与抓取加起来最多几次。
+max_uses = 4
+# 单个后端或一次抓取超时（秒）。
+timeout_seconds = 20
+# 每次搜索最多返回几条。
+results = 8
+
+# 需要凭据的后端在这里配；不配就自动从链上跳过，不会白白失败一次。
+# [oai.search.backends.tavily]
+# api_key = "tvly-xxxxxxxx"
+# [oai.search.backends.brave]
+# api_key = "BSAxxxxxxxx"
+# [oai.search.backends.serper]
+# api_key = "xxxxxxxx"
+# [oai.search.backends.searxng]
+# base_url = "https://searx.example.com"
+
 # 群聊搭话：让同一个 agent 以固定人格在指定群里旁听，绝大多数时候沉默。
 # 完整字段与取舍见 docs/ambient.md；人设在 data/oai/ambient/persona.md。
 [oai.ambient]

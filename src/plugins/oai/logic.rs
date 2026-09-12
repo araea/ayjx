@@ -658,11 +658,12 @@ async fn respond(
             oai.pi_stall(),
             hist,
             control,
+            &oai.search,
         )
         .await?;
         return Ok(Reply {
             text: result.text,
-            sources: Vec::new(),
+            sources: result.sources,
             trace: result.trace,
             trace_overflow: result.trace_overflow,
             // 页脚显示房间写的那份（`供应商/模型`）；房间没写模型时显示解析出来的默认模型。

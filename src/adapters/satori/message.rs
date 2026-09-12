@@ -87,21 +87,21 @@ pub fn from_content_with(content: &str, proxy: &ResourceProxy) -> Message {
         match reader.read_event() {
             Ok(XmlEvent::Start(start)) => {
                 stack.push(Element {
-                    name: String::from_utf8_lossy(start.name().as_ref()).into_owned(),
-                    attrs: attrs(&reader, &start),
+                    name: start.name().as_ref().to_string(),
+                    attrs: attrs(&start),
                     ..Default::default()
                 });
             }
             Ok(XmlEvent::Empty(start)) => {
                 let element = Element {
-                    name: String::from_utf8_lossy(start.name().as_ref()).into_owned(),
-                    attrs: attrs(&reader, &start),
+                    name: start.name().as_ref().to_string(),
+                    attrs: attrs(&start),
                     ..Default::default()
                 };
                 push_element(&mut roots, &mut stack, element);
             }
             Ok(XmlEvent::Text(text)) => {
-                let decoded = text.decode().unwrap_or_default();
+                let decoded = text.into_inner();
                 let value = match quick_xml::escape::unescape(&decoded) {
                     Ok(value) => value.into_owned(),
                     Err(_) => decoded.into_owned(),
@@ -109,11 +109,11 @@ pub fn from_content_with(content: &str, proxy: &ResourceProxy) -> Message {
                 push_text(&mut roots, &mut stack, &value);
             }
             Ok(XmlEvent::CData(text)) => {
-                let value = text.decode().unwrap_or_default();
+                let value = text.into_inner();
                 push_text(&mut roots, &mut stack, &value);
             }
             Ok(XmlEvent::GeneralRef(reference)) => {
-                let name = reference.decode().unwrap_or_default();
+                let name = reference.into_inner();
                 let value = if let Some(number) = name.strip_prefix("#x") {
                     u32::from_str_radix(number, 16)
                         .ok()
@@ -199,12 +199,13 @@ fn push_text(roots: &mut Vec<Element>, stack: &mut [Element], value: &str) {
     });
 }
 
-fn attrs(reader: &Reader<&[u8]>, start: &quick_xml::events::BytesStart<'_>) -> Object {
+fn attrs(start: &quick_xml::events::BytesStart<'_>) -> Object {
     let mut out = Object::new();
     for attr in start.attributes().with_checks(false).flatten() {
-        let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        let key = attr.key.as_ref().to_string();
+        // 这些元素片段没有 XML 声明，按隐式 1.0 归一属性值（含实体解码）。
         let value = attr
-            .decode_and_unescape_value(reader.decoder())
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map(|v| v.into_owned())
             .unwrap_or_default();
         out.insert(key, OwnedValue::from(value));

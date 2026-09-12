@@ -59,6 +59,17 @@ agent 手边有两类工具。**本地工具**在房间里默认全开：
 
 **聊天界面工具**只在群聊搭话时存在（详见[群聊搭话](ambient.md)）：`satori_context`、`satori_read`、`satori_action`、`satori_draw`、`satori_history`、`satori_group`、`satori_memo`。它们直接调用进程内的通道，动作、额度与回执去重都由插件负责。
 
+**联网工具**由 `[oai.search].enabled` 控制，**默认关闭**（群聊搭话那边默认开着，见下）：
+
+| 工具 | 作用 |
+| --- | --- |
+| `web_search` | 搜一次，返回带序号的标题、链接与摘要；`recency` 可限定最近一天/一周/一月/一年 |
+| `web_fetch` | 读一个网址的正文并转成纯文本；只支持公网 http/https，内网与本机地址会被拒绝 |
+
+后端、超时、每轮次数上限与密钥都在 `[oai.search]` 里配一次，房间与搭话共用：默认走免密钥的 Bing / DuckDuckGo 抓取，什么都不用配就能用；要更稳或更好的中文覆盖，可以在 `[oai.search.backends]` 里补 `tavily` / `brave` / `serper` 的密钥，或指向自建的 `searxng`。默认按 `providers` 的顺序依次尝试，前一个失败就顺延，全部失败会明确报错。Bing 中文站对空格敏感，发出去之前会先收紧汉字之间的空格。检索到的来源会渲染在回复卡片下方，回答里也要求带上链接。
+
+`web_fetch` 沿用 `[webshot]` 那套链接准入：搜索结果是不可信输入，模型可能被网页里的一句话指使去读本机面板，所以主机先解析再判定，重定向逐跳复检。
+
 这里没有沙箱：`bash` 能做的事，工具集里别的方式也能做到。边界在「谁能在房间里说话」这一层，不在工具本身。
 
 agent 房间还带一份 skill：说明怎么用 `ayjx --ctl` 操作机器人自身。凭据只在发起人是 `ctl.admins` 里的管理员时随这一轮签发，见[插件控制](CONTROL.md)。
@@ -75,6 +86,11 @@ agent 房间还带一份 skill：说明怎么用 `ayjx --ctl` 操作机器人自
 | `plain_text_max_chars` | `120` | 短回复的纯文本阈值，`0` 表示始终渲染图片 |
 | `show_trace_footer` | `true` | 是否在卡片页脚显示模型、耗时与工具轨迹 |
 | `providers` | 空 | 供应商表，每项含 `api_base` 与 `api_key` |
+| `search.enabled` | `false` | 房间 agent 的联网搜索开关；后端与搭话共用同一份 `[oai.search]` 配置 |
+| `search.providers` | `["auto"]` | 搜索后端顺序；`auto` 展开成免密钥后端加配置好的密钥后端 |
+| `search.max_uses` | `4` | 一轮对话里搜索与抓取加起来的上限 |
+| `search.results` | `8` | 每次搜索最多返回几条 |
+| `search.backends` | 空 | 各后端的 `api_key`（tavily/brave/serper）或 `base_url`（searxng） |
 
 一次模型请求发出去之后要到收尾才有回复，中间没有事件可看，所以 `pi_stall_seconds` 是**单次请求**的上限：上游抽风时请求会一直挂着，静默超过这个秒数就掐掉重来一次。动过工具之后不再重试——同一份副作用做两遍比慢一点糟糕得多。
 
