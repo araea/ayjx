@@ -127,19 +127,22 @@ impl SearchConfig {
         }
     }
 
-    /// 配置里写的顺序，`auto` 展开成两条免密钥后端加所有配好的密钥后端。
+    /// 配置里写的顺序，`auto` 展开成「配好密钥的后端 + 免密钥抓取兜底」。
+    ///
+    /// 密钥后端排在前面：既然配了密钥，就是想要它的召回质量，不该被 Bing 挡在外面；
+    /// 免密钥的那两个留在链尾，密钥额度用尽或上游抽风时还能出结果。
     fn chain(&self) -> Vec<String> {
         let mut chain = Vec::new();
         for provider in &self.providers {
             let provider = provider.trim().to_ascii_lowercase();
             if provider == "auto" {
-                for name in FREE_PROVIDERS {
-                    push_unique(&mut chain, name);
-                }
                 for name in KEYED_PROVIDERS {
                     if self.available(name) {
                         push_unique(&mut chain, name);
                     }
+                }
+                for name in FREE_PROVIDERS {
+                    push_unique(&mut chain, name);
                 }
             } else if !provider.is_empty() {
                 push_unique(&mut chain, &provider);
@@ -890,7 +893,7 @@ mod tests {
     }
 
     #[test]
-    fn default_chain_is_free_backends_then_configured_keys() {
+    fn configured_keys_lead_the_chain_and_free_backends_catch_the_fall() {
         let mut config = config();
         assert_eq!(config.chain(), vec!["bing", "duckduckgo"]);
         config.backends.insert(
@@ -900,11 +903,11 @@ mod tests {
                 base_url: String::new(),
             },
         );
-        // 配了密钥的自动插进免密钥后端之前——质量优先，兜底仍在。
-        assert_eq!(config.chain(), vec!["bing", "duckduckgo", "tavily"]);
+        // 配了密钥就先用密钥后端，免密钥的留在链尾兜底。
+        assert_eq!(config.chain(), vec!["tavily", "bing", "duckduckgo"]);
         // 显式顺序说了算，重复项去掉。
-        config.providers = vec!["tavily".into(), "bing".into(), "tavily".into()];
-        assert_eq!(config.chain(), vec!["tavily", "bing"]);
+        config.providers = vec!["bing".into(), "tavily".into(), "bing".into()];
+        assert_eq!(config.chain(), vec!["bing", "tavily"]);
     }
 
     #[test]

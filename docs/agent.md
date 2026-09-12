@@ -87,7 +87,7 @@ agent 房间还带一份 skill：说明怎么用 `ayjx --ctl` 操作机器人自
 | `show_trace_footer` | `true` | 是否在卡片页脚显示模型、耗时与工具轨迹 |
 | `providers` | 空 | 供应商表，每项含 `api_base` 与 `api_key` |
 | `search.enabled` | `false` | 房间 agent 的联网搜索开关；后端与搭话共用同一份 `[oai.search]` 配置 |
-| `search.providers` | `["auto"]` | 搜索后端顺序；`auto` 展开成免密钥后端加配置好的密钥后端 |
+| `search.providers` | `["auto"]` | 搜索后端顺序；`auto` 展开成配置好的密钥后端（优先）加免密钥抓取（兜底） |
 | `search.max_uses` | `4` | 一轮对话里搜索与抓取加起来的上限 |
 | `search.results` | `8` | 每次搜索最多返回几条 |
 | `search.backends` | 空 | 各后端的 `api_key`（tavily/brave/serper）或 `base_url`（searxng） |
