@@ -64,6 +64,13 @@ pub struct Agent {
     /// 留空表示交给引擎默认；模型写法里的 `:强度` 后缀优先于这里。
     #[serde(default)]
     pub thinking: String,
+    /// 这间房是否联网搜索。
+    ///
+    /// 三态：`None` 跟随 `[oai.search].enabled`（没动过的房间都是这个），
+    /// `Some(true)` / `Some(false)` 是这间房自己的选择，不受全局开关影响。
+    /// 「这间要查资料、那间只聊天」是常有的事，用 `房间?` 系指令设置。
+    #[serde(default)]
+    pub search: Option<bool>,
     pub system_prompt: String,
     #[serde(default)]
     pub public_history: Vec<ChatMessage>,
@@ -84,6 +91,7 @@ impl Agent {
             engine: String::new(),
             model: model.to_string(),
             thinking: String::new(),
+            search: None,
             system_prompt: prompt.to_string(),
             public_history: Vec::new(),
             private_histories: HashMap::new(),
@@ -116,6 +124,11 @@ impl Agent {
         super::utils::split_thinking(&self.model)
             .1
             .or_else(|| normalize_thinking(&self.thinking))
+    }
+
+    /// 这间房实际是否联网：房间自己的选择优先，没写过就跟 `[oai.search].enabled`。
+    pub fn web_search(&self, fallback: bool) -> bool {
+        self.search.unwrap_or(fallback)
     }
 
     pub fn history_mut(&mut self, private: bool, uid: &str) -> &mut Vec<ChatMessage> {
@@ -301,6 +314,29 @@ mod engine_tests {
         room.model = "deepseek/deepseek-flash".into();
         room.thinking = "unlimited".into();
         assert_eq!(room.effective_thinking(), None);
+    }
+
+    /// 联网开关是三态：没动过的房间跟着全局走，动过的就认自己那一份。
+    #[test]
+    fn room_search_is_tri_state_over_the_global_switch() {
+        let mut room = Agent::new("研究", "deepseek/deepseek-flash", "", "");
+        // 新建房间没写过：全局开它就开，全局关它就关。
+        assert_eq!(room.search, None);
+        assert!(!room.web_search(false));
+        assert!(room.web_search(true));
+        // 房间自己开了：全局关着也照样联网。
+        room.search = Some(true);
+        assert!(room.web_search(false));
+        // 房间自己关了：全局开着也不联网。
+        room.search = Some(false);
+        assert!(!room.web_search(true));
+        // 旧配置没有这个键，读出来是「跟随」，不会被判成关闭。
+        let legacy: Agent = serde_json::from_str(
+            r#"{"name":"研究","model":"deepseek/deepseek-flash","system_prompt":""}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.search, None);
+        assert!(legacy.web_search(true));
     }
 
     /// 还没迁移过的配置里 `engine` 是空的；那时仍按当初的名字规则判断，

@@ -19,6 +19,7 @@ pub enum Action {
     Delete,
     List,
     SetModel,
+    SetSearch,
     SetPrompt,
     ViewPrompt,
     ListModels,
@@ -312,6 +313,18 @@ fn parse_suffix(norm: &str, raw: &str, has_priv_prefix: bool) -> (Action, String
         return (Action::SetModel, arg.to_string(), vec![]);
     }
 
+    // `?` 是「联网搜索」。符号表里再没有比问号更贴切的了：它就是一个问句的收尾。
+    // 后面跟的词交给 [`search_choice`] 解释，认不出来时回到 `args` 里让调用方提示用法。
+    if s.starts_with('?') {
+        let skip_len = if r.starts_with('？') {
+            '？'.len_utf8()
+        } else {
+            '?'.len_utf8()
+        };
+        let arg = r.get(skip_len..).unwrap_or("").trim();
+        return (Action::SetSearch, arg.to_string(), vec![]);
+    }
+
     if s == "/$" {
         return (Action::ViewPrompt, String::new(), vec![]);
     }
@@ -372,6 +385,22 @@ fn parse_suffix(norm: &str, raw: &str, has_priv_prefix: bool) -> (Action, String
     (Action::Chat, r.to_string(), vec![])
 }
 
+/// `房间?` 后面那个词要落下的状态。
+///
+/// 返回 `Some(None)` 表示「交回全局配置」，`Some(Some(..))` 是明确的开关，
+/// 返回 `None` 表示这个词不认识——调用方据此回一句用法，而不是默默当成切换。
+/// 空词是切换：`房间?` 一次就换一边，这是最省事的写法。
+pub(crate) fn search_choice(word: &str, current: bool) -> Option<Option<bool>> {
+    let word = normalize(word.trim()).trim().to_ascii_lowercase();
+    Some(match word.as_str() {
+        "" => Some(!current),
+        "on" | "开" | "打开" | "联网" | "搜索" | "开联网" => Some(true),
+        "off" | "关" | "关闭" | "不联网" | "不搜索" | "关联网" => Some(false),
+        "auto" | "默认" | "跟随" | "继承" | "全局" => None,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,5 +426,45 @@ mod tests {
             parse_delete_agent("-#PI-TEST", &rooms).as_deref(),
             Some("pi-test")
         );
+    }
+
+    /// `房间?` 系：一个符号管三件事——切换、明确开关、交回全局。
+    #[test]
+    fn the_question_mark_room_command_parses_every_spelling() {
+        let rooms = vec!["研究".to_string()];
+        for (input, expected) in [
+            ("研究?", ""),
+            ("研究?on", "on"),
+            ("研究？开", "开"),
+            ("研究? 关", "关"),
+            ("研究?auto", "auto"),
+        ] {
+            let cmd = parse_agent_cmd(input, &rooms).unwrap();
+            assert_eq!(cmd.action, Action::SetSearch, "{input}");
+            assert_eq!(cmd.args, expected, "{input}");
+        }
+        // 问号不在房间名后面时，仍然只是普通聊天。
+        let cmd = parse_agent_cmd("研究 今天有比赛吗?", &rooms).unwrap();
+        assert_eq!(cmd.action, Action::Chat);
+        assert_eq!(cmd.args, "今天有比赛吗?");
+    }
+
+    #[test]
+    fn the_search_word_maps_to_on_off_follow_or_unknown() {
+        // 空词是切换：当前关就开，当前开就关。
+        assert_eq!(search_choice("", false), Some(Some(true)));
+        assert_eq!(search_choice("", true), Some(Some(false)));
+        for word in ["on", "ON", "开", "打开", "联网", "搜索"] {
+            assert_eq!(search_choice(word, false), Some(Some(true)), "{word}");
+        }
+        for word in ["off", "OFF", "关", "关闭", "不联网"] {
+            assert_eq!(search_choice(word, true), Some(Some(false)), "{word}");
+        }
+        for word in ["auto", "AUTO", "默认", "跟随", "继承", "全局"] {
+            assert_eq!(search_choice(word, true), Some(None), "{word}");
+        }
+        // 认不出来的词不猜：调用方要回一句用法。
+        assert_eq!(search_choice("也许", false), None);
+        assert_eq!(search_choice("yes", false), None);
     }
 }

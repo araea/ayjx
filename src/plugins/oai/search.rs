@@ -131,7 +131,8 @@ impl SearchConfig {
     ///
     /// 密钥后端排在前面：既然配了密钥，就是想要它的召回质量，不该被 Bing 挡在外面；
     /// 免密钥的那两个留在链尾，密钥额度用尽或上游抽风时还能出结果。
-    fn chain(&self) -> Vec<String> {
+    /// 房间回执里那句「后端 A → B」也用它。
+    pub(crate) fn chain(&self) -> Vec<String> {
         let mut chain = Vec::new();
         for provider in &self.providers {
             let provider = provider.trim().to_ascii_lowercase();
@@ -1094,7 +1095,7 @@ mod tests {
 
     /// 真实后端接入测试：需要网络。验证解析规则真的对得上当下各家返回的 HTML/JSON。
     ///
-    /// `AYJX_SEARCH_LIVE=1 cargo test --release live_search -- --ignored --nocapture`
+    /// `cargo test --release live_search -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "访问真实搜索引擎，需要网络"]
     async fn live_search_returns_parsable_results() {
@@ -1105,6 +1106,33 @@ mod tests {
             .expect("搜索应当返回结果");
         println!("{text}");
         assert!(text.contains("http"), "{text}");
+    }
+
+    /// 按线上 `config.toml` 里那份配置跑一次搜索。
+    ///
+    /// 这一条是给运维用的：换密钥、调后端顺序之后，确认配置真的被读进去了、
+    /// 链首是不是你以为的那个后端，以及它返回的结果长什么样。
+    /// `cargo test --release live_search_uses -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "读取 config.toml 并访问真实后端"]
+    async fn live_search_uses_the_configured_chain() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config.toml");
+        let raw = std::fs::read_to_string(path).expect("读不到 config.toml");
+        // 插件配置取的是 `[oai]` 这张子表，不是整份文件——按线上同一层切片解析。
+        let value: toml::Value = toml::from_str(&raw).expect("config.toml 解析失败");
+        let section = match value.get("oai") {
+            Some(section) => section.clone(),
+            None => toml::Value::Table(Default::default()),
+        };
+        let oai: crate::plugins::oai::OaiConfig =
+            section.try_into().expect("[oai] 解析失败");
+        println!("后端链：{:?}", oai.search.chain());
+        let search = Search::new(oai.search);
+        let text = search
+            .search("英雄联盟 IG 最近比赛战况", Some(5), None)
+            .await
+            .expect("搜索应当返回结果");
+        println!("{text}");
     }
 
     /// 真实抓取测试：验证标签剥离与长度截断在真实页面上站得住。

@@ -605,6 +605,31 @@ async fn chat(
     }
 }
 
+/// 回执里那句「会打到哪些后端」，优先的在前面。
+///
+/// 只在这一轮真的能联网时才显示：链空着说明没配出任何可用后端，这时把话说破，
+/// 省得管理员以为开关打开了就一定搜得到。
+fn search_backends(config: &super::search::SearchConfig) -> String {
+    let chain = config.chain();
+    if chain.is_empty() {
+        return "（没有可用的后端，去 [oai.search.backends] 配密钥）".to_string();
+    }
+    chain.join(" → ")
+}
+
+/// 房间里显示的联网状态：区分「这间房自己定的」和「跟着全局走」。
+fn search_state(agent: &Agent, global: bool) -> String {
+    if !agent.uses_pi() {
+        return "不适用（普通房间）".to_string();
+    }
+    match (agent.web_search(global), agent.search) {
+        (true, Some(true)) => "开（这间房自己定的）".to_string(),
+        (true, _) => "开（跟随全局）".to_string(),
+        (false, Some(false)) => "关（这间房自己定的）".to_string(),
+        (false, _) => "关（跟随全局）".to_string(),
+    }
+}
+
 /// 房间列表和回执里显示的模型：内置 agent 房间前面挂上引擎，一眼能看出这间屋子
 /// 谁在跑；设了思考强度就一并标出。
 fn room_model_label(agent: &Agent) -> String {
@@ -648,6 +673,12 @@ async fn respond(
 ) -> anyhow::Result<Reply> {
     let thinking = agent.effective_thinking();
     if agent.uses_pi() {
+        // 联网开关是房间自己的选择优先，没写过才跟 `[oai.search].enabled`。
+        // 工具只是挂上去，搜不搜由模型按需决定，没有任何一轮是强制的。
+        let search = super::search::SearchConfig {
+            enabled: agent.web_search(oai.search.enabled),
+            ..oai.search.clone()
+        };
         let result = super::agent::conversation(
             api_base,
             api_key,
@@ -658,7 +689,7 @@ async fn respond(
             oai.pi_stall(),
             hist,
             control,
-            &oai.search,
+            &search,
         )
         .await?;
         return Ok(Reply {
@@ -1020,6 +1051,62 @@ pub async fn execute(
             )
             .await;
         }
+        // `房间?` 管这间房要不要联网：不带词就换一边，`开`/`关` 明确指定，
+        // `默认` 交回 [oai.search].enabled。房间自己的选择优先于全局。
+        Action::SetSearch => {
+            let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+            let global = oai.search.enabled;
+            let mut c = mgr.config.write().await;
+            let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) else {
+                reply_text(ctx, writer, &msg_event, format!("❌ {} 不存在", name)).await;
+                return;
+            };
+            if !a.uses_pi() {
+                reply_text(
+                    ctx,
+                    writer,
+                    &msg_event,
+                    format!(
+                        "❌ {} 是普通房间，联网搜索只挂在内置 agent 上；先 `{}%pi` 把它转过来。",
+                        name, name
+                    ),
+                )
+                .await;
+                return;
+            }
+            let Some(choice) = super::parser::search_choice(&cmd.args, a.web_search(global)) else {
+                reply_text(
+                    ctx,
+                    writer,
+                    &msg_event,
+                    "❌ 不认识这个写法。`房间?` 换一边，`房间?开` / `房间?关` 明确开关，`房间?默认` 跟随全局。",
+                )
+                .await;
+                return;
+            };
+            a.search = choice;
+            let now = a.web_search(global);
+            mgr.save(&c);
+            let state = match choice {
+                Some(true) => "已打开（按需触发）",
+                Some(false) => "已关闭",
+                None if now => "跟随全局（当前开，按需触发）",
+                None => "跟随全局（当前关）",
+            };
+            // 打开时顺带说一句会打到哪个后端，省得去翻配置确认密钥有没有生效。
+            let backends = if now {
+                format!("　后端 {}", search_backends(&oai.search))
+            } else {
+                String::new()
+            };
+            reply_text(
+                ctx,
+                writer,
+                &msg_event,
+                format!("🔍 {} 联网搜索：{}{}", name, state, backends),
+            )
+            .await;
+        }
         Action::SetPrompt => {
             let mut c = mgr.config.write().await;
             if let Some(a) = c.agents.iter_mut().find(|a| a.name == *name) {
@@ -1046,9 +1133,14 @@ pub async fn execute(
                 } else {
                     escape_markdown_special(&a.system_prompt)
                 };
+                let search_default =
+                    crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
+                        .search
+                        .enabled;
                 let content = format!(
-                    "**模型**: `{}`\n\n**提示词**:\n```\n{}\n```",
+                    "**模型**: `{}`\n\n**联网搜索**: {}\n\n**提示词**:\n```\n{}\n```",
                     room_model_label(a),
+                    search_state(a, search_default),
                     prompt_display
                 );
                 reply(
@@ -1065,6 +1157,10 @@ pub async fn execute(
             }
         }
         Action::List => {
+            let search_default =
+                crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai")
+                    .search
+                    .enabled;
             let c = mgr.config.read().await;
             if c.agents.is_empty() {
                 reply_text(
@@ -1100,6 +1196,12 @@ pub async fn execute(
                         super::utils::truncate_str(&a.system_prompt, 20)
                     } else {
                         "无描述".to_string()
+                    };
+                    // 联网的房间挂个放大镜：一眼看出哪几间会出去查资料。
+                    let desc_display = if a.uses_pi() && a.web_search(search_default) {
+                        format!("🔍 {}", desc_display)
+                    } else {
+                        desc_display
                     };
                     html_parts.push(format!(r#"<div class="agent-mini"><div class="agent-mini-top"><div class="agent-idx">{}</div><div class="agent-mini-name">{}</div></div><div class="agent-mini-desc">{}</div></div>"#, real_idx, a.name, desc_display));
                 }
@@ -1566,10 +1668,14 @@ pub async fn execute(
 | `智能体$提示词` | 修改提示词 | `助手$你是...` |
 | `智能体$` | 清空提示词 | `助手$` |
 | `智能体/$` | 查看提示词 | `助手/$` |
+| `智能体?` | 联网搜索换一边 | `研究?` |
+| `智能体?开` / `?关` | 这间房开或联网 | `研究?关` |
+| `智能体?默认` | 跟随全局开关 | `研究?默认` |
 | `/%` | 模型列表 | `/%` |
 
 > 普通房间的模型可写 `供应商/模型`，按 `[oai.providers]` 选接口；不带前缀走默认接口。
 > 思考强度 `off`/`minimal`/`low`/`medium`/`high`，模型后的 `:强度` 优先于房间设置。
+> 联网是**按需**的：开着只是让模型能查，搜不搜由它自己按这句话需不需要判断。
 
 ## 对话控制
 | 指令 | 功能 |
