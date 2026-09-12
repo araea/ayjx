@@ -2069,6 +2069,7 @@ mod tests {
             }],
             Vec::new(),
             None,
+            None,
         );
         assert!(request.tools.is_empty());
         assert!(request.additional_params.is_none());
@@ -2083,7 +2084,7 @@ mod tests {
             }]
         };
         for (level, expected) in [("high", "high"), ("off", "none")] {
-            let request = super::super::llm::request(messages(), Vec::new(), Some(level));
+            let request = super::super::llm::request(messages(), Vec::new(), Some(level), None);
             assert_eq!(
                 request.additional_params,
                 Some(serde_json::json!({ "reasoning_effort": expected })),
@@ -2091,7 +2092,7 @@ mod tests {
             );
         }
         // 非法档位不写入参数，保持请求干净。
-        let request = super::super::llm::request(messages(), Vec::new(), Some("nonsense"));
+        let request = super::super::llm::request(messages(), Vec::new(), Some("nonsense"), None);
         assert!(request.additional_params.is_none());
     }
 

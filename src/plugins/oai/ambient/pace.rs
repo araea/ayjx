@@ -170,6 +170,9 @@ fn strip_decoration(line: &str) -> &str {
 
 /// 一行文本 → 消息段 + 正文字数。
 fn build_message(body: &str) -> (Message, usize) {
+    // 字面的 `\n` 在这儿就还原成真换行，后面按标记定位的字节下标才对得上。
+    let body = super::literal_newlines(body);
+    let body = body.as_str();
     let mut message = Message::new();
     let mut chars = 0usize;
     let mut cursor = 0usize;

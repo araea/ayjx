@@ -113,6 +113,8 @@ pub(crate) struct AgentRun<'a> {
     pub model: &'a str,
     /// 思考强度（off/minimal/low/…）。
     pub thinking: Option<&'a str>,
+    /// 采样温度；`None` 交给接口默认值。群聊那边调高，判定与普通房间不动。
+    pub temperature: Option<f64>,
     /// 额外载入的 skill 文件或目录。
     pub skills: &'a [PathBuf],
     /// 这一轮持有控制通道凭据：系统提示词里会多一句用法说明。
@@ -148,6 +150,7 @@ impl<'a> AgentRun<'a> {
             append_system_prompt: "",
             model: "",
             thinking: None,
+            temperature: None,
             skills: &[],
             control: false,
             tools: None,

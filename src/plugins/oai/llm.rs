@@ -45,10 +45,12 @@ fn reasoning_effort(level: &str) -> Option<&'static str> {
 ///
 /// `tools` 为空就是普通房间的形态——请求里连 tools 字段都不会有意义；
 /// 思考强度走 `additional_params.reasoning_effort`，由 provider 扁平进顶层。
+/// `temperature` 为 `None` 时连这个字段都不发，交给接口自己的默认值。
 pub(crate) fn request(
     history: Vec<Message>,
     tools: Vec<rig_core::completion::ToolDefinition>,
     thinking: Option<&str>,
+    temperature: Option<f64>,
 ) -> CompletionRequest {
     CompletionRequest {
         model: None,
@@ -56,7 +58,7 @@ pub(crate) fn request(
         chat_history: history,
         documents: Vec::new(),
         tools,
-        temperature: None,
+        temperature,
         max_tokens: None,
         tool_choice: None,
         additional_params: thinking
@@ -89,7 +91,7 @@ pub(crate) async fn complete(
 ) -> anyhow::Result<String> {
     let response = client(api_base, api_key)?
         .completion_model(model)
-        .completion(request(history, Vec::new(), thinking))
+        .completion(request(history, Vec::new(), thinking, None))
         .await?;
     let text = text_of(&response.choice);
     if text.trim().is_empty() {
@@ -114,9 +116,20 @@ mod tests {
     /// 普通房间的请求里没有工具；思考强度写进 `additional_params` 等 provider 扁平化。
     #[test]
     fn ordinary_requests_carry_no_tools() {
-        let request = request(hello(), Vec::new(), None);
+        let request = request(hello(), Vec::new(), None, None);
         assert!(request.tools.is_empty());
         assert!(request.additional_params.is_none());
+        // 没配温度就连这个字段都不发，交给接口自己的默认值。
+        assert!(request.temperature.is_none());
+    }
+
+    /// 群聊那边配了温度就得原样带上，判定与普通房间不受影响。
+    #[test]
+    fn a_configured_temperature_reaches_the_request() {
+        assert_eq!(
+            request(hello(), Vec::new(), Some("low"), Some(1.3)).temperature,
+            Some(1.3)
+        );
     }
 
     #[test]
@@ -128,7 +141,7 @@ mod tests {
             ("xhigh", "xhigh"),
             (" minimal ", "minimal"),
         ] {
-            let request = request(hello(), Vec::new(), Some(level));
+            let request = request(hello(), Vec::new(), Some(level), None);
             assert_eq!(
                 request.additional_params,
                 Some(serde_json::json!({ "reasoning_effort": expected })),
@@ -136,7 +149,11 @@ mod tests {
             );
         }
         // 非法档位不写进请求，交给引擎默认。
-        assert!(request(hello(), Vec::new(), Some("unlimited")).additional_params.is_none());
+        assert!(
+            request(hello(), Vec::new(), Some("unlimited"), None)
+                .additional_params
+                .is_none()
+        );
     }
 
     /// 接口地址只填裸域名时补 `/v1`，脚本里配的完整路径原样保留。

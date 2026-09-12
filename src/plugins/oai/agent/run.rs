@@ -97,7 +97,12 @@ async fn attempt(
     let mut used_tools = false;
 
     for _ in 0..run.max_steps.max(1) {
-        let request = llm::request(messages.clone(), definitions.clone(), run.thinking);
+        let request = llm::request(
+            messages.clone(),
+            definitions.clone(),
+            run.thinking,
+            run.temperature,
+        );
         let response = match run.stall {
             Some(limit) => match tokio::time::timeout(limit, model.completion(request)).await {
                 Ok(response) => response,

@@ -892,7 +892,9 @@ impl Session {
                 }
                 for (index, part) in parts.iter().enumerate() {
                     msg = match part {
-                        Part::Text { text } => msg.text(text),
+                        Part::Text { text } => {
+                            msg.text(super::literal_newlines(text))
+                        }
                         Part::At { user_id } => {
                             let msg = msg.at(user_id);
                             if at_needs_gap(parts, index) {
@@ -936,7 +938,7 @@ impl Session {
                     msg = msg.node_custom(
                         &self.ctx.bot.login_user.id,
                         self.ctx.bot.login_user.name.as_deref().unwrap_or("我"),
-                        Message::new().text(text),
+                        Message::new().text(super::literal_newlines(text)),
                     );
                 }
                 return self.send(msg).await;
@@ -1014,7 +1016,7 @@ impl Session {
                         }
                     }
                     Part::Face { id } => message.face(id),
-                    Part::Text { text } => message.text(text),
+                    Part::Text { text } => message.text(super::literal_newlines(text)),
                     _ => message,
                 };
             }

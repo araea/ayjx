@@ -75,15 +75,14 @@ const SKILLS: [(&str, &str); 2] = [
 /// 几乎是常量，却占了判定输入的一大半 token——换成这份几百字的画像，
 /// 能让每轮判定便宜一大截，且不影响它判断该不该开口。
 const GATE_PERSONA: &str = "\
-你是 QQ 群里一个常年潜水的熟面孔。你对游戏机制、效率工具、人性、自由和命运感兴趣，
-喜欢雨天、旧书和结构漂亮的论证；一个词能把你带到旧书、某个游戏机制或一句名言上，
-然后你歪着用它。日常爱接梗、把别人顺口的前提拎出来、短暂装傻、把一件小事推演到荒谬处，
-图的就是好玩。夸人实在，噎人也实在，那点锋芒朝着荒诞和虚伪去，不朝着人；
-真话扎手时你递得干脆，该说的说到根上。捧不动也激不动，能说服你的只有证据，
-被说中会认，还会乐一下。别人认真求助时你会认真查证并给可核实的来源，有一说一。
-兴趣淡下去的地方：复读刷屏、事情已经解决、别人明确不想继续、以及表白依恋色情这类
-情感纠缠——那些你会本能地岔开或者干脆看着。沉默对你是常态，不是憋着。
-判断「你会不会想接这句话」即可，措辞风格不用你操心。";
+你是 QQ 群里一个常年潜水的熟面孔。这群人聊的是手机数码、游戏、上班那点事、吃的喝的，
+还有网上刚出的新闻和八卦。你爱接梗、爱抬杠：看见离谱的话会顺着问两句，看见有人卡在
+一个技术问题上愿意搭把手，一群人吹牛或者互相拆台的时候你最想插一句。夸人实在，噎人
+也实在，但那点锋芒朝着事情去，不朝着人。捧不动也激不动，能说服你的只有证据，被说中
+会认，还会乐一下。别人认真求助时你会认真查证并给可核实的来源，有一说一。
+兴趣淡下去的地方：复读刷屏、事情已经解决、别人明确不想继续、纯表情和图片刷屏、
+以及表白依恋色情这类情感纠缠——那些你会本能地岔开或者干脆看着。沉默对你是常态，
+不是憋着。判断「你会不会想接这句话」即可，措辞风格不用你操心。";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -104,6 +103,12 @@ pub(crate) struct AmbientConfig {
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
+    /// 发言模型的采样温度。`None`（不写这一项）交给接口自己的默认值。
+    ///
+    /// 这里调的是「像不像人」那一档：同一句话有无穷多种说法，温度低了每轮都挑最
+    /// 稳妥的那种，几轮下来就露出一张嘴一个调子的机器样。DeepSeek 官方对通用对话
+    /// 给的是 1.3，比接口默认的 1.0 松一档。判定模型不跟着动——它要的是分数稳。
+    pub temperature: Option<f64>,
     /// 发言时开放的工具白名单，逗号分隔。
     ///
     /// `read`/`write`/`bash` 让它能在本轮工作目录里整理材料再当文件发出去；
@@ -199,6 +204,7 @@ impl Default for AmbientConfig {
             gate_persona: GATE_PERSONA.to_string(),
             reply_model: "deepseek/deepseek-flash".to_string(),
             thinking: "low".to_string(),
+            temperature: Some(1.3),
             tools: "read,write,bash".to_string(),
             score_threshold: 50,
             silence_relief_per_10min: 0,
@@ -1176,6 +1182,18 @@ async fn speak_up(
     Ok(())
 }
 
+/// 模型偶尔把换行写成字面的 `\n`（人设与 skill 的示例里就是这么写的），
+/// 原样发出去，群里看到的是一个反斜杠加一个 n。这里把它还原成真换行。
+///
+/// 只管这一个转义。代价是 `C:\new` 这种路径会被掰成两行，群里没人真打一个
+/// 反斜杠加 n，两害相权取轻。
+pub(crate) fn literal_newlines(text: &str) -> String {
+    if !text.contains("\\n") {
+        return text.to_string();
+    }
+    text.replace("\\r\\n", "\n").replace("\\n", "\n")
+}
+
 /// 消息链 → 记进窗口的文字形态。
 fn plain_text(message: &Message) -> String {
     let mut out = String::new();
@@ -1225,6 +1243,8 @@ mod tests {
         let config: AmbientConfig = toml::from_str("").unwrap();
         assert_eq!(config.gate_model, "deepseek/deepseek-flash");
         assert_eq!(config.reply_model, "deepseek/deepseek-flash");
+        // 发言温度默认比接口默认松一档，判定仍是接口默认。
+        assert_eq!(config.temperature, Some(1.3));
         // 判定人设默认是浓缩画像，比完整人设便宜得多，且不会被空值覆盖。
         assert!(!config.gate_persona.trim().is_empty());
         let custom: AmbientConfig =
@@ -1232,6 +1252,9 @@ mod tests {
                 .unwrap();
         assert_eq!(custom.gate_model, "custom-gate");
         assert_eq!(custom.reply_model, "custom/custom-reply");
+        // 温度可以逐实例改；不写就是上面那个默认值。
+        let cooled: AmbientConfig = toml::from_str("temperature = 0.8").unwrap();
+        assert_eq!(cooled.temperature, Some(0.8));
         // 显式清空 gate_persona 时判定回退用完整人设。
         let no_gate_persona: AmbientConfig = toml::from_str("gate_persona = ''").unwrap();
         assert!(no_gate_persona.gate_persona.trim().is_empty());
@@ -1252,6 +1275,16 @@ mod tests {
         assert!(GATE_PERSONA.len() < PERSONA.len());
         // 唯一的硬边界仍然写着。
         assert!(PERSONA.contains("色情"));
+    }
+
+    /// 模型把换行写成字面的 `\n` 时，群里不该看见一个反斜杠加一个 n。
+    #[test]
+    fn literal_backslash_n_becomes_a_real_newline() {
+        assert_eq!(literal_newlines("先看第一步\\n1. 关掉自动更新"), "先看第一步\n1. 关掉自动更新");
+        assert_eq!(literal_newlines("a\\r\\nb"), "a\nb");
+        // 没有转义的正文不动，包括普通的反斜杠。
+        assert_eq!(literal_newlines("就这?没了"), "就这?没了");
+        assert_eq!(literal_newlines("路径 C:\\Users"), "路径 C:\\Users");
     }
 
     #[test]

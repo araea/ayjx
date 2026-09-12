@@ -119,6 +119,9 @@ gate_model = "deepseek/deepseek-flash"
 # 默认与判定同一个便宜档。试过更贵的 Claude / Gemini，真实群聊里并不更像人。
 reply_model = "deepseek/deepseek-flash"
 thinking = "low"
+# 发言模型的采样温度。同一句话有无穷多种说法，温度低了每轮都挑最稳妥的那种，
+# 几轮下来就露出一个调子的机器样；官方对通用对话给的是 1.3。判定模型不跟着动。
+temperature = 1.3
 # 发言时额外开放的本地工具白名单（逗号分隔，可写 bash/read/write/edit/glob/grep）。
 # read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去。
 # 聊天界面的 satori_* 工具由代码按下面的开关自动加上，不用写在这里。
