@@ -172,6 +172,7 @@ pub(crate) struct AmbientConfig {
     /// 断句处拆成几条依次发出（总数仍受 `max_messages` 约束）；0 关闭自动分段。
     ///
     /// 模型写出来的是一整段，群友写出来的是三条——差别只在换气。见 [`breath`]。
+    /// 默认给得宽：群里的长句多半是「语音输入一条说完」，只有真成了一坨才该拆。
     pub split_chars: usize,
     /// 每轮平台写动作总数（含消息、点赞、撤回）。
     pub max_actions: usize,
@@ -223,7 +224,7 @@ impl Default for AmbientConfig {
             peak: peak::PeakConfig::default(),
             send_freshness_seconds: 25,
             max_messages: 3,
-            split_chars: 22,
+            split_chars: 60,
             max_actions: 6,
             draw_budget: 2,
             typing_cpm: 150,
