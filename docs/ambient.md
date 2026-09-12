@@ -84,9 +84,10 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 滚动窗口只有 80 条，重启就清空；熟人记忆记的是印象，不是聊天记录。QQ 自己保存着这个群的完整历史和整份成员名册，所以「记不住」和「查不到」应该是两件事，否则人格被问到「上次那个」时只有两条路：说不记得，或者编一段。
 
 - `satori_history` 查本群历史（`internal/message_search` / `message_context`）。可以按关键词、只看某个人、限定最近多少小时，或直接看某条消息的前后几条。返回与窗口同一种格式的逐条记录（`[时刻 id=…] 谁: 说了什么`），不是原始 JSON，模型不需要为读旧消息再学一种格式。带 `next` 游标可以继续向更早翻。关键词按原文包含匹配，短词更有效；搜不到说明本地历史里确实没有
-- `satori_group` 查现有资料，`what` 选一种：`member`（群名片、头衔、角色、入群时间、`silent_days` 多久没出现）、`roster`（人数与活跃概况）、`activity`（最活跃或最沉默的人）、`anniversary`（快到入群周年的人）、`draw`（随机抽人）、`teams`（随机分队）、`files`（群文件目录，或某个文件的下载链接）
+- `satori_group` 查现有资料，`what` 选一种：`member`（群名片、头衔、角色、入群时间、`silent_days` 多久没出现）、`roster`（人数与活跃概况）、`activity`（最活跃或最沉默的人）、`anniversary`（快到入群周年的人）、`draw`（随机抽人）、`teams`（随机分队）、`files`（群文件目录，或某个文件的下载链接）、`honor`（群荣誉榜，龙王与群聊之火这类）、`mute_list`（此刻被禁言的人）
+- `satori_profile` 查自己或与某个群友的关系（`internal/profile_self` / `friend_relation`）。不给 `user_id` 返回自己的昵称、个性签名与在线状态；给了就返回 QQ 记的关系——是不是好友、有没有互相拉黑、给对方写的备注。只在需要分清「熟人是好友还是只是同群」时用，属于私下的那份资料，不必往外说
 
-两者都是只读的：不发消息、不改群设置、不占 `max_actions`，但每轮共用 `lookup_budget` 次（默认 4，高峰被点名醒来时降到 1）。参数写错不扣额度，真正发出查询时才扣。`lookup_budget = 0` 就当这两个工具不存在，白名单与 `capabilities.lookups` 会一起去掉它们。
+三者都是只读的：不发消息、不改群设置、不占 `max_actions`，但每轮共用 `lookup_budget` 次（默认 4，高峰被点名醒来时降到 1）。参数写错不扣额度，真正发出查询时才扣。`lookup_budget = 0` 就当这三个工具不存在，白名单与 `capabilities.lookups` / `capabilities.profile` 会一起去掉它们。
 
 本地工具（`bash` / `read` / `write` / `edit` / `glob` / `grep`，由 `tools` 白名单控制）让它能在本轮工作目录里整理材料，或读一遍群友贴的内容再作为文件发出去。群里查不到的事还可以联网查，见下一节。
 
@@ -124,7 +125,7 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 - `satori_read` 查询窗口中的原消息，或完整展开它的合并转发
 - `satori_action` 执行一个结构化动作并返回回执，同一轮对话根据结果继续判断
 - `satori_draw` 调用 `[oai]` 配置的图像模型生成图片并保存到 `ambient/media`，返回本地路径、改写的标题与剩余额度，随后用 `satori_action` 的 send + image 发出。绘图是独立的模型调用，不占平台写动作额度，受 `draw_budget` 限流
-- `satori_history` 查 QQ 保存的本群历史，`satori_group` 查这个群的现有资料，两者都只读，受 `lookup_budget` 限流
+- `satori_history` 查 QQ 保存的本群历史，`satori_group` 查这个群的现有资料，`satori_profile` 查自己的资料与跟某个群友的关系，三者都只读，受 `lookup_budget` 限流
 - `satori_memo` 写长期记忆：`people`（对某个群成员的一句印象，再写一次就是改写）、`notes`（这个群的一件旧事）、`forget_people` / `forget_notes`。不占发送额度，受 `memo_budget` 限流，关闭 `memory_enabled` 时不注册
 
 `satori_context` 除消息与额度外还带回 `register`（本群当前的语感）、`state`（当前的精神头）与 `remember`（记得的人与旧事），让使用工具的那一轮重新读上下文时看到的内容与开场一致。
@@ -247,7 +248,7 @@ DeepSeek 官方接口把北京时间周一至周五 9:00–12:00、14:00–18:00
 | `memory_enabled` | `true` | 熟人记忆：落盘记住群里的人与旧事，并注册 `satori_memo` |
 | `mood_enabled` | `true` | 作息与互动驱动的内部状态：影响门槛、打字快慢与提示词里的状态行 |
 | `memo_budget` | `3` | 每轮最多写几条记忆；0 关闭 `satori_memo` |
-| `lookup_budget` | `4` | 每轮最多查几次群聊旧账；0 关闭 `satori_history` / `satori_group` |
+| `lookup_budget` | `4` | 每轮最多查几次群聊旧账；0 关闭 `satori_history` / `satori_group` / `satori_profile` |
 | `search_enabled` | `true` | 发言时是否联网；后端与房间共用 `[oai.search]` |
 | `search_budget` | `3` | 每轮最多联网几次（搜索与抓取合并）；0 关闭 `web_search` / `web_fetch` |
 | `peak.mode` | `sleep` | 计价高峰时段的行为：`sleep` 睡着但偶尔接一句，`pause` 完全不出声，`normal` 不理会时段 |

@@ -21,6 +21,7 @@ const CHAT: &[&str] = &[
     "satori_draw",
     "satori_history",
     "satori_group",
+    "satori_profile",
     "satori_memo",
 ];
 
@@ -496,13 +497,13 @@ fn spec(name: &str) -> Option<ToolDefinition> {
             }),
         ),
         "satori_group" => (
-            "查这个群的现成资料：某人的群名片/头衔/入群时间/多久没冒头（member）、群人数与活跃概况（roster）、最活跃或最久没说话的人（activity）、快到入群周年的人（anniversary）、随机抽人（draw）、随机分队（teams）、群文件目录或某个文件的下载链接（files）。全是只读查询，不改群设置，每轮有查询次数上限。",
+            "查这个群的现成资料：某人的群名片/头衔/入群时间/多久没冒头（member）、群人数与活跃概况（roster）、最活跃或最久没说话的人（activity）、快到入群周年的人（anniversary）、随机抽人（draw）、随机分队（teams）、群文件目录或某个文件的下载链接（files）、群荣誉榜如龙王与群聊之火（honor）、此刻被禁言的人（mute_list）。全是只读查询，不改群设置，每轮有查询次数上限。",
             json!({
                 "type": "object",
                 "properties": {
                     "what": {
                         "type": "string",
-                        "enum": ["member", "roster", "activity", "anniversary", "draw", "teams", "files"],
+                        "enum": ["member", "roster", "activity", "anniversary", "draw", "teams", "files", "honor", "mute_list"],
                         "description": "要查什么"
                     },
                     "user_id": {"type": "string", "description": "what=member 时要查的 QQ 号"},
@@ -518,6 +519,15 @@ fn spec(name: &str) -> Option<ToolDefinition> {
                     "file_id": {"type": "string", "description": "what=files：给了就返回这个文件的下载链接"}
                 },
                 "required": ["what"]
+            }),
+        ),
+        "satori_profile" => (
+            "查你自己的资料，或你和某个群友的关系。不给 user_id 是你自己那份：昵称、个性签名、在线状态；给了 user_id 是 QQ 记的你们俩的关系——是不是好友、有没有互相拉黑、你给他写的备注。只读查询，不改任何设置，每轮有查询次数上限。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "要看关系的那个人的 QQ 号；留空就是看自己"}
+                }
             }),
         ),
         "satori_memo" => (

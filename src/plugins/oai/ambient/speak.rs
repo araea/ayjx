@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 ///
 /// 内存窗口只有几十条、重启就空，而 QQ 自己存着完整历史和整份名册。人格
 /// 「记不住」和「查得到」是两件事：这段话的作用是让它知道自己伸手能摸到什么。
-const LOOKUP_RULES: &str = "\n翻旧账：satori_history 读 QQ 存的本群历史（按关键词、只看某个人、或某条消息的前后），satori_group 看某人的群名片与入群时间、多久没冒头、群里谁最活跃、随机抽人或分队、群文件。眼前这段记录只有最近几十条，「上次那个」「这人是熟脸还是新面孔」「抽个人分下队」翻一下就有；查回来的是资料，用进自己话里就好，查询过程本身不算话题。\n手边有 bash 与读写文件：要把一段材料整理成文件发出去就在本轮工作目录里做，别在群里贴长内容。\n";
+const LOOKUP_RULES: &str = "\n翻旧账：satori_history 读 QQ 存的本群历史（按关键词、只看某个人、或某条消息的前后），satori_group 看某人的群名片与入群时间、多久没冒头、群里谁最活跃、随机抽人或分队、群文件、群荣誉与被禁言的人，satori_profile 看你自己的昵称签名，或你跟某个群友是不是好友、你给他写的备注。眼前这段记录只有最近几十条，「上次那个」「这人是熟脸还是新面孔」「抽个人分下队」翻一下就有；查回来的是资料，用进自己话里就好，查询过程本身不算话题。\n手边有 bash 与读写文件：要把一段材料整理成文件发出去就在本轮工作目录里做，别在群里贴长内容。\n";
 
 /// 有记忆工具时追加的一段话。
 const MEMO_RULES: &str = "\n你还有 satori_memo：把以后还想记得的事写下来——对某个人的一句印象、群里刚起的梗、谁在忙什么。挑那种会改变你以后怎么对待这个人或这个话题的一句写，一句话就够。记岔了随时改写或删掉。它不占发送额度，记了什么也是你自己的事。";
@@ -165,7 +165,7 @@ pub(crate) async fn compose(
     // 所以每个可选工具都要跟着它自己那个开关一起进出。
     if bridge.is_some() {
         if lookup {
-            tools.push_str(",satori_history,satori_group");
+            tools.push_str(",satori_history,satori_group,satori_profile");
         }
         if memo {
             tools.push_str(",satori_memo");
@@ -295,6 +295,7 @@ mod tests {
             "satori_draw",
             "satori_history",
             "satori_group",
+            "satori_profile",
             "satori_memo",
             "web_search",
             "web_fetch",
@@ -308,7 +309,7 @@ mod tests {
         // 关掉的工具不占篇幅：没有聊天界面时连带那条「用完输出 [silent]」都不该出现；
         // 没开联网时出网工具的名字也不该出现。
         let bare = system_prompt("人设", &config, false, false, false, false);
-        for tool in ["satori_action", "satori_history", "satori_memo", "web_search", "web_fetch"] {
+        for tool in ["satori_action", "satori_history", "satori_group", "satori_profile", "satori_memo", "web_search", "web_fetch"] {
             assert!(!bare.contains(tool), "{tool} 关着，提示词里还留着它");
         }
         // 不带聊天界面的那一轮仍然有完整的文字输出协议可用。
