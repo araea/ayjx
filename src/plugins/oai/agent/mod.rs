@@ -7,7 +7,7 @@
 //!
 //! 三块内容分工：
 //! - [`tools`]：工具表（名字、说明、JSON Schema）与本地实现（bash / read / write /
-//!   edit / glob / grep），以及转发进 [`super::super::ambient::bridge`] 的 `satori_*`；
+//!   edit / glob / grep），以及转发进 [`ChatBridge`] 的 `satori_*`；
 //! - [`run`]：消息组装、工具循环、轨迹整理、skill 索引；
 //! - [`bash`]：子进程与进程组终止——取消一轮对话必须连带杀掉工具派生出来的进程。
 //!
@@ -21,7 +21,26 @@ pub(crate) mod tools;
 pub(crate) use run::run;
 
 use super::types::{ChatMessage, TraceStep};
+use futures_util::future::BoxFuture;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+
+/// 聊天界面出口：执行层只负责把 `satori_*` 工具转发出去，具体语义由接入方定义。
+///
+/// 目前唯一的接入方是群聊搭话（[`crate::plugins::ambient::bridge`]）。抽成 trait 是
+/// 为了执行层不反过来依赖调用方：房间那边没有聊天界面时留 `None` 即可。
+pub(crate) trait ChatBridge: Send + Sync {
+    /// 工具调用：`op` + 参数，`call_id` 兼作回执去重键。
+    fn call<'a>(&'a self, call_id: &'a str, op: &'a str, params: Value) -> BoxFuture<'a, Value>;
+    /// 这一轮是否真的动用过聊天界面（决定最终回执是否覆盖文本输出）。
+    fn used(&self) -> bool {
+        false
+    }
+    /// 界面状态版本号，用于判断群聊是否已经往前走。
+    fn revision(&self) -> u64 {
+        0
+    }
+}
 
 /// 旧房间名规则：`pi` 或 `pi-` 前缀（忽略大小写）。
 ///
@@ -128,7 +147,7 @@ pub(crate) struct AgentRun<'a> {
     /// 有外部动作的会话不能在静默后重放整轮。
     pub retry_stalled: bool,
     /// 真实聊天界面的工具出口；`None` 表示这一轮不接聊天界面。
-    pub bridge: Option<std::sync::Arc<super::ambient::bridge::Bridge>>,
+    pub bridge: Option<std::sync::Arc<dyn ChatBridge>>,
     /// 联网搜索出口；`None` 表示这一轮没有 `web_search` / `web_fetch`。
     pub web: Option<&'a super::search::Search>,
     /// 用户正文。

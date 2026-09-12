@@ -70,7 +70,7 @@ drop = [
 ]
 
 # 联网搜索：内置 agent 房间的 web_search / web_fetch 两个出网工具。
-# 默认关闭；群聊搭话那边默认开着（[oai.ambient] search_enabled），两个开关彼此独立，
+# 默认关闭；群聊搭话那边默认开着（[ambient] search_enabled），两个开关彼此独立，
 # 都要关就两处都改。后端、预算与密钥在这里配一次，两边共用。
 # 这里是「没单设过的房间」的默认值；每间房用符号指令自己定：`房间?` 换一边、
 # `房间?开` / `房间?关` 明确指定、`房间?默认` 回到这里。开着只是让模型能查，
@@ -102,9 +102,10 @@ results = 8
 # [oai.search.backends.searxng]
 # base_url = "https://searx.example.com"
 
-# 群聊搭话：让同一个 agent 以固定人格在指定群里旁听，绝大多数时候沉默。
-# 完整字段与取舍见 docs/ambient.md；人设在 data/oai/ambient/persona.md。
-[oai.ambient]
+# 群聊搭话：独立插件，复用 [oai] 的模型接入层（接口、密钥、供应商、联网、绘图）。
+# 让内置 agent 以固定人格在指定群里旁听，绝大多数时候沉默。
+# 完整字段与取舍见 docs/ambient.md；人设在 data/ambient/persona.md。
+[ambient]
 enabled = false
 # 开启搭话的群号；空列表等于不开启。
 groups = []
@@ -154,11 +155,11 @@ lookup_budget = 4
 # 消息时效窗口（秒）：请求交给 satori-qq 之后还要排队，这段时间里群里只要又有人
 # 说话，这一句就整条不发——话说晚了不如不说。0 关闭这层条件。
 send_freshness_seconds = 25
-# 熟人记忆：落盘记住群里的人与旧事（data/oai/ambient/memory/），并开放 satori_memo。
+# 熟人记忆：落盘记住群里的人与旧事（data/ambient/memory/），并开放 satori_memo。
 memory_enabled = true
 # 每轮最多写几条记忆；0 关闭 satori_memo。
 memo_budget = 3
-# 按作息与互动起伏的内部状态（data/oai/ambient/mood.json）：影响开口门槛、打字快慢
+# 按作息与互动起伏的内部状态（data/ambient/mood.json）：影响开口门槛、打字快慢
 # 和提示词里那句「你现在的状态」。关掉则任何时刻都一个样。
 mood_enabled = true
 
@@ -179,7 +180,7 @@ typing_cpm = 150
 # 9:00-12:00、14:00-18:00。搭话是这里唯一无人触发的付费功能，最值得挑时段。
 # mode：sleep 睡着（不跟着消息频率一直判定，偶尔接一句，被 @ 时立刻醒）
 #       pause 高峰时段完全不出声 / normal 不理会时段
-[oai.ambient.peak]
+[ambient.peak]
 mode = "sleep"
 windows = ["09:00-12:00", "14:00-18:00"]
 weekdays = [1, 2, 3, 4, 5]

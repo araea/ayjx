@@ -24,6 +24,7 @@ Satori 默认地址是 `http://127.0.0.1:3001`。网页截图和资讯长图需�
 - `access_token`：Satori 令牌，也可以由 `AYJX_SATORI_TOKEN` 提供
 - `[ctl]`：插件控制权限，`admins` 填维护者 QQ 号
 - `[oai]`：可选的 OAI 与内置 Agent 设置
+- `[ambient]`：群聊搭话设置，复用 `[oai]` 的模型、接口与联网配置
 
 数据库文件是 `data/bot.db`。
 

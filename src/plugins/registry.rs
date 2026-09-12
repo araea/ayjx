@@ -182,6 +182,12 @@ register_plugins!(
         ],
         on_init: Some(oai::init)
     },
+    ambient {
+        display_name: "群聊搭话",
+        section: "play",
+        summary: "内置 agent 以固定人格作为群友参与群聊，绝大多数时候沉默；复用 [oai] 的模型、接口与联网配置，只在 [ambient] groups 列出的群里生效",
+        on_init: Some(ambient::init)
+    },
     ai_news {
         display_name: "AI 资讯推送",
         section: "insight",

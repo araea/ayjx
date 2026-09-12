@@ -239,7 +239,7 @@ pub(crate) async fn flush() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     if let Err(error) = tokio::fs::write(&path, json).await {
-        warn!(target: "Plugin/OAI", "写入搭话状态失败：{error}");
+        warn!(target: "Plugin/Ambient", "写入搭话状态失败：{error}");
     }
 }
 

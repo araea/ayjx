@@ -10,14 +10,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use toml::Value;
 
-pub(crate) mod ambient;
 pub mod data;
 pub mod images;
 pub(crate) mod llm;
 pub mod logic;
 pub mod mj;
 pub mod parser;
-mod agent;
+pub(crate) mod agent;
 pub(crate) mod presets;
 pub mod render;
 pub(crate) mod search;
@@ -92,10 +91,8 @@ pub(crate) struct OaiConfig {
     /// 不配也不影响既有房间——不带前缀的仍走 `oai` 默认接口。
     pub(crate) providers: HashMap<String, ProviderConfig>,
     /// 联网搜索：给内置 agent 房间的 `web_search` / `web_fetch`。
-    /// 默认关闭，群聊搭话另有 `[oai.ambient] search_enabled`，两者互不影响。
+    /// 默认关闭，群聊搭话另有 `[ambient] search_enabled`，两者互不影响。
     pub(crate) search: search::SearchConfig,
-    /// 群聊搭话：以固定人格作为群成员之一存在，绝大多数时候沉默。
-    ambient: ambient::AmbientConfig,
 }
 
 impl Default for OaiConfig {
@@ -114,7 +111,6 @@ impl Default for OaiConfig {
                 .collect(),
             providers: HashMap::new(),
             search: search::SearchConfig::default(),
-            ambient: ambient::AmbientConfig::default(),
         }
     }
 }
@@ -150,28 +146,34 @@ pub fn default_config() -> Value {
     build_config(OaiConfig::default())
 }
 
+/// 确保模型接口配置（`data/oai/config.json`）已加载。
+///
+/// 房间插件与群聊搭话插件共用这一份配置，任一插件启动时都可以先把管理器建好；
+/// 已经建好就原样返回。密钥与接口地址只存在这里，两边不会各存一份。
+pub(crate) async fn ensure_manager() -> Result<Arc<data::Manager>, PluginError> {
+    if let Some(mgr) = MANAGER.get() {
+        return Ok(mgr.clone());
+    }
+    let dir = get_data_dir("oai").await?;
+    let mgr = Arc::new(data::Manager::new(dir));
+    let _ = MANAGER.set(mgr);
+    Ok(MANAGER.get().expect("刚刚 set 过").clone())
+}
+
 pub fn init(ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
     Box::pin(async move {
-        let dir = get_data_dir("oai").await?;
-        if let Err(error) = ambient::init(&dir).await {
-            warn!(target: "Plugin/OAI", "群聊搭话资源初始化失败: {}", error);
-        }
-        let mgr = Arc::new(data::Manager::new(dir));
+        let mgr = ensure_manager().await?;
 
         // 尝试预加载模型列表
         let filter = crate::plugins::get_config_or_default::<OaiConfig>(&ctx, "oai").model_filter;
-        let mgr_clone = mgr.clone();
         tokio::spawn(async move {
-            if let Err(e) = mgr_clone.fetch_models(&filter).await {
+            if let Err(e) = mgr.fetch_models(&filter).await {
                 warn!(target: "Plugin/OAI", "初始化获取模型列表失败: {}", e);
             } else {
                 info!(target: "Plugin/OAI", "初始化获取模型列表成功");
             }
         });
 
-        if MANAGER.set(mgr).is_err() {
-            warn!(target: "Plugin/OAI", "Manager 已经被初始化");
-        }
         Ok(())
     })
 }
@@ -248,13 +250,10 @@ pub fn handle(
         }
 
         // 获取纯文本内容。没有文字的消息（纯图片、纯表情）不可能是指令，
-        // 但仍是群聊上下文的一部分，要让搭话观察者看到。
+        // 要留给随后的群聊搭话插件观察，事件继续往后传。
         let raw_text = match extract_clean_text(&ctx) {
             Some(t) => t,
-            None => {
-                ambient::observe(&ctx, &writer, mgr).await;
-                return Ok(Some(ctx));
-            }
+            None => return Ok(Some(ctx)),
         };
 
         // 1. 全局指令解析
@@ -295,9 +294,7 @@ pub fn handle(
             return Ok(None);
         }
 
-        // 不属于任何指令的普通群聊：交给搭话观察者，事件继续向后传递。
-        ambient::observe(&ctx, &writer, mgr).await;
-
+        // 不属于任何指令的普通群聊：事件继续向后传递，交给随后的搭话插件观察。
         Ok(Some(ctx))
     })
 }

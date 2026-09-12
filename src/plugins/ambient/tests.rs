@@ -89,32 +89,31 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
     use std::sync::RwLock;
 
     let dir =
-        super::super::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-test").unwrap();
+        crate::plugins::oai::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-test").unwrap();
     let (base, started, release, server) =
         fake_model("[focus:{\"topic\":\"测试话题\",\"seconds\":30}]\n[silent]").await;
     // 第一轮的回话要等测试放行，第二轮（搭话指令）才不必再等。
     let _ = std::fs::remove_file(&release);
     let group = -8_000_001;
-    let oai = super::super::OaiConfig {
-        ambient: AmbientConfig {
-            enabled: true,
-            groups: vec![group],
-            // 判定模型与发言模型都指向这个假端点：没有供应商前缀，走 oai 默认接口。
-            gate_model: "fake-model".into(),
-            reply_model: "fake-model".into(),
-            debounce_seconds: 1,
-            context_images: 0,
-            // 调度回归与计价时段无关；钉死它，免得这个测试在工作日上午换一种行为。
-            peak: super::peak::PeakConfig {
-                mode: super::peak::Mode::Normal,
-                ..Default::default()
-            },
+    let ambient = AmbientConfig {
+        enabled: true,
+        groups: vec![group],
+        // 判定模型与发言模型都指向这个假端点：没有供应商前缀，走 oai 默认接口。
+        gate_model: "fake-model".into(),
+        reply_model: "fake-model".into(),
+        debounce_seconds: 1,
+        context_images: 0,
+        // 调度回归与计价时段无关；钉死它，免得这个测试在工作日上午换一种行为。
+        peak: super::peak::PeakConfig {
+            mode: super::peak::Mode::Normal,
             ..Default::default()
         },
         ..Default::default()
     };
     let mut config = AppConfig::default();
-    config.plugins.insert("oai".into(), build_config(oai));
+    config
+        .plugins
+        .insert("ambient".into(), build_config(ambient));
     let ctx = Context {
         event: EventType::Init,
         config: Arc::new(RwLock::new(config)),
@@ -133,7 +132,7 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
         }),
     };
     let writer = Arc::new(crate::adapters::satori::SatoriClient::console());
-    let mgr = Arc::new(super::super::data::Manager::new(dir.path().to_path_buf()));
+    let mgr = Arc::new(crate::plugins::oai::data::Manager::new(dir.path().to_path_buf()));
     {
         // 模型端点指向假服务；密钥随便填，它只被塞进 Authorization 头。
         let mut c = mgr.config.write().await;
@@ -141,7 +140,8 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
         c.api_key = "test-only".into();
         mgr.save(&c);
     }
-    init(dir.path()).await.unwrap();
+    setup(dir.path()).await.unwrap();
+    let base = dir.path().to_path_buf();
     let turn = |id| Turn {
         user_id: 42,
         name: "群友".into(),
@@ -158,8 +158,9 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
         assert!(state.receive(turn(1)));
     });
     let task = tokio::spawn({
-        let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
-        async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
+        let (ctx, writer, mgr, base) =
+            (ctx.clone(), writer.clone(), mgr.clone(), base.clone());
+        async move { consider(&ctx, &writer, &mgr, group, &base).await.unwrap() }
     });
     tokio::time::timeout(Duration::from_secs(15), async {
         while !started.exists() {
@@ -184,8 +185,9 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
     // 真去判定也会成功，而它走到人格那一轮并写下关注，说明指令确实绕过了判定。
     assert!(window::with_group(group, |state| state.summon()));
     let task = tokio::spawn({
-        let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
-        async move { consider(&ctx, &writer, &mgr, group).await.unwrap() }
+        let (ctx, writer, mgr, base) =
+            (ctx.clone(), writer.clone(), mgr.clone(), base.clone());
+        async move { consider(&ctx, &writer, &mgr, group, &base).await.unwrap() }
     });
     tokio::time::timeout(Duration::from_secs(15), task)
         .await
@@ -202,11 +204,11 @@ async fn new_messages_drain_into_the_next_round_and_a_summon_skips_the_gate() {
 #[ignore = "需要 AYJX_AMBIENT_LIVE_DATA、已配置的模型接口和网络；仅打印试聊，不发群消息"]
 async fn live_persona_and_gate_dialogue() {
     let data = PathBuf::from(std::env::var("AYJX_AMBIENT_LIVE_DATA").unwrap());
-    let mgr = super::super::data::Manager::new(data.clone());
+    let mgr = crate::plugins::oai::data::Manager::new(data.clone());
     let credentials = mgr.config.read().await;
     let dir =
-        super::super::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-live").unwrap();
-    init(dir.path()).await.unwrap();
+        crate::plugins::oai::agent::ScratchDir::under(&std::env::temp_dir(), "ambient-live").unwrap();
+    setup(dir.path()).await.unwrap();
     let config = AmbientConfig {
         tools: "read".into(),
         context_images: 0,
@@ -215,7 +217,7 @@ async fn live_persona_and_gate_dialogue() {
     };
     // 判定模型写成「供应商/模型」时，线上由 [oai.providers] 取接口；这里没有 Context，
     // 就用环境变量补上那一段，否则带前缀的模型名会被原样发给 oai 的默认接口。
-    let (provider, gate_model) = super::super::utils::split_provider(&config.gate_model);
+    let (provider, gate_model) = crate::plugins::oai::utils::split_provider(&config.gate_model);
     let gate_base = std::env::var("AYJX_AMBIENT_LIVE_GATE_BASE")
         .unwrap_or_else(|_| credentials.api_base.clone());
     let gate_key = std::env::var("AYJX_AMBIENT_LIVE_GATE_KEY")
@@ -265,7 +267,7 @@ async fn live_persona_and_gate_dialogue() {
         .await
         .unwrap();
         // 试聊同时查看人格决定，即便筛选不放行；线上仍按分数筛选。
-        let (provider, reply_model) = super::super::utils::split_provider(&config.reply_model);
+        let (provider, reply_model) = crate::plugins::oai::utils::split_provider(&config.reply_model);
         let reply_base = std::env::var("AYJX_AMBIENT_LIVE_GATE_BASE")
             .unwrap_or_else(|_| credentials.api_base.clone());
         let reply_key = std::env::var("AYJX_AMBIENT_LIVE_GATE_KEY")

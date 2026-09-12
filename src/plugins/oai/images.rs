@@ -53,14 +53,14 @@ struct ApiError {
 ///
 /// `urls` 里既可能是远程直链，也可能是内联的 `data:image/png;base64,...`。
 /// 供聊天补全结果包装与 ambient 绘图工具共同使用。
-pub(super) struct Generated {
-    pub(super) urls: Vec<String>,
-    pub(super) caption: String,
-    pub(super) model: Option<String>,
+pub(crate) struct Generated {
+    pub(crate) urls: Vec<String>,
+    pub(crate) caption: String,
+    pub(crate) model: Option<String>,
 }
 
 /// 模型是否走 `/v1/images/generations`。`keywords` 为空时视为不启用。
-pub(super) fn is_images_model(model: &str, keywords: &[String]) -> bool {
+pub(crate) fn is_images_model(model: &str, keywords: &[String]) -> bool {
     let lower = model.trim().to_lowercase();
     keywords
         .iter()
@@ -193,7 +193,7 @@ pub(super) async fn generate_reply(
 ///
 /// 与聊天补全解耦，供普通智能体（`generate_reply`）与 ambient 绘图工具共用。
 /// 带垫图走 `/v1/images/edits`，纯文字走 `/v1/images/generations`；两者响应结构一致。
-pub(super) async fn generate(
+pub(crate) async fn generate(
     api_base: &str,
     api_key: &str,
     model: &str,

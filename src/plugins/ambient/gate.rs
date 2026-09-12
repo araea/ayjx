@@ -148,7 +148,7 @@ pub(crate) async fn judge(
         match result {
             Ok(raw) => return parse_verdict(&raw),
             Err(error) if attempt == 1 && transient(&error) => {
-                debug!(target: "Plugin/OAI", "判定遇到网络抖动，重试一次：{error:#}");
+                debug!(target: "Plugin/Ambient", "判定遇到网络抖动，重试一次：{error:#}");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
             Err(error) => return Err(error),

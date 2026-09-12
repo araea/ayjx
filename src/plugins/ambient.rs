@@ -1,12 +1,16 @@
-//! 群聊搭话：让 pi agent 以固定人格作为群成员之一存在，绝大多数时候沉默。
+//! 群聊搭话：让内置 agent 以固定人格作为群成员之一存在，绝大多数时候沉默。
+//!
+//! 独立插件，注册在 `oai` 之后，复用它的模型接入层（接口、密钥、供应商、联网、
+//! 绘图与 agent 执行层）；判定与发言模型、接口和密钥都从 `[oai]` 那份配置取，
+//! 本插件只持有自己的 `[ambient]` 配置与数据目录（`data/ambient/`）。
 //!
 //! 三段式，每一段都可以单独调参、单独复盘：
 //!
-//! 1. **听**——进入本插件而没被指令消费的群消息都落进内存里的滚动窗口
+//! 1. **听**——进入本插件而没被前面插件消费的群消息都落进内存里的滚动窗口
 //!    （[`window`]），窗口就是模型能看到的全部上下文。
 //! 2. **判**——群里安静下来之后，用一个便宜的多模态模型读窗口，只回一个
 //!    开口意愿分（[`gate`]）。分数不过线就什么都不发生，这是常态。
-//! 3. **说**——过线才唤起本机 pi（[`speak`]），带人设、带工具、带描述 Satori
+//! 3. **说**——过线才唤起内置 agent（[`speak`]），带人设、带工具、带描述 Satori
 //!    消息元素的 skill；通过带回执的平台工具执行动作（[`bridge`]），保留旧文字输出兼容。
 //!
 //! 判定与措辞分开，是因为它们的成本和失败方式都不一样：判定要便宜、要多、
@@ -17,15 +21,19 @@
 //! 窗口——人格看到的仍然只是群友聊了什么，而不是有人在按键。
 
 use crate::adapters::satori::{LockedWriter, freshness_for, send_fresh_msg_id};
+use crate::config::build_config;
 use crate::event::{Context, MessageEvent};
 use crate::message::Message;
+use crate::plugins::{PluginError, get_data_dir};
 use chrono::Datelike as _;
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use simd_json::base::ValueAsScalar;
 use simd_json::derived::{ValueObjectAccess, ValueObjectAccessAsArray, ValueObjectAccessAsScalar};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use toml::Value;
 
 mod actions;
 mod attention;
@@ -47,11 +55,17 @@ mod window;
 use speak::Called;
 use window::Turn;
 
-const LOG_TARGET: &str = "Plugin/OAI";
+const LOG_TARGET: &str = "Plugin/Ambient";
+
+/// 本插件的数据目录，`init` 成功后写入。
+///
+/// 人设、skill、记忆、状态与素材都放在这里（`data/ambient/`）。模型接口那一份
+/// 配置不在这里——它由 `oai` 插件持有，搭话只借用（见 [`gate_endpoint`]）。
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// 内置人设。首次启动写进数据目录，之后以磁盘上那份为准——人设是要被反复
 /// 打磨的东西，改一句话不该等一次编译。
-const PERSONA: &str = include_str!("../../../res/ambient/persona.md");
+const PERSONA: &str = include_str!("../../res/ambient/persona.md");
 /// 随代码走的 skill：每次启动按目录名覆盖写入。
 ///
 /// 分成两份是照 pi 的渐进披露来的——常在提示词里的只有 skill 的一行描述，
@@ -60,11 +74,11 @@ const PERSONA: &str = include_str!("../../../res/ambient/persona.md");
 const SKILLS: [(&str, &str); 2] = [
     (
         "satori-reply",
-        include_str!("../../../res/ambient/skills/satori-reply/SKILL.md"),
+        include_str!("../../res/ambient/skills/satori-reply/SKILL.md"),
     ),
     (
         "satori-lookup",
-        include_str!("../../../res/ambient/skills/satori-lookup/SKILL.md"),
+        include_str!("../../res/ambient/skills/satori-lookup/SKILL.md"),
     ),
 ];
 /// 判定用的「兴趣画像」。
@@ -113,7 +127,7 @@ pub(crate) struct AmbientConfig {
     ///
     /// `read`/`write`/`bash` 让它能在本轮工作目录里整理材料再当文件发出去；
     /// 聊天界面的 `satori_*` 由代码按开关自动加上，不写在这里。
-    /// 名字取自 [`super::agent::tools`] 实际注册的工具，没注册的会被静默忽略。
+    /// 名字取自 [`crate::plugins::oai::agent::tools`] 实际注册的工具，没注册的会被静默忽略。
     pub tools: String,
     /// 开口意愿分的门槛，0-100。调高更沉默。
     pub score_threshold: u8,
@@ -410,22 +424,18 @@ pub(crate) fn now_context() -> String {
     )
 }
 
-/// 数据目录下的资源位置。
-fn base_dir(oai_data: &Path) -> PathBuf {
-    oai_data.join("ambient")
+/// 人设文件位置。插件数据目录本身就是搭话的根，人设、skill、记忆、素材都在它下面。
+fn persona_path(base: &Path) -> PathBuf {
+    base.join("persona.md")
 }
 
-fn persona_path(oai_data: &Path) -> PathBuf {
-    base_dir(oai_data).join("persona.md")
-}
-
-fn skills_root(oai_data: &Path) -> PathBuf {
-    base_dir(oai_data).join("skills")
+fn skills_root(base: &Path) -> PathBuf {
+    base.join("skills")
 }
 
 /// 这一轮随身的 skill 目录清单。
-fn skill_dirs(oai_data: &Path) -> Vec<PathBuf> {
-    let root = skills_root(oai_data);
+fn skill_dirs(base: &Path) -> Vec<PathBuf> {
+    let root = skills_root(base);
     SKILLS.iter().map(|(name, _)| root.join(name)).collect()
 }
 
@@ -433,8 +443,8 @@ fn skill_dirs(oai_data: &Path) -> Vec<PathBuf> {
 ///
 /// 人设只在缺失时写入——它是给人改的，覆盖等于把管理员的打磨扔掉；
 /// skill 描述的是本仓库实现的消息元素，属于代码的一部分，每次启动都对齐。
-pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
-    let persona = persona_path(oai_data);
+async fn setup(base: &Path) -> std::io::Result<()> {
+    let persona = persona_path(base);
     if let Some(parent) = persona.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -442,27 +452,32 @@ pub(crate) async fn init(oai_data: &Path) -> std::io::Result<()> {
         tokio::fs::write(&persona, PERSONA).await?;
     }
     for (name, body) in SKILLS {
-        let dir = skills_root(oai_data).join(name);
+        let dir = skills_root(base).join(name);
         tokio::fs::create_dir_all(&dir).await?;
         tokio::fs::write(dir.join("SKILL.md"), body).await?;
     }
-    tokio::fs::create_dir_all(base_dir(oai_data).join("media")).await?;
-    tokio::fs::create_dir_all(base_dir(oai_data).join("memory")).await?;
-    memory::attach(&base_dir(oai_data));
-    mood::attach(&base_dir(oai_data));
+    tokio::fs::create_dir_all(base.join("media")).await?;
+    tokio::fs::create_dir_all(base.join("memory")).await?;
+    memory::attach(base);
+    mood::attach(base);
     Ok(())
 }
 
 /// 记下一条群消息，必要时安排一次判定。
 ///
-/// 由 `oai` 插件在自己所有指令都没匹配上之后调用：能走到这里的就是普通聊天。
-pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<super::data::Manager>) {
-    let config = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai").ambient;
+/// 由本插件的 [`handle`] 对每条没被前面插件消费的群消息调用：能走到这里的就是普通聊天。
+pub(crate) async fn observe(
+    ctx: &Context,
+    writer: &LockedWriter,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
+    base: &Path,
+) {
+    let config = crate::plugins::get_config_or_default::<AmbientConfig>(ctx, "ambient");
     if !config.enabled || config.groups.is_empty() {
         return;
     }
     let Some(event) = ctx.as_message() else {
-        observe_notice(ctx, writer, mgr, &config).await;
+        observe_notice(ctx, writer, mgr, base, &config).await;
         return;
     };
     let Some(group) = event.group_id().filter(|id| config.groups.contains(id)) else {
@@ -519,8 +534,9 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
     let ctx = ctx.clone();
     let writer = writer.clone();
     let mgr = mgr.clone();
+    let base = base.to_path_buf();
     tokio::spawn(async move {
-        if let Err(error) = consider(&ctx, &writer, &mgr, group).await {
+        if let Err(error) = consider(&ctx, &writer, &mgr, group, &base).await {
             warn!(target: LOG_TARGET, "群 {group} 搭话失败：{error:#}");
         }
     });
@@ -530,7 +546,8 @@ pub(crate) async fn observe(ctx: &Context, writer: &LockedWriter, mgr: &Arc<supe
 async fn observe_notice(
     ctx: &Context,
     writer: &LockedWriter,
-    mgr: &Arc<super::data::Manager>,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
+    base: &Path,
     config: &AmbientConfig,
 ) {
     let crate::event::EventType::Satori(raw) = &ctx.event else {
@@ -557,8 +574,9 @@ async fn observe_notice(
     });
     if start {
         let (ctx, writer, mgr) = (ctx.clone(), writer.clone(), mgr.clone());
+        let base = base.to_path_buf();
         tokio::spawn(async move {
-            if let Err(error) = consider(&ctx, &writer, &mgr, group).await {
+            if let Err(error) = consider(&ctx, &writer, &mgr, group, &base).await {
                 warn!(target: LOG_TARGET, "群 {group} 互动处理失败：{error:#}");
             }
         });
@@ -747,17 +765,17 @@ impl Drop for Worker {
 async fn consider(
     ctx: &Context,
     writer: &LockedWriter,
-    mgr: &Arc<super::data::Manager>,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
     group: i64,
+    base: &Path,
 ) -> anyhow::Result<()> {
     let mut worker = Worker { group, armed: true };
     loop {
-        let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
-        let config = oai.ambient;
+        let config = crate::plugins::get_config_or_default::<AmbientConfig>(ctx, "ambient");
         if config.focus_max_seconds == 0 {
             window::with_group(group, |state| state.focus = None);
         }
-        if !oai.enabled || !config.enabled || !config.groups.contains(&group) {
+        if !config.enabled || !config.groups.contains(&group) {
             return Ok(());
         }
         let deadline = Instant::now() + config.max_wait();
@@ -795,7 +813,7 @@ async fn consider(
             });
         if !capped
             && let Err(error) = consider_batch(
-                ctx, writer, mgr, group, &config, &mut seq, &turns, mentioned, summoned,
+                ctx, writer, mgr, group, base, &config, &mut seq, &turns, mentioned, summoned,
                 silent_for, &rhythm, focused,
             )
             .await
@@ -819,17 +837,17 @@ async fn consider(
 /// 判定模型与发言模型共用这一份解析——它们只是两个不同的模型名。
 async fn gate_endpoint(
     ctx: &Context,
-    mgr: &Arc<super::data::Manager>,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
     gate_model: &str,
 ) -> anyhow::Result<(String, String, String)> {
-    let (provider, model) = super::utils::split_provider(gate_model);
+    let (provider, model) = crate::plugins::oai::utils::split_provider(gate_model);
     let providers =
-        crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai").providers;
+        crate::plugins::get_config_or_default::<crate::plugins::oai::OaiConfig>(ctx, "oai").providers;
     let (base, key) = {
         let config = mgr.config.read().await;
         (config.api_base.clone(), config.api_key.clone())
     };
-    let Some((base, key)) = super::resolve_endpoint(&providers, &base, &key, provider.as_deref())
+    let Some((base, key)) = crate::plugins::oai::resolve_endpoint(&providers, &base, &key, provider.as_deref())
     else {
         anyhow::bail!(
             "未知供应商：{}（在 [oai.providers] 里配置）",
@@ -846,8 +864,9 @@ async fn gate_endpoint(
 async fn consider_batch(
     ctx: &Context,
     writer: &LockedWriter,
-    mgr: &Arc<super::data::Manager>,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
     group: i64,
+    base: &Path,
     config: &AmbientConfig,
     seq: &mut u64,
     turns: &[Turn],
@@ -860,8 +879,7 @@ async fn consider_batch(
     if turns.is_empty() {
         return Ok(());
     }
-    let data_dir = mgr.path.parent().unwrap_or(&mgr.path);
-    let persona = tokio::fs::read_to_string(persona_path(data_dir))
+    let persona = tokio::fs::read_to_string(persona_path(base))
         .await
         .unwrap_or_else(|_| PERSONA.to_string());
     // 计价高峰时段：价格翻倍，但也不必整段不出声。要么彻底睡着（`pause`），要么
@@ -957,6 +975,7 @@ async fn consider_batch(
         writer,
         mgr,
         group,
+        base,
         config,
         &latest,
         Called::of(mentioned, summoned),
@@ -970,10 +989,9 @@ async fn consider_batch(
 
 /// 停用配置或群聊推进后，放弃尚未发送的内容，交回 worker 读取新上下文。
 fn current(ctx: &Context, group: i64, seq: u64) -> bool {
-    let config = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
+    let config = crate::plugins::get_config_or_default::<AmbientConfig>(ctx, "ambient");
     config.enabled
-        && config.ambient.enabled
-        && config.ambient.groups.contains(&group)
+        && config.groups.contains(&group)
         && window::with_group(group, |state| state.seq == seq)
 }
 
@@ -982,8 +1000,9 @@ fn current(ctx: &Context, group: i64, seq: u64) -> bool {
 async fn speak_up(
     ctx: &Context,
     writer: &LockedWriter,
-    mgr: &Arc<super::data::Manager>,
+    mgr: &Arc<crate::plugins::oai::data::Manager>,
     group: i64,
+    base: &Path,
     config: &AmbientConfig,
     turns: &[Turn],
     called: Called,
@@ -993,9 +1012,7 @@ async fn speak_up(
     // 这一句是睡着时的自主开口，用来计进高峰时段的每小时上限。
     doze: bool,
 ) -> anyhow::Result<()> {
-    let oai = crate::plugins::get_config_or_default::<super::OaiConfig>(ctx, "oai");
-    let data_dir = mgr.path.parent().unwrap_or(&mgr.path).to_path_buf();
-    let base = base_dir(&data_dir);
+    let oai = crate::plugins::get_config_or_default::<crate::plugins::oai::OaiConfig>(ctx, "oai");
     // 与判定看到的是同一批图：已转码成模型收得下的格式，GIF 表情包也不例外。
     let images = vision::usable_images(turns, config.context_images).await;
 
@@ -1005,8 +1022,8 @@ async fn speak_up(
         &api_base,
         &api_key,
         &reply_model,
-        &base,
-        &skill_dirs(&data_dir),
+        base,
+        &skill_dirs(base),
         persona,
         config,
         &oai.search,
@@ -1227,6 +1244,54 @@ fn plain_text(message: &Message) -> String {
         }
     }
     out.trim().to_string()
+}
+
+pub fn default_config() -> Value {
+    build_config(AmbientConfig::default())
+}
+
+/// Validate control edits against the plugin's actual configuration type.
+pub fn validate_config(value: &toml::Value) -> Result<(), String> {
+    <AmbientConfig as serde::Deserialize>::deserialize(value.clone())
+        .map(|_| ())
+        .map_err(|_| "配置类型不匹配（请检查数组元素、字段类型及整数范围）".to_string())
+}
+
+/// 启动：铺开人设与 skill，并确保模型接口那一份共享配置已就绪。
+pub fn init(_ctx: Context) -> BoxFuture<'static, Result<(), PluginError>> {
+    Box::pin(async move {
+        let dir = get_data_dir("ambient").await?;
+        if let Err(error) = setup(&dir).await {
+            warn!(target: LOG_TARGET, "群聊搭话资源初始化失败: {error}");
+        }
+        DATA_DIR.set(dir).ok();
+        // 接口地址、密钥与供应商表都归 oai 插件管（见 [oai.providers]）；它没启用时，
+        // 这里把管理器建起来，搭话只借它取默认接口与密钥，不碰房间那一摊。
+        if let Err(error) = crate::plugins::oai::ensure_manager().await {
+            warn!(target: LOG_TARGET, "模型接口配置初始化失败: {error}");
+        }
+        Ok(())
+    })
+}
+
+/// 流水线入口：记下群消息，事件照常往后传。
+///
+/// 注册在 `oai` 之后，所以走到这里的是没被 `oai` 的指令消费掉的群聊；
+/// 本插件自己不消费任何事件，只是旁观。
+pub fn handle(
+    ctx: Context,
+    writer: LockedWriter,
+) -> BoxFuture<'static, Result<Option<Context>, PluginError>> {
+    Box::pin(async move {
+        let (Some(base), Some(mgr)) = (
+            DATA_DIR.get().cloned(),
+            crate::plugins::oai::data::MANAGER.get().cloned(),
+        ) else {
+            return Ok(Some(ctx));
+        };
+        observe(&ctx, &writer, &mgr, &base).await;
+        Ok(Some(ctx))
+    })
 }
 
 #[cfg(test)]

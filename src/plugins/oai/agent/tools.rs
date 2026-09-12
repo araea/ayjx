@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 /// 本地工具：需要 shell 或文件系统就能完成的那些。
 const LOCAL: &[&str] = &["bash", "read", "write", "edit", "glob", "grep"];
 
-/// 聊天界面工具：只有接了 [`super::super::ambient::bridge::Bridge`] 时才存在。
+/// 聊天界面工具：只有接了 [`super::ChatBridge`] 时才存在。
 const CHAT: &[&str] = &[
     "satori_context",
     "satori_read",
@@ -358,7 +358,7 @@ async fn grep(args: &Value, run: &super::AgentRun<'_>) -> anyhow::Result<String>
 /// 把一次 `satori_*` 调用转发给聊天界面那一侧。
 ///
 /// 参数与语义和从前的 TS 扩展完全一致：工具名去掉前缀就是 op，参数原样交给
-/// [`super::super::ambient::bridge::Bridge::call`]，回执原样序列化给模型。
+/// [`super::ChatBridge::call`]，回执原样序列化给模型。
 async fn chat(
     name: &str,
     args: &Value,

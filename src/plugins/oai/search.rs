@@ -57,7 +57,7 @@ const KEYED_PROVIDERS: &[&str] = &["tavily", "brave", "serper", "searxng"];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct SearchConfig {
-    /// 内置 agent 房间的开关；默认关闭。群聊搭话另有 `[oai.ambient] search_enabled`，
+    /// 内置 agent 房间的开关；默认关闭。群聊搭话另有 `[ambient] search_enabled`，
     /// 两者彼此独立，各自管一个调用方。
     pub enabled: bool,
     /// 后端顺序：前面不可用或失败就顺延，`"auto"` 展开成「免密钥的两个 + 配好的密钥后端」。

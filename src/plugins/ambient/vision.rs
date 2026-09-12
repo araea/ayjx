@@ -81,7 +81,7 @@ pub(crate) async fn usable_images(turns: &[Turn], limit: usize) -> Vec<String> {
         let usable = match cached(url) {
             Some(hit) => hit,
             None => {
-                let data_url = super::super::logic::to_data_url(url).await;
+                let data_url = crate::plugins::oai::logic::to_data_url(url).await;
                 let usable = normalize(&data_url);
                 remember(url, usable.clone());
                 usable
