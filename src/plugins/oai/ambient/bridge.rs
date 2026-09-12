@@ -890,10 +890,17 @@ impl Session {
                 if let Some(id) = reply_to {
                     msg = msg.reply(id);
                 }
-                for part in parts {
+                for (index, part) in parts.iter().enumerate() {
                     msg = match part {
                         Part::Text { text } => msg.text(text),
-                        Part::At { user_id } => msg.at(user_id),
+                        Part::At { user_id } => {
+                            let msg = msg.at(user_id);
+                            if at_needs_gap(parts, index) {
+                                msg.text(" ")
+                            } else {
+                                msg
+                            }
+                        }
                         Part::Face { id } => msg.face(id),
                         Part::Image { source } => {
                             msg.image(self.source(source, "image.png").await?)
@@ -995,10 +1002,17 @@ impl Session {
             if index == 0 && let Some(id) = reply_to {
                 message = message.reply(id);
             }
-            for part in row {
+            for (position, part) in row.iter().enumerate() {
                 // [`split_send`] 只会放行 At/Face/Text，别的段不进这条路径。
                 message = match part {
-                    Part::At { user_id } => message.at(user_id),
+                    Part::At { user_id } => {
+                        let message = message.at(user_id);
+                        if at_needs_gap(row, position) {
+                            message.text(" ")
+                        } else {
+                            message
+                        }
+                    }
                     Part::Face { id } => message.face(id),
                     Part::Text { text } => message.text(text),
                     _ => message,
@@ -1154,6 +1168,21 @@ impl Session {
     }
 }
 
+/// `@` 后面紧跟文字时要不要垫一个空格。
+///
+/// `at` 段身上只有 QQ 号，那个空格谁都不带：模型按 skill 写成
+/// `[{at:…},{"text":"那你说 是谁"}]`，发出去在群里就是「@某人那你说 是谁」，黏成一块。
+/// 只认「紧挨着的下一个元素是文字、而文字自己没留白」这一种；`@` 收尾、`@` 后面
+/// 接表情或图片都不动——那些本来就该贴着。
+fn at_needs_gap(parts: &[Part], index: usize) -> bool {
+    matches!(parts.get(index), Some(Part::At { .. }))
+        && matches!(
+            parts.get(index + 1),
+            Some(Part::Text { text })
+                if !text.is_empty() && !text.starts_with(char::is_whitespace)
+        )
+}
+
 /// 一条 `send` 要不要按换气切成几条；要切就给出每一条的元素表。
 ///
 /// 只有「恰好一段文字、后面没别的段」时才切：文字前面挂着的 `@`、表情跟着
@@ -1252,6 +1281,46 @@ mod tests {
         // 只丢掉换气处的空格，一个字都不许丢。
         let squash = |text: &str| text.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         assert_eq!(squash(&text_rows(&rows).concat()), squash(&long_line()));
+    }
+
+    /// `@` 和紧跟着的话之间要有一个空格：QQ 的 at 段自己不带，模型写的也是紧挨着的。
+    #[test]
+    fn an_at_glued_to_text_gets_one_gap() {
+        let user_id = "114514";
+        let needs = |parts: &[Part]| at_needs_gap(parts, 0);
+        // 紧挨着 → 垫一个。
+        assert!(needs(&[
+            Part::At { user_id: user_id.into() },
+            Part::Text { text: "那你说 是谁".into() },
+        ]));
+        // 模型自己留了空格、或是换行，都不重复垫。
+        assert!(!needs(&[
+            Part::At { user_id: user_id.into() },
+            Part::Text { text: " 那你说".into() },
+        ]));
+        assert!(!needs(&[
+            Part::At { user_id: user_id.into() },
+            Part::Text { text: "\n那你说".into() },
+        ]));
+        // `@` 收尾、后面接表情或图片：本来就该贴着，不动。
+        assert!(!needs(&[Part::At { user_id: user_id.into() }]));
+        assert!(!needs(&[
+            Part::At { user_id: user_id.into() },
+            Part::Face { id: "178".into() },
+        ]));
+        // 切开的长句也是 at 打头，第一条照样要垫。
+        let rows = split_send(
+            &[
+                Part::At { user_id: user_id.into() },
+                Part::Text { text: long_line() },
+            ],
+            3,
+            14,
+        )
+        .expect("该切");
+        assert!(at_needs_gap(&rows[0], 0), "{rows:?}");
+        // 后面几条是光秃秃的文字，没有 at 可垫。
+        assert!(!at_needs_gap(&rows[1], 0), "{rows:?}");
     }
 
     /// 文字后面还挂着别的段，或者压根不止一段文字：整条发，不拿断句去猜段落归属。

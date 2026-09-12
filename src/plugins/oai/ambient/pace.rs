@@ -190,7 +190,15 @@ fn build_message(body: &str) -> (Message, usize) {
         message = match &caps[1] {
             "at" if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() => {
                 chars += 4;
-                message.at(value).text(" ")
+                // QQ 的 at 段不带空格，模型写没写这一下不保证：缺了才补一个，
+                // 已经留了空白的、后面没话的，都不再添。
+                let rest = &body[cursor..];
+                let message = message.at(value);
+                if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                    message
+                } else {
+                    message.text(" ")
+                }
             }
             "face" if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() => {
                 message.face(value)
@@ -302,7 +310,8 @@ mod tests {
 
     #[test]
     fn markup_becomes_segments_and_reply_marks_the_quote() {
-        let items = say("[reply][at:114514] 第三步缺了个前提 [face:178]");
+        // 模型没在 `@` 后面留空格，这里替它补上——at 段自己不带那一下。
+        let items = say("[reply][at:114514]第三步缺了个前提 [face:178]");
         assert_eq!(items.len(), 1);
         assert!(items[0].reply);
         let kinds: Vec<&str> = items[0]
@@ -312,7 +321,21 @@ mod tests {
             .map(|segment| segment.type_.as_str())
             .collect();
         assert_eq!(kinds, ["at", "text", "text", "face"]);
+        assert_eq!(text_of(&items[0]), " 第三步缺了个前提 ");
         assert!(items[0].chars > 4);
+    }
+
+    /// `@` 后面该有几个空格就是几个：模型自己留了就不再添，后面没话也不补。
+    #[test]
+    fn the_gap_after_an_at_is_never_doubled() {
+        let items = say("[at:114514] 那你说");
+        assert_eq!(items[0].message.0.len(), 2);
+        assert_eq!(text_of(&items[0]), " 那你说");
+
+        // 一条光秃秃的 `@` 不拖一个尾空格。
+        let items = say("[at:114514]");
+        assert_eq!(items[0].message.0.len(), 1);
+        assert_eq!(items[0].message.0[0].type_, "at");
     }
 
     /// 带 `[at:…]` 的长句照样要换气：护住标记，标记之外照切。
