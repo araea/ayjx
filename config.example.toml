@@ -37,6 +37,44 @@ show_trace_footer = true
 # 其余房间仍走聊天补全。站点上新图像模型时改这里即可。
 image_models = ["gpt-image-2.5"]
 
+# 走 Suno 文生歌的房间模型关键字。命中的房间把提示词交给中转站的 /suno/* 接口，
+# 一次出两个版本，封面与音频一起发进群。提示词里可以带：
+#   --标题 名字 / --风格 folk,acoustic / --版本 chirp-v5 / --纯音乐
+# 正文写成 [Verse] / [Chorus] 那样的歌词体裁时按自定义模式提交（正文就是歌词），
+# 否则按灵感模式提交（正文是创作描述，歌词由 Suno 自己写）。
+music_models = ["suno"]
+# Suno 版本（提交时的 mv）。站点接入更新版本时改这里；实测 chirp-v5 拿到的是最新一档。
+music_version = "chirp-v5"
+# 生成的歌怎么发进群：file（群文件，可下载可保存）、voice（语音气泡）、
+# both（先发群文件再补一条语音）。默认 both。
+music_send = "both"
+
+# 走 OpenAI 视频任务接口（POST {base}/video/generations）的房间模型关键字。
+# 房间系统提示词当风格前缀，用户那句话接在后面；可带 --秒数 8 / --竖屏 / --横屏。
+# 默认预设用的是 veo3.1-fast（自带同步音效、出片约一分钟、一次约 $1.2）。
+# 别的模型用 `房间%模型` 换：veo3.1-pro、wan3.0-video-prime、sora-2、kling-video-v3……
+# 注意各家渠道的分组、单次价格与所需参数不一样，换之前先确认能调通。
+video_models = [
+    "veo3.1",
+    "veo3.",
+    "sora-2",
+    "doubao-seedance",
+    "kling-video",
+    "wan3.0-video",
+    "wan2.6-t2v",
+    "viduq3",
+    "grok-video",
+    "MiniMax-Hailuo",
+    "pixverse-video",
+    "luma_video",
+]
+# 没写 --秒数 时的默认时长，1–30 秒。视频按秒计费，短一点更省。
+# 注意 veo3.1 那一档的时长由上游定（实测写 5 也按 8 秒出），这项对它能被采纳的模型才生效。
+video_seconds = 5
+# 音乐、视频这类异步任务房间的等待上限（秒）。它们出成品常常要几分钟，
+# 所以另外给一个比 request_timeout_seconds 长的预算。
+media_timeout_seconds = 900
+
 # 供应商表：房间模型或判定模型写 `供应商/模型` 时按名字取这里的接口与密钥，
 # 例如 `##助手 deepseek/deepseek-flash`。不带前缀的仍走 oai 自己的默认接口；
 # 名为 apilio 的供应商即使不在这里配置，也始终回退到默认接口，无需重复填写。

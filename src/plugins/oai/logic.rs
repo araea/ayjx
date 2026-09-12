@@ -396,12 +396,21 @@ async fn chat(
     //
     // 中途不发任何「还在处理」提示：等待本身是隐式的，一条进度播报换不来更快的
     // 回复，只会在群里插进一段与上下文无关的噪音。
+    // 图像 / 音乐 / 视频房间各自走专用接口，其余房间继续走聊天补全 / 内置 agent。
+    // 内置 agent 房间的模型是交给执行层解析的，不能拿它去撞中转站的这些模型关键字。
+    let draw = !use_pi && super::images::is_images_model(&chat_model, &oai.image_models);
+    let music = !use_pi && super::music::is_music_model(&chat_model, &oai.music_models);
+    let video = !use_pi && super::video::is_video_model(&chat_model, &oai.video_models);
+    // 视频与一首歌都是异步任务，普通的 5 分钟预算不够它们出成品。
+    let media_room = music || video;
+
     let mut outcome = {
-        // 图像模型走专用绘图接口，其余房间继续走聊天补全 / 内置 agent。
-        // 内置 agent 房间的模型是交给执行层解析的，不能拿它去撞中转站的绘图模型关键字。
-        let draw = !use_pi && super::images::is_images_model(&chat_model, &oai.image_models);
         let work = async {
-            if draw {
+            if music {
+                super::music::generate_reply(&api_base, &api_key, &agent, &hist, &oai).await
+            } else if video {
+                super::video::generate_reply(&api_base, &api_key, &agent, &hist, &oai).await
+            } else if draw {
                 let mut draw_agent = agent.clone();
                 draw_agent.model = chat_model.clone();
                 super::images::generate_reply(&base, &api_key, &draw_agent, &hist).await
@@ -420,7 +429,11 @@ async fn chat(
             }
         };
         let mut work = std::pin::pin!(work);
-        let mut budget = std::pin::pin!(tokio::time::sleep(oai.request_timeout()));
+        let mut budget = std::pin::pin!(tokio::time::sleep(if media_room {
+            oai.media_timeout()
+        } else {
+            oai.request_timeout()
+        }));
 
         let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(200));
         loop {
@@ -463,13 +476,18 @@ async fn chat(
 
     match outcome {
         None => {
+            let budget = if media_room {
+                oai.media_timeout()
+            } else {
+                oai.request_timeout()
+            };
             reply_text(
                 ctx,
                 writer,
                 &event,
                 format!(
                     "⏳ 请求超时：模型响应超过 {} 秒，已强制停止。",
-                    oai.request_timeout().as_secs()
+                    budget.as_secs()
                 ),
             )
             .await;
@@ -538,6 +556,7 @@ async fn chat(
 
             // 一两句话没必要走一次浏览器截图：文本更快，也方便直接复制。
             let plain = cmd.text_mode
+                || reply_data.plain
                 || (image_urls.is_empty()
                     && reply_data.sources.is_empty()
                     && is_plain_enough(&content, oai.plain_text_max_chars()));
@@ -597,6 +616,31 @@ async fn chat(
                 )
                 .await;
             }
+
+            // 音乐、视频这类成品由插件附在正文外，按段发出去。一条媒体消息里的片段
+            // 一起发：失败只影响这一条，已经发出去的封面/文件不受牵连。
+            for message in reply_data.media {
+                let mut msg = Message::new().reply(event.message_id());
+                for segment in message.segments {
+                    msg = match segment {
+                        Media::Image { url } => msg.image(url),
+                        Media::Audio { url } => msg.record(url),
+                        Media::Video { url } => msg.video(url),
+                        Media::File { url, name } => msg.file(url, Some(name)),
+                    };
+                }
+                if let Err(error) = send_msg(
+                    ctx,
+                    writer.clone(),
+                    event.group_id(),
+                    Some(event.user_id()),
+                    msg,
+                )
+                .await
+                {
+                    warn!(target: "Plugin/OAI", "媒体消息发送失败: {error}");
+                }
+            }
         }
     }
 
@@ -654,6 +698,31 @@ pub(super) struct Reply {
     /// 超出页脚保留上限、只计数的调用次数。
     pub(super) trace_overflow: usize,
     pub(super) model: Option<String>,
+    /// 这一轮只发纯文本，不渲染卡片。
+    ///
+    /// 音乐房间的正文是歌名、标签加几行歌词，本来就该能选中复制；渲染成卡片图反而
+    /// 只剩一张图。视频房间的正文只有一行，走 `is_plain_enough` 也是纯文本，这里写
+    /// 死只是省掉那一次判断。
+    pub(super) plain: bool,
+    /// 正文之外要单独发出去的媒体（音乐、视频、封面）。
+    ///
+    /// 图片走正文里的 markdown 链接（`extract_image_urls`）、视频走
+    /// `[download video](url)`，那两条是模型能自己写的；音乐这类「房间产出的成品」
+    /// 模型根本碰不到，只能由插件在正文外附上，于是有了这个字段。
+    pub(super) media: Vec<MediaMessage>,
+}
+
+/// 一条媒体消息里的单个片段。
+pub(super) enum Media {
+    Image { url: String },
+    Audio { url: String },
+    Video { url: String },
+    File { url: String, name: String },
+}
+
+/// 一条要单独发出去的媒体消息：封面和音频可以拼在同一条里，省掉一次发送。
+pub(super) struct MediaMessage {
+    pub(super) segments: Vec<Media>,
 }
 
 /// 内置 agent 房间走带工具的多轮循环，普通房间走单轮 Chat Completions。
@@ -703,6 +772,8 @@ async fn respond(
             } else {
                 agent.model.clone()
             }),
+            plain: false,
+            media: Vec::new(),
         });
     }
     let msgs = build_chat_messages(agent, hist).await;
@@ -712,6 +783,8 @@ async fn respond(
         trace: Vec::new(),
         trace_overflow: 0,
         model: Some(chat_model.to_string()),
+        plain: false,
+        media: Vec::new(),
     })
 }
 

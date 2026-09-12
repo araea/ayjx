@@ -15,6 +15,7 @@ pub mod images;
 pub(crate) mod llm;
 pub mod logic;
 pub mod mj;
+pub mod music;
 pub mod parser;
 pub(crate) mod agent;
 pub(crate) mod presets;
@@ -22,6 +23,7 @@ pub mod render;
 pub(crate) mod search;
 pub mod types;
 pub mod utils;
+pub mod video;
 
 use data::MANAGER;
 
@@ -87,6 +89,18 @@ pub(crate) struct OaiConfig {
     /// 走 `/v1/images/generations` 的图像模型关键字（不区分大小写、子串匹配）。
     /// 命中的房间把提示词交给专用图像接口，其余房间仍走聊天补全。
     pub(crate) image_models: Vec<String>,
+    /// 走 Suno 文生歌的房间模型关键字（同样是不区分大小写的子串匹配）。
+    pub(crate) music_models: Vec<String>,
+    /// Suno 版本（提交时的 `mv` 字段）。站点接入更新的版本时改这里。
+    pub(crate) music_version: String,
+    /// 生成的歌怎么发进群：`file`（群文件）、`voice`（语音气泡）、`both`（先文件再语音）。
+    pub(crate) music_send: String,
+    /// 走 OpenAI 视频任务接口的房间模型关键字。
+    pub(crate) video_models: Vec<String>,
+    /// 没写 `--秒数` 时的默认时长。视频按秒计费，短一点更省。
+    pub(crate) video_seconds: u32,
+    /// 音乐、视频这类异步任务房间的等待上限；它们出成品常常要几分钟。
+    pub(crate) media_timeout_seconds: u64,
     /// 可选供应商表：模型写 `供应商/模型` 时按名字取这里的接口与密钥。
     /// 不配也不影响既有房间——不带前缀的仍走 `oai` 默认接口。
     pub(crate) providers: HashMap<String, ProviderConfig>,
@@ -109,6 +123,18 @@ impl Default for OaiConfig {
                 .iter()
                 .map(|keyword| (*keyword).to_string())
                 .collect(),
+            music_models: music::DEFAULT_MUSIC_MODELS
+                .iter()
+                .map(|keyword| (*keyword).to_string())
+                .collect(),
+            music_version: music::DEFAULT_VERSION.to_string(),
+            music_send: "both".to_string(),
+            video_models: video::DEFAULT_VIDEO_MODELS
+                .iter()
+                .map(|keyword| (*keyword).to_string())
+                .collect(),
+            video_seconds: 5,
+            media_timeout_seconds: 900,
             providers: HashMap::new(),
             search: search::SearchConfig::default(),
         }
@@ -135,6 +161,33 @@ impl OaiConfig {
 
     pub(crate) fn plain_text_max_chars(&self) -> usize {
         self.plain_text_max_chars
+    }
+
+    /// 音乐、视频这类异步任务的等待上限；太短会白等一场，太长又占着会话不放。
+    pub(crate) fn media_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.media_timeout_seconds.clamp(60, 3_600))
+    }
+
+    /// 提交 Suno 时用的版本；留空回落到内置默认值。
+    pub(crate) fn music_version(&self) -> String {
+        let version = self.music_version.trim();
+        if version.is_empty() {
+            music::DEFAULT_VERSION.to_string()
+        } else {
+            version.to_string()
+        }
+    }
+
+    pub(crate) fn music_send(&self) -> music::SendMode {
+        music::SendMode::parse(&self.music_send)
+    }
+
+    /// 视频默认时长：只收 1..=30 秒，越界或为 0 时回到内置默认值。
+    pub(crate) fn video_seconds(&self) -> u32 {
+        match self.video_seconds {
+            1..=30 => self.video_seconds,
+            _ => 5,
+        }
     }
 
     pub(crate) fn show_trace_footer(&self) -> bool {

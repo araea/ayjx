@@ -186,6 +186,8 @@ pub(super) async fn generate_reply(
         trace: Vec::new(),
         trace_overflow: 0,
         model: Some(generated.model.unwrap_or_else(|| agent.model.clone())),
+        plain: false,
+        media: Vec::new(),
     })
 }
 
