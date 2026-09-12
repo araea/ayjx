@@ -121,6 +121,16 @@ register_plugins!(
         ],
         on_connected: Some(stats::on_connected)
     },
+    portrait {
+        display_name: "用户画像",
+        section: "insight",
+        summary: "读群成员的历史发言生成一份图文画像报告；不带参数查自己，@ 或报 QQ 号查别人",
+        commands: cmds![
+            ("画像 / 用户画像 / 我的画像", "查看自己的画像报告"),
+            ("画像 @某人", "查看对方的画像报告"),
+            ("画像 <QQ号>", "按 QQ 号查看"),
+        ]
+    },
     gif {
         display_name: "GIF 工具箱",
         section: "message",

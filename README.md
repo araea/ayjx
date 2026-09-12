@@ -45,6 +45,7 @@ Termux 下 `./bot start` 会取得唤醒锁。需要用 tmux 时执行 `./bot se
 - [Satori 接入](docs/SATORI.md)
 - [内置 Agent 房间](docs/agent.md)
 - [群聊搭话](docs/ambient.md)
+- [用户画像](docs/portrait.md)
 - [架构说明](docs/ARCHITECTURE.md)
 
 ```sh

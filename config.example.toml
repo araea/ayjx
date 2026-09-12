@@ -218,6 +218,29 @@ enabled = true
 white = []
 black = []
 
+[portrait]
+enabled = true
+# 分析用的模型，写「供应商/模型」；供应商取自 [oai.providers]，不带前缀走 oai 默认接口。
+model = "deepseek/deepseek-flash"
+# 思考强度：off / minimal / low / medium / high，留空交给接口默认。
+thinking = "low"
+# 只统计最近多少天，0 表示全部留存记录。
+days = 0
+# 交给模型的发言样本条数，以及一次最多读多少条原始记录。
+max_samples = 120
+max_scan = 8000
+# 报告主题：auto 按北京时间在日读与夜读之间切换，也可固定 light / dark。
+theme = "auto"
+# 出图倍率（1—4）。倍率越高越清晰，图也越大。
+image_scale = 3.0
+# 同一个目标两次生成之间的最短间隔秒数。
+cooldown_seconds = 180
+
+# 语义同 [stats.channel]。
+[portrait.channel]
+white = []
+black = []
+
 [webshot]
 enabled = true
 # 命中这些域名的链接不截图。按域名后缀匹配，example.com 同时覆盖 a.example.com。
