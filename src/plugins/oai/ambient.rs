@@ -98,7 +98,8 @@ pub(crate) struct AmbientConfig {
     /// 判定用的浓缩人设画像（见 [`GATE_PERSONA`]）。判定只需知道对什么感兴趣、
     /// 避开什么、怎么接话，不需要完整写作人设；留空则回退用完整人设（更贵）。
     pub gate_persona: String,
-    /// 发言模型，交给 pi 的 `provider/model`；默认 DeepSeek 官方 `deepseek-flash`。
+    /// 发言模型，写成 `供应商/模型`。默认走 oai 默认接口的 `claude-opus-4-8`：
+    /// 判定便宜、发言金贵——发言是真正露脸的那一句，值一个更像人的模型。
     pub reply_model: String,
     /// 发言模型的思考强度（off/minimal/low/medium/high）。
     pub thinking: String,
@@ -194,7 +195,7 @@ impl Default for AmbientConfig {
             groups: Vec::new(),
             gate_model: "deepseek/deepseek-flash".to_string(),
             gate_persona: GATE_PERSONA.to_string(),
-            reply_model: "deepseek/deepseek-flash".to_string(),
+            reply_model: "apilio/claude-opus-4-8".to_string(),
             thinking: "low".to_string(),
             tools: "read,write,bash".to_string(),
             score_threshold: 50,
@@ -1221,7 +1222,7 @@ mod tests {
     fn default_models_match_but_explicit_overrides_are_preserved() {
         let config: AmbientConfig = toml::from_str("").unwrap();
         assert_eq!(config.gate_model, "deepseek/deepseek-flash");
-        assert_eq!(config.reply_model, "deepseek/deepseek-flash");
+        assert_eq!(config.reply_model, "apilio/claude-opus-4-8");
         // 判定人设默认是浓缩画像，比完整人设便宜得多，且不会被空值覆盖。
         assert!(!config.gate_persona.trim().is_empty());
         let custom: AmbientConfig =

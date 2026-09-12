@@ -116,7 +116,9 @@ gate_model = "deepseek/deepseek-flash"
 # 想退回用完整写作人设（最贵，不推荐）就把它设为空字符串。
 # gate_persona = ""
 # 发言模型，同样写 `供应商/模型`；思考强度 off/minimal/low/medium/high。
-reply_model = "deepseek/deepseek-flash"
+# 判定便宜、发言金贵——发言是真正露脸的那一句，默认挑更像人的模型：
+# 走 oai 默认接口的 claude-opus-4-8（apilio 即使不写在 [oai.providers] 里也回退到默认接口）。
+reply_model = "apilio/claude-opus-4-8"
 thinking = "low"
 # 发言时额外开放的本地工具白名单（逗号分隔，可写 bash/read/write/edit/glob/grep）。
 # read/write/bash 让它能在本轮工作目录里整理材料再当文件发出去。
